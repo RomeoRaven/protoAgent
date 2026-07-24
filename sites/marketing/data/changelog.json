@@ -1,5 +1,16 @@
 [
   {
+    "version": "v0.114.0",
+    "date": "2026-07-24",
+    "changes": [
+      "One bad work folder no longer takes away every filesystem tool (#2251).",
+      "The prompt viewer shows where your context budget goes (#2243, P2).",
+      "See the exact system prompt for any turn (#2243, P1).",
+      "The craft plugin now says what it is (#2247).",
+      "Spec: system prompt viewer (#2243)."
+    ]
+  },
+  {
     "version": "v0.113.0",
     "date": "2026-07-24",
     "changes": [

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.114.0] - 2026-07-24
+
 ### Fixed
 - **One bad work folder no longer takes away every filesystem tool (#2251).** Saving a work
   folder that wasn't an existing absolute directory silently unbound the whole fenced fs
@@ -69,7 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exists), hash-deduped stable blob + per-call dynamic tail, task_id-keyed store with
   in-write retention, View-prompt dialog + /prompt command, and per-section context
   budgets in P2. All three open questions from the issue resolved.
-
 
 ## [0.113.0] - 2026-07-24
 
