@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- **Spec: system prompt viewer (#2243).** `docs/plans/system-prompt-viewer.md` — the
+  researched plan for per-turn exact-prompt visibility: capture-at-call-time in a
+  middleware slot directly after PromptCache (the one seam where the final request
+  exists), hash-deduped stable blob + per-call dynamic tail, task_id-keyed store with
+  in-write retention, View-prompt dialog + /prompt command, and per-section context
+  budgets in P2. All three open questions from the issue resolved.
+
+
 ## [0.113.0] - 2026-07-24
 
 ### Docs
