@@ -38,6 +38,7 @@ import {
   MEMORY_INJECTION_DETAILS,
   MEMORY_SESSIONS,
   MEMORY_SESSION_RENDERED,
+  PROMPT_CALL,
   SECRETS_STATUS,
   SUBAGENTS,
   TELEMETRY_INSIGHTS,
@@ -329,6 +330,10 @@ function handleApiGet(pathname, fleet = FLEET) {
       return ACTIVITY_HISTORY;
     case "/api/inbox":
       return INBOX_ITEMS;
+    case "/api/prompts/last":
+      return { enabled: true, call: PROMPT_CALL };
+    case "/api/prompts/task-e2e-1": // the canned A2A turn's taskId
+      return { enabled: true, calls: [PROMPT_CALL] };
     case "/api/telemetry/summary":
       return { enabled: true, summary: TELEMETRY_SUMMARY };
     case "/api/telemetry/recent":

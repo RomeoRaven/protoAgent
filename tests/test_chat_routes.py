@@ -245,6 +245,26 @@ def test_delete_session_harvest_is_opt_in(monkeypatch):
     ]
 
 
+def test_delete_session_purges_prompt_snapshots(monkeypatch):
+    # Prompt snapshots are conversation-scoped (#2243): deleting a chat purges
+    # its captured prompts (other sessions' rows untouched).
+    import operator_api.chat_routes as cr
+
+    from observability.prompt_snapshots import prompt_snapshots
+
+    async def _fake_retire(thread_id, *, harvest=None, cascade=True):
+        return None
+
+    monkeypatch.setattr(cr, "_retire_thread", _fake_retire)
+    prompt_snapshots().record(task_id="t1", session_id="s1", stable_text="P")
+    prompt_snapshots().record(task_id="t2", session_id="s2", stable_text="P")
+
+    c = _client(monkeypatch)
+    assert c.delete("/api/chat/sessions/s1").json()["deleted"] is True
+    assert prompt_snapshots().last_for_session("s1") is None
+    assert prompt_snapshots().last_for_session("s2") is not None
+
+
 def test_compact_session_route(monkeypatch):
     # The route is a thin pass-through to server.chat.compact_session — forwards the
     # path session_id and returns the compaction result dict verbatim. /compact is

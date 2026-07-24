@@ -75,6 +75,16 @@ def _build_middleware(config: LangGraphConfig, knowledge_store=None, skills_inde
         )
     )
 
+    # Prompt snapshot capture (#2243) — records the EXACT system prompt each
+    # model call received. DIRECTLY after PromptCache (the ordering IS the
+    # correctness: it must see the final assembled system message, and nothing
+    # downstream mutates the prompt). Best-effort; a capture failure never
+    # touches the turn.
+    if config.prompt_capture_enabled:
+        from graph.middleware.prompt_capture import PromptCaptureMiddleware
+
+        middleware.append(PromptCaptureMiddleware(retention_days=config.prompt_capture_retention_days))
+
     # Fleet tracing: stamp the active Langfuse trace context onto each gateway
     # LLM call (extra_body.metadata existing_trace_id/parent_observation_id) so
     # the gateway's own Langfuse callback lands its generations in OUR trace.

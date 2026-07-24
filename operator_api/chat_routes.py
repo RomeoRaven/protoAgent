@@ -134,6 +134,14 @@ def register_chat_routes(app, ui: str) -> None:
                 await asyncio.to_thread(store.delete_by_namespace, f"attach:{session_id}")
             except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
                 log.warning("[chat] attachment cleanup failed for %s: %s", session_id, exc)
+        # Prompt snapshots are conversation-scoped forensics (#2243) — purge them
+        # here so a deleted chat's prompts never outlive the conversation.
+        try:
+            from observability.prompt_snapshots import prompt_snapshots
+
+            await asyncio.to_thread(prompt_snapshots().purge_session, session_id)
+        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+            log.warning("[chat] prompt-snapshot cleanup failed for %s: %s", session_id, exc)
         return {"deleted": True, "harvested": chunk_id is not None}
 
     @app.post("/api/chat/sessions/{session_id}/compact")

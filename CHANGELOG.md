@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **See the exact system prompt for any turn (#2243, P1).** Most agent systems hide the
+  prompt; protoAgent now captures what each model call ACTUALLY received. A new
+  `PromptCaptureMiddleware` (directly after PromptCache — the one seam where the final
+  request exists) snapshots the stable prefix hash-deduped + the volatile context tail
+  per call, with the call's real token usage, into an instance-scoped
+  `prompt-snapshots.db` with in-write retention (`prompts.capture` on by default,
+  `prompts.retention_days` = 30). Every assistant message grows a **View prompt** action
+  (per-call tabs, raw text, copy, usage), and a client-side **/prompt** command drops the
+  session's last captured prompt into the thread as an ephemeral note. Deleting a chat
+  purges its snapshots — prompts never outlive their conversation. Read surface:
+  `GET /api/prompts/{task_id}` + `GET /api/prompts/last`.
+
 ### Docs
 - **The craft plugin now says what it is (#2247).** Its README, module docstring, and the
   root README row all claimed four skills; there are six — `/due-diligence` and

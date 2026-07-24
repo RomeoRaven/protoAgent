@@ -31,6 +31,7 @@ import type {
   MemoryInjectionDetail,
   MemoryInjectionRow,
   MemorySessionDigest,
+  PromptCall,
   NodeRuntimePayload,
   PythonRuntimePayload,
   RuntimeStatus,
@@ -1038,6 +1039,21 @@ export const api = {
   // back marked `unavailable`.
   memoryInjectionDetail(id: number) {
     return request<MemoryInjectionDetail>(`/api/memory/injections/${id}`);
+  },
+
+  // Prompt snapshots (#2243): every captured model call of one turn, in call
+  // order — the "View prompt" dialog's payload. 404s when the task has none.
+  promptsForTask(taskId: string) {
+    return request<{ enabled: boolean; calls: PromptCall[] }>(
+      `/api/prompts/${encodeURIComponent(taskId)}`,
+    );
+  },
+  // The most recent captured call of one session (backs /prompt). `call` is
+  // null when nothing has been captured yet; `enabled:false` = capture off.
+  promptLast(sessionId = "") {
+    const q = new URLSearchParams();
+    if (sessionId) q.set("session_id", sessionId);
+    return request<{ enabled: boolean; call: PromptCall | null }>(`/api/prompts/last?${q}`);
   },
 
   // Chat attachment — extract + TIER a dropped file (FormData: `file` + `session_id`).
