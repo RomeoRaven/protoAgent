@@ -224,6 +224,8 @@ FROM_YAML_EXAMPLE_FIELDS = {
     "telemetry_db_path": "/sandbox/telemetry.db",
     "telemetry_enabled": True,
     "telemetry_retention_days": 90,
+    "prompt_capture_enabled": True,
+    "prompt_capture_retention_days": 30,
     "inbox_retention_days": 90,
     "activity_retention_days": 90,
     "temperature": 0.2,

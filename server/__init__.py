@@ -828,6 +828,12 @@ def _main():
 
     register_injection_routes(fastapi_app)
 
+    # System-prompt snapshots (#2243) — /api/prompts/*: the exact prompt any
+    # captured model call received, behind the console's "View prompt".
+    from operator_api.prompt_routes import register_prompt_routes
+
+    register_prompt_routes(fastapi_app)
+
     # Live config / SOUL editing, model probe/test, setup wizard, and
     # schema-driven settings. Extracted to operator_api/config_routes.py
     # (ADR 0023 phase 3).

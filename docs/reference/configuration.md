@@ -279,6 +279,27 @@ telemetry:
 | `enabled` | `true` | Write a per-turn row at terminal time. `false` → no store; endpoints return `{enabled:false}`. |
 | `db_path` | `/sandbox/telemetry.db` | SQLite path; `/sandbox`→`~/.protoagent` fallback, instance-scoped (ADR 0004). |
 
+## `prompts`
+
+Per-call system-prompt snapshots (#2243) — the persistence behind the console's
+**View prompt** message action and the `/prompt` chat command: the EXACT prompt every
+model call received (the stable prefix hash-deduped, the volatile context tail per
+call), plus that call's real token usage. Instance-scoped SQLite
+(`prompt-snapshots.db`), trimmed in-write — no maintenance loop. Deleting a chat purges
+its snapshots. Read surface: `GET /api/prompts/{task_id}` + `GET /api/prompts/last`
+(operator `/api` only; both return `{enabled:false}` when capture is off).
+
+```yaml
+prompts:
+  capture: true                 # one hashed blob + a small tail per model call
+  retention_days: 30
+```
+
+| Key | Default | What |
+|---|---|---|
+| `capture` | `true` | Snapshot each model call's final system prompt. `false` → nothing recorded; the viewer reports capture disabled. |
+| `retention_days` | `30` | Prune snapshots older than this on each new capture (`0` = keep forever; a 5000-row cap also applies). |
+
 ## `filesystem`
 
 Fenced multi-project filesystem toolset ([ADR 0007](../adr/0007-directory-aware-operator-agent.md)) — a generic primitive that gives the agent read/write/list/search + fenced command execution over a registry of project directories. It is **ON by default**, fenced to a default `workspace` dir when no explicit `projects` are set (override with `PROTOAGENT_WORKSPACE`). The capability a forked operator (e.g. "Roxy") composes into a multi-project manager — see the [operator-fork guide](../guides/operator-fork.md).

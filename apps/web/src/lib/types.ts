@@ -897,6 +897,24 @@ export type MemoryInjectionDetail = {
   approx_tokens: number;
 };
 
+// One captured model call (GET /api/prompts/*, #2243): the EXACT system prompt
+// the call received — `system.stable` (the turn-stable prefix) + `system.context`
+// (the volatile per-call tail); their concatenation is byte-for-byte what the
+// model got — plus the call's real token usage.
+export type PromptCallUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+};
+export type PromptCall = {
+  call_index: number;
+  ts: string;
+  model: string;
+  system: { stable: string; context: string };
+  usage: PromptCallUsage;
+};
+
 // Delegate registry (ADR 0025) — the agents & endpoints the agent can talk to.
 export type DelegateFieldSpec = {
   key: string;

@@ -676,6 +676,30 @@ FIELDS: list[Field] = [
         restart=True,
         scope="host",
     ),
+    # ── Prompt snapshots (#2243) ──────────────────────────────────────────────
+    Field(
+        "prompts.capture",
+        "prompt_capture_enabled",
+        "Capture system prompts",
+        "bool",
+        "Telemetry",
+        "Snapshot the exact system prompt every model call receives, so any turn's prompt "
+        "can be inspected via 'View prompt' or /prompt. Stays on this machine. Off = "
+        "nothing is recorded and the viewer reports capture disabled.",
+        restart=True,
+        scope="host",
+    ),
+    Field(
+        "prompts.retention_days",
+        "prompt_capture_retention_days",
+        "Prompt retention (days)",
+        "number",
+        "Telemetry",
+        "Auto-prune captured prompts older than this on each new capture (0 = keep forever).",
+        minimum=0,
+        restart=True,
+        scope="host",
+    ),
     # ── Media output store (#1929) ────────────────────────────────────────────
     Field(
         "media.public",

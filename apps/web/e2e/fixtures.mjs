@@ -877,6 +877,20 @@ export function buildFrames({ rpcId, contextId, taskId, prompt }) {
   return frames;
 }
 
+// One captured model call (#2243) — shape mirrors /api/prompts/*. Served for
+// the canned turn (taskId "task-e2e-1") so the "View prompt" dialog and the
+// /prompt note render deterministic content.
+export const PROMPT_CALL = {
+  call_index: 0,
+  ts: "2026-07-24T10:00:00+00:00",
+  model: "claude-opus-4-8",
+  system: {
+    stable: "SOUL: mock stable prefix — you are the e2e console agent.\n\n# Operating model\nBe deterministic.",
+    context: "\n\n# Context\n\n<injected_memory>\nThe operator prefers dark mode.\n</injected_memory>",
+  },
+  usage: { input_tokens: 1200, output_tokens: 80, cache_read_tokens: 1000, cache_creation_tokens: 0 },
+};
+
 // Telemetry fixtures (ADR 0006 Slice 3) — shape mirrors /api/telemetry/*.
 export const TELEMETRY_SUMMARY = {
   turns: 3,

@@ -15,6 +15,7 @@ import { chatStore, DEFAULT_REASONING_EFFORT, REASONING_EFFORTS } from "./chat-s
 import { exportChatToFile } from "./exportChat";
 import { buildGoalSetBody, goalFormPayload } from "./goalForm";
 import { modelChoices, modelFormPayload, modelPickerData, resolveModelArg, type ModelPickerData } from "./modelForm";
+import { promptNoteMarkdown } from "./promptView";
 
 // Local id for the system notes /compact posts (the command manages messages
 // directly, like /clear, so it needs to own the ids it can later replace).
@@ -106,6 +107,42 @@ registerSlashCommand({
       .catch((e) => {
         chatStore.updateMessages(sessionId, [...withoutPending(), note(`Aside failed — ${errMsg(e)}`, "danger")]);
       });
+    return true;
+  },
+});
+
+registerSlashCommand({
+  name: "prompt",
+  description: "Show the exact system prompt of this session's last model call — never saved",
+  usage: "/prompt",
+  run: (ctx) => {
+    if (!ctx.sessionId) return false; // no session → fall through
+    // Honest framing (#2243): this is the prompt AS OF the last captured call —
+    // a true "next call" preview would need speculative retrieval (P3). The
+    // fetch is a local read, so no optimistic pending note (unlike /btw).
+    void api
+      .promptLast(ctx.sessionId)
+      .then((res) => {
+        if (!res.enabled) {
+          ctx.noteToThread(
+            "Prompt capture is off — enable `prompts.capture` in Settings ▸ Telemetry to record what each model call receives.",
+            { tone: "warning" },
+          );
+          return;
+        }
+        if (!res.call) {
+          ctx.noteToThread(
+            "Nothing captured for this session yet — send a message first, then `/prompt` shows what the model received.",
+            { tone: "info" },
+          );
+          return;
+        }
+        ctx.noteToThread(promptNoteMarkdown(res.call), { tone: "info" });
+      })
+      .catch((e) => {
+        ctx.noteToThread(`Prompt fetch failed — ${errMsg(e)}`, { tone: "danger" });
+      });
+    ctx.focusComposer();
     return true;
   },
 });
