@@ -189,3 +189,88 @@ describe("NewAgentPanel — choose-time runtime warning (#2186 follow-on)", () =
     expect(container.querySelector(".archetype-runtime-notice")).toBeNull();
   });
 });
+
+describe("NewAgentPanel — advanced-tier archetypes collapse behind a toggle", () => {
+  // basic (standard, no tier) renders inline; pm (tier: "advanced") files under the toggle.
+  const WITH_ADVANCED: Archetype[] = [
+    { id: "basic", label: "Basic", icon: "bot", blurb: "A plain agent", bundle: null, soul: "" },
+    {
+      id: "pm",
+      label: "Project Manager",
+      icon: "clipboard",
+      blurb: "PM bundle",
+      bundle: "https://example.com/pm.git",
+      soul: "pm-persona",
+      tier: "advanced",
+    },
+  ];
+
+  // The "Advanced (N)" disclosure button inside the advanced section.
+  function advancedToggle(): HTMLButtonElement | undefined {
+    return [...container.querySelectorAll<HTMLButtonElement>(".archetype-advanced button")].find((b) =>
+      /^Advanced/.test(b.textContent?.trim() ?? ""),
+    );
+  }
+  function radioFor(value: string): HTMLInputElement | undefined {
+    return [...container.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find((r) => r.value === value);
+  }
+
+  it("renders standard cards inline but files advanced ones under a collapsed 'Advanced (N)' toggle", async () => {
+    vi.spyOn(api, "archetypes").mockResolvedValue({ archetypes: WITH_ADVANCED });
+    await mountPanel();
+
+    // The standard card is inline and pickable from the start.
+    expect(radioFor("basic")).toBeTruthy();
+    // The advanced card is NOT in the DOM while the section is collapsed.
+    expect(radioFor("pm")).toBeUndefined();
+    // A collapsed toggle carries the advanced count + ChevronRight (collapsed) affordance.
+    const toggle = advancedToggle();
+    expect(toggle).toBeTruthy();
+    expect(toggle!.textContent).toContain("Advanced (1)");
+    expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+    // The advanced section sits BELOW the standard card group (DOM = visual order here).
+    expect(precedes(radioFor("basic")!, toggle!)).toBe(true);
+  });
+
+  it("expands to reveal the advanced cards, then collapses them away again", async () => {
+    vi.spyOn(api, "archetypes").mockResolvedValue({ archetypes: WITH_ADVANCED });
+    await mountPanel();
+
+    await act(async () => {
+      advancedToggle()!.click();
+    });
+    expect(advancedToggle()!.getAttribute("aria-expanded")).toBe("true");
+    expect(radioFor("pm")).toBeTruthy();
+
+    await act(async () => {
+      advancedToggle()!.click();
+    });
+    expect(advancedToggle()!.getAttribute("aria-expanded")).toBe("false");
+    expect(radioFor("pm")).toBeUndefined();
+  });
+
+  it("picking an advanced card drives the create flow identically to a standard one", async () => {
+    vi.spyOn(api, "archetypes").mockResolvedValue({ archetypes: WITH_ADVANCED });
+    await mountPanel();
+
+    await act(async () => {
+      advancedToggle()!.click();
+    });
+    await act(async () => {
+      radioFor("pm")!.click();
+    });
+
+    // Picking the bundle-backed advanced archetype flips the Create button to its bundle label
+    // and the preview link to its name — same wiring the inline standard cards drive.
+    expect(createButton().textContent).toContain("Create from Project Manager");
+    expect(container.querySelector(".archetype-preview-link")?.textContent).toContain("Project Manager");
+  });
+
+  it("shows no advanced toggle when every archetype is standard (unchanged from before)", async () => {
+    await mountPanel(); // default ARCHETYPES — both standard, no tier
+    expect(advancedToggle()).toBeUndefined();
+    // …and every card still renders inline.
+    expect(radioFor("basic")).toBeTruthy();
+    expect(radioFor("scout")).toBeTruthy();
+  });
+});

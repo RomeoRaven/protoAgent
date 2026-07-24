@@ -35,10 +35,17 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
   // fieldId(origin+key) so an MCP input and a declared secret sharing a key don't collide.
   const [configOpen, setConfigOpen] = useState(true);
   const [values, setValues] = useState<Record<string, string>>({});
+  // Advanced archetypes (tier: "advanced") collapse below the standard cards behind a
+  // chevron toggle, so the picker leads with the everyday choices. Expand to pick one.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // "custom" is a wizard-only persona (write-your-own SOUL) — this picker creates an
   // agent from a bundle and has no SOUL editor, so Custom would just duplicate Basic.
   const list = (archetypes.data?.archetypes ?? []).filter((a) => a.id !== "custom");
+  // Split by tier: standard renders inline as today; advanced under a collapsible section.
+  // Absent tier = standard (backward compatible), so nothing moves unless it opts in.
+  const standard = list.filter((a) => a.tier !== "advanced");
+  const advanced = list.filter((a) => a.tier === "advanced");
   const pickedArchetype = list.find((a) => a.id === picked);
   const archetype = pickedArchetype ?? list[0];
   const nameOk = NAME_RE.test(name);
@@ -149,10 +156,34 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
             width stays with the AppShell's controlled container. */}
         <div className="archetype-card-scroll" style={{ maxHeight: "min(40vh, 420px)", overflowY: "auto" }}>
           <RadioCardGroup name="archetype" min="160px" value={picked} onValueChange={pick}>
-            {list.map((a: Archetype) => (
+            {standard.map((a: Archetype) => (
               <RadioCard key={a.id} value={a.id} icon={lucideIcon(a.icon, 22)} title={a.label} blurb={a.blurb} />
             ))}
           </RadioCardGroup>
+          {/* Advanced archetypes (tier: "advanced") collapse behind a chevron toggle — a
+              separate RadioCardGroup that shares the same picked value + pick(), so choosing a
+              card here is identical to choosing a standard one. Hidden entirely when empty, so
+              a catalog with no advanced entries looks exactly as it did before. */}
+          {advanced.length ? (
+            <div className="archetype-advanced">
+              <button
+                type="button"
+                className="archetype-configure-toggle"
+                aria-expanded={advancedOpen}
+                onClick={() => setAdvancedOpen((o) => !o)}
+              >
+                {advancedOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                <span>Advanced ({advanced.length})</span>
+              </button>
+              {advancedOpen ? (
+                <RadioCardGroup name="archetype-advanced" min="160px" value={picked} onValueChange={pick}>
+                  {advanced.map((a: Archetype) => (
+                    <RadioCard key={a.id} value={a.id} icon={lucideIcon(a.icon, 22)} title={a.label} blurb={a.blurb} />
+                  ))}
+                </RadioCardGroup>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         {pickedArchetype ? (
           <button type="button" className="archetype-preview-link" onClick={() => setPreviewOpen(true)}>

@@ -132,6 +132,10 @@ def test_project_manager_archetype_row() -> None:
         f"but {preset} does not exist — the persona step would silently seed nothing."
     )
 
+    # It's an advanced-tier archetype (ADR 0042 picker placement) — the picker files it
+    # under the collapsed "Advanced" section rather than inline with Basic.
+    assert row.get("tier") == "advanced", f"'project-manager' must be tier 'advanced', got {row.get('tier')!r}"
+
     assert ids[-1] == "custom", f"'custom' must stay LAST in the archetype list, got {ids}"
 
 
@@ -150,6 +154,9 @@ def test_design_system_archetype_row() -> None:
         f"archetype 'design-system' points at soul_preset '{row['soul_preset']}' "
         f"but {preset} does not exist — the persona step would silently seed nothing."
     )
+
+    # Advanced-tier archetype (ADR 0042) — collapsed under the picker's "Advanced" section.
+    assert row.get("tier") == "advanced", f"'design-system' must be tier 'advanced', got {row.get('tier')!r}"
 
     assert ids[-1] == "custom", f"'custom' must stay LAST in the archetype list, got {ids}"
 
