@@ -340,7 +340,7 @@ async def test_host_bundle_secrets_reach_host_overlay(tmp_path, monkeypatch):
 
     from graph.plugins import installer as inst
 
-    cfg = _host_bundle_lock(tmp_path, monkeypatch)
+    _host_bundle_lock(tmp_path, monkeypatch)
     lock = inst.lock_path()
     data = json.loads(lock.read_text())
     data["bundles"][0]["secrets"] = [{"key": "api_key", "label": "API Key", "secret": True, "required": True}]
