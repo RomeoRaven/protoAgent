@@ -11,6 +11,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- **Managed Python runtime gets its guide, and the front doors catch up with the product.**
+  New `guides/python-runtime.md` covers the desktop one-click interpreter install
+  (ADR 0094) end to end — what needs it, both install paths, the pre-failure status
+  surfaces, the stale-baseline refresh, and the API. The README and docs landing now
+  mention archetypes (the wizard picks one, not a "persona preset"), the `execute_code`/
+  `coder`/`friction`/`orgchart` plugins, workflow `gate: human` approval steps, the ⌘K
+  palette + Fleet Room, and `/export` + `/btw`. protobanana left the core roadmap (it's a
+  plugin, tracked in its own repo and the directory), and the internal `plans/`/`design/`
+  working docs are excluded from the published site.
+- **Documentation audit — stale claims fixed, missing reference material added.** The docs
+  landing no longer claims Discord/Google ship first-party (they're official external
+  installs) or that cost-v1 rides a DataPart (it's the artifact metadata map); the README
+  points plugin publishers at `config/plugin-directory.yaml` instead of the generated
+  overlay; the desktop README's retired `PROTOAGENT_CONFIG_DIR` → `PROTOAGENT_HOME`; the
+  releasing guide's branch-protection table lists the real seven CI checks (incl. the
+  changelog gate) instead of three; `tools.hidden` + `settings.hidden` are documented in
+  the configuration reference at last; the ADR index gains its five missing rows
+  (0079/0086/0087/0088/0092), corrects eight shipped ADRs still marked Proposed, and is
+  re-sorted; the orphaned `protoagent` CLI guide joins the sidebar and the guides overview
+  (with four other unlisted guides); and the plugins/fleet/desktop guides pick up the
+  Installed table, archetype `requires`, and launch-time update check.
+
+### Changed
+- **The last two raw `<table>`s now use the DS `Table` primitives (#2232).** The chat
+  generative-UI table renderer (`ChatComponent`) and the memory injection-record table
+  (`MemorySurface`) rendered bare `<table>`/`<th>`/`<td>`, so they didn't inherit DS table
+  theming and drifted from the Plugins/Telemetry surfaces that already use `Table/THead/
+  TBody/Tr/Th/Td`. Swapped both; `MemorySurface`'s clickable rows keep their role /
+  keyboard / aria behaviour via `Tr`'s prop pass-through (and pick up `pl-tr--interactive`
+  automatically). Retired the now-redundant per-file table CSS — only genuine deltas
+  remain (a keyboard `:focus-visible` row style the DS doesn't cover, two column tweaks),
+  which also drops two dead `--pl-color-text-muted`/`--pl-color-surface-2` var refs.
+- **Plugin views now receive the console's full theme, not six curated colors (#2225).**
+  The ADR 0026 theming bridge — `consoleTheme()`, carried by the `protoagent:init` and
+  `protoagent:theme` postMessage payloads — now includes the complete computed `--pl-*`
+  token map (keyed off `@protolabsai/design`'s tokens.json, so the list tracks the design
+  package) plus the active light/dark `mode`. The plugin-kit already passes `--pl-*`-form
+  keys straight onto a page's `:root`, so an embedded view inherits the operator's whole
+  active theme — spacing, radii, status colors, fonts — not just the six bridged slots.
+  The original six curated keys ride along unchanged, so older plugin-kits keep working.
+
 ### Fixed
 - **Host-path bundle installs now seed the bundle's MCP servers and secrets (#2118).**
   Installing a bundle on the host (SetupWizard, Discover, install-from-URL, the ops/MCP
@@ -22,6 +64,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merge-not-clobber). The CLI's fetch-only install stays fetch-only, and
   `POST /api/plugins/install` accepts optional `inputs`/`secrets` (the `POST /api/fleet`
   shapes) plus reports `mcp_seeded`.
+- **The eval client no longer races push-config registration (#2230).** A task started
+  over ``SendStreamingMessage`` is live slightly before its store write lands, so an
+  immediate ``CreateTaskPushNotificationConfig`` could bounce with TASK_NOT_FOUND —
+  the source of the flaky ``test_set_push_config_round_trips`` (and its event-loop
+  teardown noise). The push-config helpers now retry exactly that error with a short
+  bounded backoff (5 attempts, ~0.75s worst case); any other JSON-RPC error, or a
+  genuinely unknown task id, still fails immediately/after the bound.
+- **Frozen plugin install/update pips missing deps into the managed runtime (#2226).**
+  On the desktop app, installing (or updating) a plugin with unmet `requires_pip`
+  still answered with the pre-ADR-0093 refusal — "install it on a server/Docker
+  build instead" — even when the managed Python runtime (ADR 0094 P2) was
+  provisioned and one `install_deps` click away from satisfying them. The frozen
+  gate now routes the missing hard deps through
+  `install_requirements_into_managed_runtime` (with the same `install_deps` audit
+  trail) and proceeds; it refuses only when the runtime isn't provisioned (the
+  message points at `POST /api/runtime/python/install`) or the install genuinely
+  fails (pip's real error is surfaced). Optional-dep semantics (#1953/#2162) are
+  unchanged.
+- **Six status tones now actually theme (#2224).** Chat notes, the keybindings conflict
+  state, and the knowledge delete-armed state referenced `--pl-color-info/warning/danger`
+  — names the design package never defines — so their hex fallbacks rendered permanently:
+  never following operator theme overrides, never flipping to light mode. All six point at
+  the real `--pl-color-status-*` tokens now (and the test that had pinned the phantom
+  names pins the real ones). A repo-wide source guard (`statusTokenGuard.test.ts`) now
+  sweeps every console stylesheet and TS/TSX file and fails the unit suite if a bare
+  phantom name reappears anywhere outside the `theme-base.css` legacy-var bridge.
 - **The header menu drawer is a real modal now (#2222).** It claimed `aria-modal` but
   kept none of the contract: Tab escaped to the page behind it, the background kept
   scrolling, and the sheet mounted inside the header's DOM subtree. It's the DS Drawer

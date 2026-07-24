@@ -20,7 +20,7 @@ export default defineConfig({
 
   // docs/dev/ is the team's internal engineering area (handoffs + notes) — it
   // lives in the repo (committed, shared) but is NOT part of the published site.
-  srcExclude: ["dev/**"],
+  srcExclude: ["dev/**", "design/**"],
 
   head: [
     ["link", { rel: "icon", type: "image/svg+xml", href: `${base}favicon.svg` }],
@@ -142,6 +142,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: "Operator console (React/Tauri)", link: "/guides/react-tauri-ui" },
+            { text: "Managed Python runtime (desktop)", link: "/guides/python-runtime" },
             { text: "Command palette (⌘K)", link: "/guides/command-palette" },
             { text: "Developer flags (gate pre-release features)", link: "/guides/developer-flags" },
             { text: "Access from your phone (LAN / Tailscale)", link: "/guides/phone-access" },
@@ -152,6 +153,7 @@ export default defineConfig({
           text: "Operate & deploy",
           collapsed: true,
           items: [
+            { text: "The protoagent command (CLI)", link: "/guides/cli" },
             { text: "Deploy via GHCR", link: "/guides/deploy" },
             { text: "Deploy in Docker (seed + UI override)", link: "/guides/deploy-docker" },
             { text: "Deploy on Proxmox (reusable LXC template)", link: "/guides/deploy-proxmox" },
