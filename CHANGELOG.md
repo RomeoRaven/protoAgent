@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The original six curated keys ride along unchanged, so older plugin-kits keep working.
 
 ### Fixed
+- **Host-path bundle installs now seed the bundle's MCP servers and secrets (#2118).**
+  Installing a bundle on the host (SetupWizard, Discover, install-from-URL, the ops/MCP
+  surface) silently ignored its declared `mcp:` templates and `secrets:` — they only worked
+  through workspace create. The host path now uses the same seeding helpers with identical
+  semantics: operator/env-resolved inputs seed servers enabled, unresolved required inputs
+  land visible-but-inert, name-union never clobbers an existing server, and supplied values
+  for declared secrets reach the host `secrets.yaml` via `save_secrets` (0600,
+  merge-not-clobber). The CLI's fetch-only install stays fetch-only, and
+  `POST /api/plugins/install` accepts optional `inputs`/`secrets` (the `POST /api/fleet`
+  shapes) plus reports `mcp_seeded`.
 - **The eval client no longer races push-config registration (#2230).** A task started
   over ``SendStreamingMessage`` is live slightly before its store write lands, so an
   immediate ``CreateTaskPushNotificationConfig`` could bounce with TASK_NOT_FOUND —
