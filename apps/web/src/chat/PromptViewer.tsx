@@ -12,7 +12,7 @@ import { useEffect, useState } from "react";
 import { openDocument } from "../docviewer";
 import { api, ApiError } from "../lib/api";
 import type { PromptCall } from "../lib/types";
-import { callTabs, promptText, splitLine, usageLine } from "./promptView";
+import { budgetRows, callTabs, fmtTok, promptText, splitLine, usageLine } from "./promptView";
 
 export function openPromptViewer(taskId: string): void {
   openDocument({
@@ -86,6 +86,7 @@ function PromptViewerBody({ taskId }: { taskId: string }) {
 
   const call = calls.find((c) => String(c.call_index) === active) ?? calls[0];
   const usage = usageLine(call);
+  const budget = budgetRows(call);
   const copy = () => {
     void navigator.clipboard.writeText(promptText(call)).then(() => {
       setCopied(true);
@@ -114,6 +115,22 @@ function PromptViewerBody({ taskId }: { taskId: string }) {
           {copied ? "Copied" : "Copy"}
         </Button>
       </div>
+      {budget.length ? (
+        <div className="prompt-viewer__budget" aria-label="context budget by section">
+          {budget.map((row, i) => (
+            <div className="prompt-viewer__budget-row" key={i} title={`${row.chars.toLocaleString()} chars`}>
+              <span className="prompt-viewer__budget-label">{row.label}</span>
+              <span className="prompt-viewer__budget-bar">
+                <span
+                  className={`prompt-viewer__budget-fill${row.scope === "context" ? " prompt-viewer__budget-fill--context" : ""}`}
+                  style={{ width: `${row.pct}%` }}
+                />
+              </span>
+              <span className="prompt-viewer__budget-tokens">≈{fmtTok(row.approx_tokens)}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <pre className="prompt-viewer__text">{promptText(call)}</pre>
     </div>
   );

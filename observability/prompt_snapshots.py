@@ -20,6 +20,7 @@ swept opportunistically in the same transaction.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -94,6 +95,15 @@ class PromptSnapshotStore:
             db.execute("CREATE INDEX IF NOT EXISTS ix_calls_task ON calls(task_id)")
             db.execute("CREATE INDEX IF NOT EXISTS ix_calls_session ON calls(session_id)")
             db.execute("CREATE INDEX IF NOT EXISTS ix_calls_ts ON calls(ts)")
+            # Lightweight migrations for stores created before a column existed
+            # (the TelemetryStore idiom): each ALTER fires once on an older DB and
+            # no-ops after. `sections` (#2243 P2) hold JSON [{label, chars}] — on
+            # stable_blobs for the deduped prefix, per call for the dynamic tail.
+            for _table, _col in (("stable_blobs", "sections"), ("calls", "context_sections")):
+                try:
+                    db.execute(f"ALTER TABLE {_table} ADD COLUMN {_col} TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already present
             db.commit()
         finally:
             db.close()
@@ -113,6 +123,8 @@ class PromptSnapshotStore:
         output_tokens: int = 0,
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
+        stable_sections: list | None = None,
+        context_sections: list | None = None,
     ) -> None:
         """Append one snapshot row and trim to the retention caps in the same
         transaction. Best-effort — never raises (a capture write must not break
@@ -130,9 +142,22 @@ class PromptSnapshotStore:
             return
         try:
             db.execute(
-                "INSERT OR IGNORE INTO stable_blobs (hash, text, created_at) VALUES (?, ?, ?)",
-                (stable_hash, stable_text or "", _now_iso()),
+                "INSERT OR IGNORE INTO stable_blobs (hash, text, created_at, sections) VALUES (?, ?, ?, ?)",
+                (
+                    stable_hash,
+                    stable_text or "",
+                    _now_iso(),
+                    json.dumps(stable_sections) if stable_sections else None,
+                ),
             )
+            if stable_sections:
+                # A blob first captured without sections (pre-P2 rows, or a
+                # graph rebuilt with segmentation) gains them in place — the
+                # hash guarantees the labels describe this exact text.
+                db.execute(
+                    "UPDATE stable_blobs SET sections = ? WHERE hash = ? AND sections IS NULL",
+                    (json.dumps(stable_sections), stable_hash),
+                )
             if task_id:
                 scope, params = "task_id = ?", (task_id,)
             else:
@@ -143,7 +168,7 @@ class PromptSnapshotStore:
             db.execute(
                 "INSERT INTO calls (task_id, session_id, trace_id, call_index, ts, stable_hash,"
                 " context_text, model, input_tokens, output_tokens, cache_read_tokens,"
-                " cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " cache_creation_tokens, context_sections) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id or "",
                     session_id or "",
@@ -157,6 +182,7 @@ class PromptSnapshotStore:
                     int(output_tokens),
                     int(cache_read_tokens),
                     int(cache_creation_tokens),
+                    json.dumps(context_sections) if context_sections else None,
                 ),
             )
             trimmed = 0
@@ -191,9 +217,25 @@ class PromptSnapshotStore:
     _CALL_SELECT = (
         "SELECT c.task_id, c.session_id, c.trace_id, c.call_index, c.ts, c.model,"
         " c.context_text, c.input_tokens, c.output_tokens, c.cache_read_tokens,"
-        " c.cache_creation_tokens, b.text AS stable_text"
+        " c.cache_creation_tokens, c.context_sections, b.text AS stable_text,"
+        " b.sections AS stable_sections"
         " FROM calls c LEFT JOIN stable_blobs b ON b.hash = c.stable_hash"
     )
+
+    @staticmethod
+    def _decode(row: sqlite3.Row) -> dict:
+        """One joined row → dict with the JSON section columns decoded to
+        Python lists (None stays None — 'captured unsegmented' is a state the
+        reader distinguishes from 'no sections')."""
+        d = dict(row)
+        for col in ("stable_sections", "context_sections"):
+            raw = d.get(col)
+            if raw:
+                try:
+                    d[col] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    d[col] = None
+        return d
 
     def calls_for_task(self, task_id: str) -> list[dict]:
         """Every captured call of one A2A turn, oldest first (call order), the
@@ -209,7 +251,7 @@ class PromptSnapshotStore:
             return []
         finally:
             db.close()
-        return [dict(r) for r in rows]
+        return [self._decode(r) for r in rows]
 
     def last_for_session(self, session_id: str = "") -> dict | None:
         """The most recent captured call — of one session when ``session_id``
@@ -227,7 +269,7 @@ class PromptSnapshotStore:
             return None
         finally:
             db.close()
-        return dict(row) if row is not None else None
+        return self._decode(row) if row is not None else None
 
     # ------------------------------------------------------------------ purge
 

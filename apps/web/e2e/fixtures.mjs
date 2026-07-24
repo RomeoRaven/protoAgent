@@ -888,6 +888,12 @@ export const PROMPT_CALL = {
     stable: "SOUL: mock stable prefix — you are the e2e console agent.\n\n# Operating model\nBe deterministic.",
     context: "\n\n# Context\n\n<injected_memory>\nThe operator prefers dark mode.\n</injected_memory>",
   },
+  // Composer-labeled budget rows (#2243 P2), in prompt order.
+  sections: [
+    { label: "SOUL", chars: 57, approx_tokens: 14, scope: "stable" },
+    { label: "Operating model", chars: 36, approx_tokens: 9, scope: "stable" },
+    { label: "Injected memory (1 memories)", chars: 76, approx_tokens: 19, scope: "context" },
+  ],
   usage: { input_tokens: 1200, output_tokens: 80, cache_read_tokens: 1000, cache_creation_tokens: 0 },
 };
 

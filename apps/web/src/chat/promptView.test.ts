@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PromptCall } from "../lib/types";
-import { callTabs, fmtTok, promptNoteMarkdown, promptText, splitLine, usageLine } from "./promptView";
+import { budgetRows, callTabs, fmtTok, promptNoteMarkdown, promptText, sectionsLine, splitLine, usageLine } from "./promptView";
 
 function mk(over: Partial<PromptCall> = {}): PromptCall {
   return {
@@ -56,12 +56,60 @@ describe("splitLine", () => {
   });
 });
 
+describe("budgetRows", () => {
+  it("computes each section's share of the total prompt", () => {
+    const call = mk({
+      sections: [
+        { label: "SOUL", chars: 750, approx_tokens: 187, scope: "stable" },
+        { label: "Guidelines", chars: 200, approx_tokens: 50, scope: "stable" },
+        { label: "Skills index", chars: 50, approx_tokens: 12, scope: "context" },
+      ],
+    });
+    const rows = budgetRows(call);
+    expect(rows.map((r) => r.pct)).toEqual([75, 20, 5]);
+    expect(rows[2].scope).toBe("context");
+  });
+  it("keeps a sliver visible for tiny sections", () => {
+    const call = mk({
+      sections: [
+        { label: "big", chars: 10_000, approx_tokens: 2500, scope: "stable" },
+        { label: "tiny", chars: 3, approx_tokens: 0, scope: "context" },
+      ],
+    });
+    expect(budgetRows(call)[1].pct).toBe(1);
+  });
+  it("is empty for unsegmented calls (pre-P2 rows or old servers)", () => {
+    expect(budgetRows(mk())).toEqual([]);
+    expect(budgetRows(mk({ sections: [] }))).toEqual([]);
+  });
+});
+
+describe("sectionsLine", () => {
+  it("joins per-section approx tokens for the /prompt note", () => {
+    const call = mk({
+      sections: [
+        { label: "SOUL", chars: 40_800, approx_tokens: 10_200, scope: "stable" },
+        { label: "Working state", chars: 76, approx_tokens: 19, scope: "context" },
+      ],
+    });
+    expect(sectionsLine(call)).toBe("SOUL 10.2k · Working state 19");
+    expect(sectionsLine(mk())).toBe("");
+  });
+});
+
 describe("promptNoteMarkdown", () => {
   it("wraps the full text in a four-backtick fence when under the cap", () => {
     const md = promptNoteMarkdown(mk());
     expect(md).toContain("````text\nSTABLE\n\n# Context\n\ntail\n````");
     expect(md).toContain("`claude-opus-4-7`");
     expect(md).not.toContain("Showing");
+  });
+  it("adds the one-line budget when the call is segmented", () => {
+    const md = promptNoteMarkdown(
+      mk({ sections: [{ label: "SOUL", chars: 6, approx_tokens: 1, scope: "stable" }] }),
+    );
+    expect(md).toContain("_Budget (≈tokens):_ SOUL 1");
+    expect(promptNoteMarkdown(mk())).not.toContain("Budget");
   });
   it("truncates at the cap and points to the full viewer", () => {
     const call = mk({ system: { stable: "s".repeat(50), context: "" } });

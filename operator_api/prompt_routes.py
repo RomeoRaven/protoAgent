@@ -25,10 +25,33 @@ def _capture_enabled() -> bool:
     return bool(getattr(STATE.graph_config, "prompt_capture_enabled", True))
 
 
+def _sections(row: dict) -> list[dict]:
+    """The call's labeled sections in prompt order — stable prefix first, then
+    the dynamic tail — as ``{label, chars, approx_tokens, scope}`` rows (#2243
+    P2). ``approx_tokens`` uses the chars/4 estimator (the injection-log
+    precedent). Empty when the call was captured unsegmented (pre-P2 rows)."""
+    out: list[dict] = []
+    for scope, col in (("stable", "stable_sections"), ("context", "context_sections")):
+        for s in row.get(col) or []:
+            if not isinstance(s, dict):
+                continue
+            chars = int(s.get("chars") or 0)
+            out.append(
+                {
+                    "label": str(s.get("label") or ""),
+                    "chars": chars,
+                    "approx_tokens": chars // 4,
+                    "scope": scope,
+                }
+            )
+    return out
+
+
 def _shape(row: dict) -> dict:
     """One store row → the wire shape the dialog renders: the prompt split as
     ``system.stable`` / ``system.context`` (their concatenation is byte-for-byte
-    what the model received) plus the call's real token usage."""
+    what the model received), the per-section budget rows, and the call's real
+    token usage."""
     return {
         "call_index": int(row.get("call_index") or 0),
         "ts": row.get("ts") or "",
@@ -37,6 +60,7 @@ def _shape(row: dict) -> dict:
             "stable": row.get("stable_text") or "",
             "context": row.get("context_text") or "",
         },
+        "sections": _sections(row),
         "usage": {
             "input_tokens": int(row.get("input_tokens") or 0),
             "output_tokens": int(row.get("output_tokens") or 0),

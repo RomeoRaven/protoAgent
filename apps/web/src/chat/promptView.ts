@@ -2,7 +2,7 @@
 // component-free so the tab mapping, usage line, and note markdown are unit
 // testable (the vitest harness is .test.ts only).
 
-import type { PromptCall } from "../lib/types";
+import type { PromptCall, PromptSection } from "../lib/types";
 
 /** How much prompt text the /prompt system note shows before deferring to the
  *  full viewer — a note is a glance, not a reading surface. */
@@ -39,6 +39,26 @@ export function splitLine(call: PromptCall): string {
   return `stable ${fmtTok(call.system.stable.length)} chars · context tail ${fmtTok(tail)} chars`;
 }
 
+/** One renderable budget row (#2243 P2): the section plus its share of the
+ *  whole prompt (percent of total section chars, for the proportional bar). */
+export type BudgetRow = PromptSection & { pct: number };
+
+/** The call's sections as budget rows — [] when captured unsegmented. */
+export function budgetRows(call: PromptCall): BudgetRow[] {
+  const sections = call.sections ?? [];
+  const total = sections.reduce((n, s) => n + s.chars, 0);
+  if (!total) return [];
+  return sections.map((s) => ({ ...s, pct: Math.max(1, Math.round((s.chars / total) * 100)) }));
+}
+
+/** "SOUL 10.2k · Skills index 312 · Working state 19" — the one-line budget
+ *  (approx tokens per section) for the /prompt note. Empty when unsegmented. */
+export function sectionsLine(call: PromptCall): string {
+  const sections = call.sections ?? [];
+  if (!sections.length) return "";
+  return sections.map((s) => `${s.label} ${fmtTok(s.approx_tokens)}`).join(" · ");
+}
+
 /** The /prompt system note: header + fenced prompt text, truncated at `cap`.
  *  Four-backtick fence so prompt bodies containing ``` don't break out. */
 export function promptNoteMarkdown(call: PromptCall, cap: number = PROMPT_NOTE_CAP): string {
@@ -46,9 +66,11 @@ export function promptNoteMarkdown(call: PromptCall, cap: number = PROMPT_NOTE_C
   const clipped = text.length > cap;
   const shown = clipped ? text.slice(0, cap) : text;
   const usage = usageLine(call);
+  const budget = sectionsLine(call);
   const header =
     `**System prompt** — last model call of this session _(not saved to the conversation)_\n\n` +
-    `\`${call.model || "unknown model"}\` · ${splitLine(call)}${usage ? ` · ${usage}` : ""}`;
+    `\`${call.model || "unknown model"}\` · ${splitLine(call)}${usage ? ` · ${usage}` : ""}` +
+    (budget ? `\n\n_Budget (≈tokens):_ ${budget}` : "");
   const tail = clipped
     ? `\n\n_Showing ${fmtTok(cap)} of ${fmtTok(text.length)} chars — open **View prompt** on an assistant message for the full text._`
     : "";

@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post was refused by the browser and only ever produced console noise.
 
 ### Added
+- **The prompt viewer shows where your context budget goes (#2243, P2).** Both prompt
+  composers now annotate what they build — `build_system_prompt_parts()` labels the
+  stable prefix (SOUL · Subagents · Managed projects · Operating model · Guidelines)
+  and `KnowledgeMiddleware` labels the dynamic tail (Injected memory with its
+  id-attributed counts · Skills index · Working state) — so every captured call carries
+  its real section boundaries, never a marker-parse reconstruction. The View-prompt
+  dialog renders a per-section budget breakdown (proportional bars + ≈token estimates,
+  context rows tinted), and `/prompt` gains a one-line budget in its note. Sections are
+  stored with the snapshot (per-blob for the deduped prefix, per call for the tail);
+  pre-P2 rows read back as unsegmented and even gain stable-prefix labels retroactively
+  when the same blob is captured again.
 - **See the exact system prompt for any turn (#2243, P1).** Most agent systems hide the
   prompt; protoAgent now captures what each model call ACTUALLY received. A new
   `PromptCaptureMiddleware` (directly after PromptCache — the one seam where the final
