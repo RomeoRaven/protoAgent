@@ -1,5 +1,16 @@
 [
   {
+    "version": "v0.114.0",
+    "date": "2026-07-24",
+    "changes": [
+      "See the exact system prompt behind any reply — a View prompt action on every assistant message shows what the model actually received, call by call, with its real token usage.",
+      "The prompt viewer breaks your context budget down by section — persona, skills index, injected memory, working state — so you can see where the tokens go; /prompt drops the latest prompt into the chat as an unsaved note.",
+      "Prompt capture respects your boundaries: incognito chats record nothing, and deleting a chat purges its captured prompts with it.",
+      "A bad work folder no longer silently takes away every filesystem tool — unusable paths are refused with the reason, and the editor flags saved folders that later go missing.",
+      "The Craft plugin's console name and docs now say what it ships — all six commands, including the agent-reachable ADR-authoring skill."
+    ]
+  },
+  {
     "version": "v0.113.0",
     "date": "2026-07-24",
     "changes": [
