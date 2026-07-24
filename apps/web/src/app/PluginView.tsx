@@ -103,6 +103,20 @@ export function PluginView({ view }: { view: PluginViewType }) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   // Pending init re-post timers (see handleLoad) — cleared on unmount / src change.
   const initTimers = useRef<number[]>([]);
+  // Has the frame navigated to the plugin page? Gates the posts below: a mounted-but-not-yet
+  // -navigated iframe is still on about:blank, which INHERITS the console's origin — under the
+  // desktop app that's `tauri://localhost`, so a post targeted at the sidecar origin is refused
+  // outright: "Unable to post message to http://127.0.0.1:7870. Recipient has origin
+  // tauri://localhost." The frame had no listener yet either way, so the post was always a
+  // no-op; gate it and drop the noise.
+  //
+  // Written at the LIFECYCLE EDGES, never mirrored off the `loaded` state during render. Two
+  // things prove navigation, and BOTH are needed: the iframe's own load event, and any message
+  // FROM the frame. The page's script runs (and posts its first `subscribe`) BEFORE the parent
+  // sees `load` — so gating the `since` replay on load alone dropped it and broke reopen
+  // catch-up (#1640). A message can only come from the navigated page; about:blank has no
+  // script. Reset when the frame is re-pointed.
+  const navigatedRef = useRef(false);
   const pluginId = useMemo(() => pluginIdFromPath(view.path), [view.path]);
   // Background delivery (#1640): a `background: true` subscribe from the page asks App
   // to keep this view mounted (hidden) when another surface is active. Store-reported;
@@ -129,6 +143,7 @@ export function PluginView({ view }: { view: PluginViewType }) {
   //   • otherwise → the HTTP status. One retry covers a sub-second race with a hot-mount reload.
   useEffect(() => {
     let cancelled = false;
+    navigatedRef.current = false; // re-pointed frame: back to about:blank until it navigates
     setLoaded(false);
     setError(null);
     setReachable(false);
@@ -196,14 +211,20 @@ export function PluginView({ view }: { view: PluginViewType }) {
     // Pattern matching + since-replay + seq dedupe live in the pure relay
     // (lib/pluginEventRelay.ts) — this effect only wires postMessage to it.
     const relay = createPluginEventRelay({
-      post: (frame) =>
-        frameRef.current?.contentWindow?.postMessage({ type: "protoagent:event", ...frame }, origin),
+      post: (frame) => {
+        if (!navigatedRef.current) return; // pre-navigation frame — see navigatedRef
+        frameRef.current?.contentWindow?.postMessage({ type: "protoagent:event", ...frame }, origin);
+      },
       replaySince,
     });
 
     const onWindowMessage = (e: MessageEvent) => {
       // Only trust messages from THIS iframe's window.
       if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
+      // It spoke, so it's the navigated plugin page — not the about:blank placeholder. This
+      // is what unblocks the `since` replay below: the page's first `subscribe` beats the
+      // parent's load event, and the replay posts back inside this very handler.
+      navigatedRef.current = true;
       const m = e.data || {};
       if (m.type === "protoagent:ready") {
         // The kit announced it's now listening. It registers its `message` handler
@@ -256,7 +277,9 @@ export function PluginView({ view }: { view: PluginViewType }) {
   useEffect(() => {
     const onThemeChange = () => {
       const win = frameRef.current?.contentWindow;
-      if (!win) return;
+      // Not navigated yet → about:blank, wrong origin, nobody listening (see navigatedRef).
+      // handleLoad posts the FRESH theme on load, so nothing is lost by skipping here.
+      if (!win || !navigatedRef.current) return;
       try {
         const origin = new URL(apiUrl(src), window.location.href).origin;
         win.postMessage({ type: "protoagent:theme", theme: consoleTheme() }, origin);
@@ -269,6 +292,9 @@ export function PluginView({ view }: { view: PluginViewType }) {
   }, [src]);
 
   function handleLoad(e: React.SyntheticEvent<HTMLIFrameElement>) {
+    // Synchronously, BEFORE postInit: the page can answer with `subscribe` (and its `since`
+    // replay) inside this same tick, well before the setLoaded re-render commits.
+    navigatedRef.current = true;
     setLoaded(true);
     const win = e.currentTarget.contentWindow;
     if (!win) return;
