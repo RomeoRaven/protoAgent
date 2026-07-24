@@ -1,5 +1,18 @@
 [
   {
+    "version": "v0.113.0",
+    "date": "2026-07-24",
+    "changes": [
+      "The new-agent picker files advanced archetypes behind a toggle — the everyday starter types stay front and center.",
+      "Installing a bundle on the host now seeds its MCP servers and secrets too — same behavior as creating an agent from it.",
+      "Plugin views and artifacts receive the console's full theme — every token and your overrides, not six approximate colors.",
+      "The header menu is a real modal now: focus stays inside it, the page behind stops scrolling.",
+      "Status colors across chat notes and settings follow your theme and light mode properly.",
+      "New guide: the managed Python runtime — what needs it, the one-click install, and how to read its status surfaces.",
+      "A documentation deep-clean: stale claims fixed everywhere, the ADR index made whole, and the plugin/CLI guides easier to find."
+    ]
+  },
+  {
     "version": "v0.112.0",
     "date": "2026-07-24",
     "changes": [
