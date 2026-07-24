@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.113.0] - 2026-07-24
+
 ### Docs
 - **Managed Python runtime gets its guide, and the front doors catch up with the product.**
   New `guides/python-runtime.md` covers the desktop one-click interpreter install

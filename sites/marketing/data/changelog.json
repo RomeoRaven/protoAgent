@@ -1,5 +1,22 @@
 [
   {
+    "version": "v0.113.0",
+    "date": "2026-07-24",
+    "changes": [
+      "Managed Python runtime gets its guide, and the front doors catch up with the product.",
+      "Documentation audit — stale claims fixed, missing reference material added.",
+      "Archetypes can declare a tier, and the picker files the advanced ones behind a toggle.",
+      "The last two raw <table>s now use the DS Table primitives (#2232).",
+      "Plugin views now receive the console's full theme, not six curated colors (#2225).",
+      "Host-path bundle installs now seed the bundle's MCP servers and secrets (#2118).",
+      "The eval client no longer races push-config registration (#2230).",
+      "Frozen plugin install/update pips missing deps into the managed runtime (#2226).",
+      "Six status tones now actually theme (#2224).",
+      "The header menu drawer is a real modal now (#2222).",
+      "An empty Attention view in Plugins ▸ Installed now says the good news."
+    ]
+  },
+  {
     "version": "v0.112.0",
     "date": "2026-07-24",
     "changes": [
