@@ -1,8 +1,9 @@
 # Plan: system prompt viewer — the exact prompt for any turn, per-chat
 
-**Status:** P1 shipped (2026-07-24) — capture middleware + store + routes +
-View-prompt dialog + `/prompt` + delete-purge are live; P2 (section budgets) and
-P3 (diffs, subagents, next-call preview) remain. Tracking issue:
+**Status:** P1 + P2 shipped (2026-07-24) — capture middleware + store + routes +
+View-prompt dialog + `/prompt` + delete-purge, plus composer-annotated section
+budgets (`*_parts()` composers, per-section storage, breakdown UI). P3 (diffs,
+subagents, next-call preview) remains. Tracking issue:
 [#2243](https://github.com/protoLabsAI/protoAgent/issues/2243).
 **Owner:** console + `graph/middleware` + `observability`.
 

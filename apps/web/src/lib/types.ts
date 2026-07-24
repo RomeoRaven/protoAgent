@@ -907,11 +907,22 @@ export type PromptCallUsage = {
   cache_read_tokens: number;
   cache_creation_tokens: number;
 };
+// One labeled slice of the prompt (#2243 P2) — composer-annotated, in prompt
+// order (stable prefix rows first, then the dynamic tail). approx_tokens is
+// the server's chars/4 estimate.
+export type PromptSection = {
+  label: string;
+  chars: number;
+  approx_tokens: number;
+  scope: "stable" | "context";
+};
 export type PromptCall = {
   call_index: number;
   ts: string;
   model: string;
   system: { stable: string; context: string };
+  // Optional for skew with pre-P2 servers; empty = captured unsegmented.
+  sections?: PromptSection[];
   usage: PromptCallUsage;
 };
 

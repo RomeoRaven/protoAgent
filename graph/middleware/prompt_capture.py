@@ -79,9 +79,14 @@ def _usage_from(response) -> dict:
 
 
 class PromptCaptureMiddleware(AgentMiddleware):
-    def __init__(self, *, retention_days: int = 30):
+    def __init__(self, *, retention_days: int = 30, stable_sections: list | None = None):
         super().__init__()
         self._retention_days = int(retention_days)
+        # Labeled section boundaries of the stable prefix (#2243 P2) —
+        # [{label, chars}], computed at graph build from the SAME parts list the
+        # prompt is joined from, persisted once per blob hash. None = unsegmented
+        # (a caller that built its prompt without parts).
+        self._stable_sections = list(stable_sections) if stable_sections else None
 
     def _store(self):
         # Lazy — the store's path resolution must not run at graph build
@@ -108,6 +113,13 @@ class PromptCaptureMiddleware(AgentMiddleware):
             from graph.middleware.request_context import current_request_metadata
             from observability import tracing
 
+            # Dynamic-tail sections ride the state beside `context` (written as a
+            # pair by KnowledgeMiddleware) — but a lingering pair from an earlier
+            # call only applies when THIS request still carries a tail.
+            context_sections = None
+            if context_tail:
+                context_sections = (getattr(request, "state", None) or {}).get("context_sections")
+
             self._store().record(
                 task_id=str(current_request_metadata().get("a2a.task_id") or ""),
                 session_id=tracing.current_session_id() or "",
@@ -115,6 +127,8 @@ class PromptCaptureMiddleware(AgentMiddleware):
                 stable_text=stable,
                 context_text=context_tail,
                 model=_model_name(request),
+                stable_sections=self._stable_sections,
+                context_sections=context_sections,
                 **_usage_from(response),
             )
         except Exception:  # noqa: BLE001 — capture must never touch the turn

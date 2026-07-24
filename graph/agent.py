@@ -23,7 +23,9 @@ from graph.subagents.config import SUBAGENT_REGISTRY
 from tools.lg_tools import HITL_TOOL_NAMES, _session_id_from, drop_disabled_tools, get_all_tools
 
 
-def _build_middleware(config: LangGraphConfig, knowledge_store=None, skills_index=None, extra_middleware=None):
+def _build_middleware(
+    config: LangGraphConfig, knowledge_store=None, skills_index=None, extra_middleware=None, stable_sections=None
+):
     middleware = []
 
     # Self-heal a thread left with a dangling tool_call (a tool that hung while
@@ -83,7 +85,12 @@ def _build_middleware(config: LangGraphConfig, knowledge_store=None, skills_inde
     if config.prompt_capture_enabled:
         from graph.middleware.prompt_capture import PromptCaptureMiddleware
 
-        middleware.append(PromptCaptureMiddleware(retention_days=config.prompt_capture_retention_days))
+        middleware.append(
+            PromptCaptureMiddleware(
+                retention_days=config.prompt_capture_retention_days,
+                stable_sections=stable_sections,
+            )
+        )
 
     # Fleet tracing: stamp the active Langfuse trace context onto each gateway
     # LLM call (extra_body.metadata existing_trace_id/parent_observation_id) so
@@ -1041,13 +1048,24 @@ def create_agent_graph(
         # search_tools can drop here.
         all_tools = drop_disabled_tools(all_tools, disabled_tools)
 
-    middleware = _build_middleware(
-        config, knowledge_store, skills_index=skills_index, extra_middleware=extra_middleware
-    )
+    # Composed as labeled parts (#2243 P2) so PromptCapture can persist the
+    # stable prefix's section boundaries with the blob it hashes — the prompt
+    # the model receives is exactly these texts joined (build_system_prompt is
+    # the same join, pinned by test).
+    from graph.prompts import build_system_prompt_parts
 
-    system_prompt = build_system_prompt(
+    prompt_parts = build_system_prompt_parts(
         include_subagents=include_subagents,
         projects=(config.effective_filesystem_projects() if config.filesystem_enabled else None),
+    )
+    system_prompt = "\n\n".join(text for _label, text in prompt_parts)
+
+    middleware = _build_middleware(
+        config,
+        knowledge_store,
+        skills_index=skills_index,
+        extra_middleware=extra_middleware,
+        stable_sections=[{"label": label, "chars": len(text)} for label, text in prompt_parts],
     )
 
     agent = create_agent(
