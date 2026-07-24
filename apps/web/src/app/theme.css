@@ -2047,6 +2047,16 @@ textarea {
   flex-direction: column;
   gap: 12px;
 }
+/* Advanced-tier archetypes (tier: "advanced") — collapsed below the standard cards behind
+   the chevron toggle, in both the setup wizard's persona step and the fleet new-agent panel.
+   The toggle reuses .archetype-configure-toggle; this just spaces the section + its expanded
+   card group from the standard grid above. */
+.archetype-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
 .field-hint {
   font-size: 11px;
   color: var(--fg-muted);

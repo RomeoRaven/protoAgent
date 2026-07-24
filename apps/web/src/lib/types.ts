@@ -962,6 +962,12 @@ export type Archetype = {
   blurb: string;
   bundle: string | null; // null = Basic; else the bundle git URL
   soul: string; // base SOUL.md the wizard seeds when this archetype is picked ("" = none)
+  // Picker placement (ADR 0042): "standard" (the default when the field is absent) renders
+  // inline in the RadioCardGroup as today; "advanced" files the card under the picker's
+  // collapsed "Advanced (N)" section (both the setup wizard's persona step and the fleet
+  // new-agent panel). The server normalizes catalog + bundle self-registrations to one of the
+  // two, so a missing tag arrives as "standard" — kept optional for older backends.
+  tier?: "standard" | "advanced";
   // Host capabilities the archetype needs to be USEFUL (#2186 follow-on) — e.g.
   // "python_runtime" (cowork's document skills route through execute_code, which on
   // the desktop app needs the managed CPython). The picker warns at choose-time when

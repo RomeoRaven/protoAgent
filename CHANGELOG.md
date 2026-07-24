@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (with four other unlisted guides); and the plugins/fleet/desktop guides pick up the
   Installed table, archetype `requires`, and launch-time update check.
 
+### Added
+- **Archetypes can declare a `tier`, and the picker files the advanced ones behind a
+  toggle.** Catalog entries and bundle `archetype:` manifests take an optional
+  `tier: "standard" | "advanced"` (absent = standard). The new-agent picker and the setup
+  wizard's persona step now split the flat card grid: standard archetypes render inline as
+  before, while advanced ones (out of the box, Project Manager and Design System Engineer)
+  collapse under a chevron "Advanced (N)" section so the picker leads with the everyday
+  choices. Picking a card in either section behaves identically. Archetypes with no `tier`
+  field are unchanged — they stay inline as standard.
+
 ### Changed
 - **The last two raw `<table>`s now use the DS `Table` primitives (#2232).** The chat
   generative-UI table renderer (`ChatComponent`) and the memory injection-record table
