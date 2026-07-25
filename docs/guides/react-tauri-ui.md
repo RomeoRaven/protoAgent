@@ -120,6 +120,19 @@ so out-of-fence paths are rejected before any I/O (`..` and symlinks resolved be
 containment check). Configure none and the agent gets a single default `workspace` root.
 See [ADR 0007](../adr/0007-directory-aware-operator-agent.md).
 
+Every path-valued setting (a `type: "path"` field in `graph/settings_schema.py`, plus the
+Work-folders rows) renders a **Browse…** picker over `GET /api/fs/browse` — a read-only
+listing of the **server's** directories. It has to be server-side: the console frequently
+configures a machine it isn't running on, and the browser's own pickers
+(`webkitdirectory`, `showDirectoryPicker()`) describe the client's filesystem and can't
+produce an absolute path on the server at all. Plugin-declared fields can set
+`type: path` (and `path_kind: file`) to get the same control.
+
+A path that is **not on the server's filesystem** must stay `type: "string"` —
+`secrets_manager.path` is a folder inside a remote vault (1Password/Bitwarden), so a
+local browser would point at the wrong machine entirely. The test for `type: path` is
+"would `ls` on this box resolve it?", not "does it look like a path?".
+
 > `operator.allowed_dirs` and `operator.project_dir` are **not** that fence, despite the
 > names. `allowed_dirs` is inert (its enforcement helper has no callers since tasks went
 > instance-global and notes became a plugin); `project_dir` only names the console's
