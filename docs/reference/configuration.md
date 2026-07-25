@@ -170,14 +170,13 @@ enforcement:
 
 `PromptCacheMiddleware` (`graph/middleware/prompt_cache.py`) does two things at the model-call boundary: (1) **delivers** the volatile knowledge/skills/hot-memory context that `KnowledgeMiddleware` produces — `create_agent` builds a static system prompt and doesn't read the `context` state key, so this is what actually gets that context to the model; (2) sets Anthropic **`cache_control`** on the stable system-prompt prefix, with the volatile context placed *after* the breakpoint so it never invalidates the cached prefix.
 
-Caching is gated to Anthropic-family models (safe no-op elsewhere); **context delivery happens regardless**, so the middleware is always wired.
+Caching is **attempt-by-default with fail-loud watching** (#2255): blocks are attached for every model — gateway aliases included, since the alias name says nothing about what it routes to. A provider that *rejects* `cache_control` gets one automatic retry without blocks and falls back to plain delivery for that model for the session (logged once); a provider that *silently ignores* the blocks (repeated calls with a cacheable-size prefix and zero cache activity in usage) draws a WARNING naming the model — silent full-price billing is the failure mode this exists to kill. **Context delivery happens regardless**, so the middleware is always wired.
 
 ```yaml
 prompt_cache:
-  enabled: true     # caching half (delivery is unconditional)
+  enabled: true     # caching half (delivery is unconditional) — attempted on EVERY model
   ttl: "5m"         # "5m" ephemeral, or "1h" persistent (agent turns exceed 5m)
-  force: false      # cache even when the model name doesn't look Anthropic
-                    # (use when your gateway alias hides a Claude model)
+  force: false      # never auto-fall back: a provider rejection propagates
   warm:             # cache-warming heartbeat (off by default)
     enabled: false
     interval_seconds: 3300   # 55m — just under the "1h" tier
@@ -185,13 +184,13 @@ prompt_cache:
 
 | Key | Default | What |
 |---|---|---|
-| `enabled` | `true` | Apply `cache_control` (Anthropic). No-op on non-Anthropic models. |
+| `enabled` | `true` | Attach `cache_control` to the stable prefix for every model. Rejection → auto-fallback (per model, per session); silent zero-hit → a once-per-model WARNING. `false` = plain delivery only. |
 | `ttl` | `"5m"` | Cache tier: `5m` (ephemeral) or `1h` (persistent). |
-| `force` | `false` | Bypass the Anthropic-name heuristic (opaque gateway aliases). |
+| `force` | `false` | Trust-the-operator mode: always attach, never auto-fall back (a rejection propagates instead of degrading silently). |
 | `warm.enabled` | `false` | Run a background heartbeat (`graph/cache_warmer.py`) that periodically reproduces the cached system prefix so the **first** request after an idle gap hits a warm cache instead of a full miss. |
 | `warm.interval_seconds` | `3300` | Heartbeat period. Set just under `ttl` (default 55m for the `1h` tier). |
 
-**When to enable `warm`:** sporadic but latency-sensitive traffic on the `1h` tier — the ~1-token ping per interval is cheap relative to a cold miss on a multi-thousand-token prefix while a user waits. Leave it **off** for steady traffic (the cache stays warm on its own — warming is then pure cost) and on non-Anthropic models (nothing to warm; the warmer no-ops at start unless `force` is set). It runs as its own asyncio task (started/stopped with the server), **not** through the scheduler — the scheduler fires full agent turns, the wrong primitive for a keep-alive.
+**When to enable `warm`:** sporadic but latency-sensitive traffic on the `1h` tier — the ~1-token ping per interval is cheap relative to a cold miss on a multi-thousand-token prefix while a user waits. Leave it **off** for steady traffic (the cache stays warm on its own — warming is then pure cost) and for providers where the zero-hit warning fired (nothing to warm). It runs as its own asyncio task (started/stopped with the server), **not** through the scheduler — the scheduler fires full agent turns, the wrong primitive for a keep-alive.
 
 ## `compaction`
 
