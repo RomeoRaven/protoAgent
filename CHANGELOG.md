@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Middleware warnings now reach the console feed (#2262).** New `activity.emit()` seam:
+  the server binds the per-instance Activity feed at boot, and anything below it (graph
+  middleware, infra) appends operator-relevant notices best-effort — a no-op before
+  binding, never raising. First consumer: the prompt-cache watchers (#2255) — "caching
+  is not engaging for <model>" and "provider rejected cache_control" now show up in the
+  Activity surface instead of dying in agent.log.
+
+### Added
 - **Artifacts nudge away from the save-loop (#2257).** The field pattern behind one
   1.5M-token turn: eleven `save_file_artifact` revisions of the same file, each one
   round-tripping the full body through the conversation. The tools now teach
