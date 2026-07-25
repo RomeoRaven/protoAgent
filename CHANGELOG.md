@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.115.0] - 2026-07-25
 
 ### Added
+- **Opt-in per-step `timeout` in the workflow engine, with graceful degradation.** A recipe
+  step may declare a positive `timeout` (seconds). Exceeding it is *degradation, not failure*:
+  the step yields an empty Gap and its id is listed in the run's new `degraded` array (distinct
+  from `failed`), so dependent steps proceed on the other steps' output. Previously the engine
+  had no timeout at any level — a hung subagent stalled the whole step DAG indefinitely. The
+  default (no `timeout` key) is byte-for-byte the prior unbounded behaviour, and an older engine
+  ignores the key, so recipes can declare it ahead of the feature. This gives the pr-reviewer
+  panel a way to cap its slowest finder (the review latency floor and top exhaustion cause)
+  without taking the whole panel down to no verdict. (#2297)
 - **Managed projects are visible in the console, and it tells you when they aren't in
   effect (ADR 0095 D5).** `GET /api/projects` plus a read-only **Managed projects** list at
   the top of the Work folders dialog: each registered project with its GitHub repo, its
