@@ -123,6 +123,17 @@ class PromptCacheMiddleware(AgentMiddleware):
         precise on purpose: anything else propagates untouched."""
         return "cache_control" in str(exc)
 
+    @staticmethod
+    def _notify(text: str) -> None:
+        """Mirror an operator-relevant warning into the console Activity feed
+        (#2262) — best-effort, a no-op until the server binds the feed."""
+        try:
+            from activity import emit
+
+            emit(text, origin="system", trigger="prompt-cache")
+        except Exception:  # noqa: BLE001 — a notice must never break the turn
+            log.debug("[prompt-cache] activity emit failed", exc_info=True)
+
     def _fall_back(self, request, exc: Exception):
         """Disable blocks for this model for the session and return the plain
         (string-delivery) retry request."""
@@ -133,6 +144,10 @@ class PromptCacheMiddleware(AgentMiddleware):
             "blocks and delivering plain text for this model for the rest of the session",
             model,
             str(exc)[:200],
+        )
+        self._notify(
+            f"Prompt caching disabled for {model} this session — the provider rejected "
+            f"cache_control blocks (the call was retried without them)."
         )
         retry, _cached = self._transform(request)
         return retry
@@ -170,6 +185,11 @@ class PromptCacheMiddleware(AgentMiddleware):
                     "gateway's model mapping.",
                     model,
                     streak,
+                )
+                self._notify(
+                    f"Prompt caching is not engaging for {model} — {streak} consecutive "
+                    f"calls show zero cache activity, so every call bills full input price. "
+                    f"Check the gateway's model mapping, or set prompt_cache.enabled: false."
                 )
         except Exception:  # noqa: BLE001 — watching must never touch the turn
             log.debug("[prompt-cache] usage observation failed", exc_info=True)
