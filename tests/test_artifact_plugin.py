@@ -283,6 +283,62 @@ def test_instance_scoping_isolates_state(monkeypatch, tmp_path):
     assert _arts(art) == []  # the roxy instance has its own (empty) state
 
 
+# ── the full-body-write nudge (#2257) ──────────────────────────────────────────
+
+
+def _tmp_file(tmp_path, name="doc.txt", content=b"hello"):
+    f = tmp_path / name
+    f.write_bytes(content)
+    return str(f)
+
+
+def _saved_id(out: str) -> str:
+    return out.split("Saved file artifact ")[1].split(" ")[0]
+
+
+def test_repeated_file_saves_draw_a_nudge(monkeypatch, tmp_path):
+    # Field case: 11 saves of the same artifact in one turn. The third full-body
+    # write inside the window carries the batching nudge; the turn never breaks.
+    art = _load(monkeypatch, tmp_path)
+    p = _tmp_file(tmp_path)
+    out = art.save_file_artifact.invoke({"path": p})
+    art_id = _saved_id(out)
+    assert "NOTE:" not in out
+    assert "NOTE:" not in art.save_file_artifact.invoke({"path": p, "artifact_id": art_id})
+    out3 = art.save_file_artifact.invoke({"path": p, "artifact_id": art_id})
+    assert "full-body write #3" in out3 and "Batch" in out3
+
+
+def test_rewrites_count_but_targeted_updates_never_nudge(monkeypatch, tmp_path):
+    # update_artifact is the cheap path we nudge TOWARD — it must stay exempt.
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "<a>1</a>", "title": "T"})
+    for old, new in [("1", "2"), ("2", "3"), ("3", "4"), ("4", "5")]:
+        out = art.update_artifact.invoke({"old_string": old, "new_string": new})
+        assert "NOTE:" not in out
+    assert "NOTE:" not in art.rewrite_artifact.invoke({"code": "<b>x</b>"})
+    assert "NOTE:" not in art.rewrite_artifact.invoke({"code": "<b>y</b>"})
+    out3 = art.rewrite_artifact.invoke({"code": "<b>z</b>"})
+    assert "full-body write #3" in out3
+
+
+def test_nudge_window_expires(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    p = _tmp_file(tmp_path)
+    art_id = _saved_id(art.save_file_artifact.invoke({"path": p}))
+    art.save_file_artifact.invoke({"path": p, "artifact_id": art_id})
+    real_now = art._now
+    monkeypatch.setattr(art, "_now", lambda: real_now() + art._SAVE_NUDGE_WINDOW_MS + 1)
+    # Old stamps aged out — the counter restarts instead of nagging forever.
+    assert "NOTE:" not in art.save_file_artifact.invoke({"path": p, "artifact_id": art_id})
+
+
+def test_tool_descriptions_teach_compose_once(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    assert "save ONCE" in art.save_file_artifact.description
+    assert "batch your changes into one rewrite" in art.rewrite_artifact.description
+
+
 # ── the routes (the split + gating contract) ───────────────────────────────────
 
 

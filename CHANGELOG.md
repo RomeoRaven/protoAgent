@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Artifacts nudge away from the save-loop (#2257).** The field pattern behind one
+  1.5M-token turn: eleven `save_file_artifact` revisions of the same file, each one
+  round-tripping the full body through the conversation. The tools now teach
+  compose-once (save/rewrite descriptions say to batch and write when complete), and a
+  third full-body write to the SAME artifact within a few minutes carries a nudge in the
+  tool result pointing at batching or `update_artifact` (the targeted path, deliberately
+  exempt). A nudge, never a block — turns keep working.
+
 ### Changed
 - **Prompt caching is attempt-by-default, and failure is loud (#2255).** Caching used to
   be gated on an Anthropic-looking model NAME, which silently disabled it for every
