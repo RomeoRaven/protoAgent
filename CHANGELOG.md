@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   activity in usage) draws a once-per-model WARNING naming it. `force: true` now means
   "never auto-fall back". The cache warmer's matching name gate is gone too — warming
   is already double-opt-in.
+### Fixed
+- **The artifact panel stops hammering /history (#2256).** The shell polled the full
+  store every 1.5s flat while visible — 157 requests in one 7-minute field session, 44%
+  of the member's log lines. The route is conditional now (weak mtime+size ETag; a
+  matched `If-None-Match` answers an empty 304 before the store is even read) and the
+  panel's cadence is adaptive: fast while the store is actually changing or a render
+  verdict just posted, decaying to an 8s idle tick, with an immediate refresh kick on
+  window re-focus. Idle cost drops from ~40 full-store reads a minute to ~7 empty 304s.
 
 ## [0.114.0] - 2026-07-24
 
