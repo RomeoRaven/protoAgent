@@ -579,6 +579,35 @@ def _thumbnail(data: bytes, mime: str) -> str | None:
         return None
 
 
+# ── full-body-write nudge (#2257) ────────────────────────────────────────────
+# Iterating an artifact by re-SAVING it (save_file_artifact / rewrite_artifact)
+# round-trips the entire body through the conversation every time — the field
+# case was 11 saves in one turn. Once a short window sees repeated full-body
+# writes to the SAME artifact, the tool result carries a nudge toward batching
+# (or update_artifact, the cheap targeted path — which is deliberately exempt).
+# A nudge, never a block: turns keep working.
+_SAVE_NUDGE_AFTER = 3
+_SAVE_NUDGE_WINDOW_MS = 10 * 60 * 1000
+_recent_full_saves: dict[str, list[int]] = {}
+
+
+def _save_nudge(art_id: str) -> str:
+    """Record one full-body write to ``art_id``; the nudge string once the recent
+    window crosses the threshold, else empty."""
+    now = _now()
+    stamps = [t for t in _recent_full_saves.get(art_id, []) if now - t <= _SAVE_NUDGE_WINDOW_MS]
+    stamps.append(now)
+    _recent_full_saves[art_id] = stamps
+    if len(stamps) < _SAVE_NUDGE_AFTER:
+        return ""
+    return (
+        f"\n\nNOTE: that's full-body write #{len(stamps)} to this artifact in a few minutes — "
+        "each one round-trips the entire content through the conversation. Batch the remaining "
+        "changes and write ONCE when the content is complete (for code artifacts, "
+        "update_artifact makes targeted edits without resending the body)."
+    )
+
+
 @tool
 def save_file_artifact(path: str, title: str = "", artifact_id: str = "") -> str:
     """Save a GENERATED FILE (a .docx / .xlsx / .pptx / .pdf / image / text file you already
@@ -590,6 +619,10 @@ def save_file_artifact(path: str, title: str = "", artifact_id: str = "") -> str
     skills, a generated report or image): pass the file ``path``. The panel stores the bytes,
     shows a download card with a readable text preview (docx→text, xlsx→sheet table,
     pptx→slide outline, pdf→text; images get a thumbnail), and offers a Download button.
+
+    COMPOSE the file completely, then save ONCE — do not save revision after revision while
+    you iterate in a single turn; every save round-trips the full file through the
+    conversation. Batch your edits and save when the content is done.
 
     ``title`` is an optional label. To save a NEW revision of a file you saved before (so it
     becomes v2, v3… of the same artifact rather than a new panel entry), pass that artifact's
@@ -658,7 +691,7 @@ def save_file_artifact(path: str, title: str = "", artifact_id: str = "") -> str
     kb = len(data) // 1024
     return (
         f"Saved file artifact {art_id} → v{v}: {p.name} ({mime}, {kb} KB) — now in the "
-        f"Artifact panel with a preview and a Download button."
+        f"Artifact panel with a preview and a Download button." + _save_nudge(art_id)
     )
 
 
@@ -759,8 +792,10 @@ def update_artifact(old_string: str, new_string: str, artifact_id: str = "") -> 
 def rewrite_artifact(code: str, title: str = "", artifact_id: str = "") -> str:
     """Replace an artifact's ENTIRE source with ``code``, creating a new version (the kind is
     kept). Use this for a large change where a targeted ``update_artifact`` would be awkward;
-    prefer ``update_artifact`` for small edits. Optionally update the ``title``. Defaults to the
-    most-recent artifact; pass ``artifact_id`` to target another.
+    prefer ``update_artifact`` for small edits — a rewrite round-trips the full body through
+    the conversation every time, so batch your changes into one rewrite rather than iterating
+    rewrite-by-rewrite. Optionally update the ``title``. Defaults to the most-recent artifact;
+    pass ``artifact_id`` to target another.
     """
     code = code or ""
     if err := _too_big(code):
@@ -774,7 +809,7 @@ def rewrite_artifact(code: str, title: str = "", artifact_id: str = "") -> str:
     if title:
         art["title"] = title
     v = _commit_version(store, art, code)
-    return f"Rewrote artifact {art['id']} → version {v}." + _render_suffix(art["id"], v)
+    return f"Rewrote artifact {art['id']} → version {v}." + _save_nudge(art["id"]) + _render_suffix(art["id"], v)
 
 
 @tool
