@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool result pointing at batching or `update_artifact` (the targeted path, deliberately
   exempt). A nudge, never a block — turns keep working.
 
+### Changed
+- **Prompt caching is attempt-by-default, and failure is loud (#2255).** Caching used to
+  be gated on an Anthropic-looking model NAME, which silently disabled it for every
+  gateway alias — one field turn on `protolabs/fast` burned 1.5M input tokens with zero
+  cache reads and nothing said a word. `cache_control` now attaches for every model:
+  a provider that rejects the blocks gets one automatic retry without them and falls
+  back to plain delivery for that model for the session (warned once); a provider that
+  silently ignores them (consecutive calls with a cacheable-size prefix and zero cache
+  activity in usage) draws a once-per-model WARNING naming it. `force: true` now means
+  "never auto-fall back". The cache warmer's matching name gate is gone too — warming
+  is already double-opt-in.
 ### Fixed
 - **The artifact panel stops hammering /history (#2256).** The shell polled the full
   store every 1.5s flat while visible — 157 requests in one 7-minute field session, 44%
