@@ -327,6 +327,41 @@ def test_data_routes_on_the_gated_prefix(monkeypatch, tmp_path):
     assert hist["current"] == hist["artifacts"][0]["id"]
 
 
+def test_history_is_conditional_etag_304(monkeypatch, tmp_path):
+    """#2256: the panel polls /history continuously — an unchanged store must answer
+    with an empty 304 (matched If-None-Match), and any mutation must rotate the tag."""
+    from fastapi.testclient import TestClient
+
+    art = _load(monkeypatch, tmp_path)
+    c = TestClient(_app(art))
+
+    r1 = c.get("/api/plugins/artifact/history")
+    etag = r1.headers.get("etag")
+    assert r1.status_code == 200 and etag
+
+    r2 = c.get("/api/plugins/artifact/history", headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+    assert r2.headers.get("etag") == etag
+    assert not r2.content  # 304 carries no body — the panel skips all work
+
+    art.show_artifact.invoke({"kind": "svg", "code": "<x/>", "title": "T"})
+    r3 = c.get("/api/plugins/artifact/history", headers={"If-None-Match": etag})
+    assert r3.status_code == 200  # store changed → old tag no longer matches
+    assert r3.headers.get("etag") and r3.headers.get("etag") != etag
+    assert len(r3.json()["artifacts"]) == 1
+
+
+def test_shell_polls_adaptively_with_etag(monkeypatch, tmp_path):
+    """The shell page's poll loop (#2256): conditional fetch, 304 short-circuit,
+    idle backoff constants, and no flat setInterval driver."""
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML
+    assert "If-None-Match" in html
+    assert "304" in html
+    assert "POLL_IDLE_MS" in html and "POLL_FAST_MS" in html
+    assert "setInterval(poll" not in html  # the flat 1.5s driver is gone
+
+
 def test_delete_route_removes_the_artifact(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
 
@@ -439,7 +474,7 @@ def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     assert 'import(window.__base + "/_ds/plugin-kit.js")' in html
     assert 'type="module"' in html
     # rules 2+3 — gated data via the kit's slug-aware authed fetch.
-    assert 'apiFetch("/api/plugins/artifact/history")' in html
+    assert 'apiFetch("/api/plugins/artifact/history"' in html  # conditional fetch adds an init arg (#2256)
     # nested artifact frame stays sandboxed with NO same-origin (the isolation model);
     # allow-pointer-lock lets game/canvas artifacts capture the pointer (protoAgent #1443).
     assert 'sandbox="allow-scripts allow-pointer-lock"' in html
