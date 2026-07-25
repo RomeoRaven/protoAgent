@@ -390,9 +390,12 @@ class LangGraphConfig:
     # NOTE: this middleware also DELIVERS KnowledgeMiddleware's context to the
     # model (create_agent doesn't read the `context` state key), so it's wired
     # unconditionally; the flags below only control the caching half.
+    # Attempt-by-default (#2255): blocks are attached for EVERY model (aliases
+    # included); a provider that rejects them auto-falls back per session, one
+    # that silently ignores them draws a zero-hit warning.
     prompt_cache_enabled: bool = True
     prompt_cache_ttl: str = "5m"  # "5m" (ephemeral) or "1h" (persistent)
-    prompt_cache_force: bool = False  # bypass the Anthropic-name heuristic
+    prompt_cache_force: bool = False  # never auto-fall back — a rejection propagates
 
     # Cache-warming heartbeat — optional background ping that reproduces the
     # agent's cached system+tools prefix on an interval so the FIRST real

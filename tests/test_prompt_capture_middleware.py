@@ -36,10 +36,10 @@ def _response(usage=None):
     return SimpleNamespace(result=[msg])
 
 
-def _run_chained(req, response, capture=None):
+def _run_chained(req, response, capture=None, cache=None):
     """Run PromptCache wrapping PromptCapture (production order) to a canned
     response; returns what the chain returned."""
-    cache = PromptCacheMiddleware()
+    cache = cache or PromptCacheMiddleware()
     capture = capture or PromptCaptureMiddleware()
     return cache.wrap_model_call(req, lambda r: capture.wrap_model_call(r, lambda _r: response))
 
@@ -71,23 +71,24 @@ def test_captures_blocks_split_with_task_id_and_usage():
     assert (row["cache_read_tokens"], row["cache_creation_tokens"]) == (100, 7)
 
 
-def test_captures_plain_string_split_on_non_anthropic_path():
-    # Non-Anthropic: PromptCache appends the tail as plain text — capture
-    # recovers the same stable/tail split by matching the exact suffix.
+def test_captures_plain_string_split_when_cache_disabled():
+    # Caching off (disabled, or a model that rejected blocks — #2255): PromptCache
+    # appends the tail as plain text — capture recovers the same stable/tail split
+    # by matching the exact suffix.
     req = _Req("protolabs/reasoning", SystemMessage(content="STABLE"), state={"context": "ctx"})
     with request_metadata_scope({"a2a.task_id": "task-str"}):
-        _run_chained(req, _response())
+        _run_chained(req, _response(), cache=PromptCacheMiddleware(enabled=False))
     row = prompt_snapshots().calls_for_task("task-str")[0]
     assert row["stable_text"] == "STABLE"
     assert row["context_text"] == "\n\n# Context\n\nctx"
 
 
 def test_captures_untouched_prompt_when_cache_noops():
-    # No context + non-Anthropic → PromptCache passes the request through; the
+    # No context + caching disabled → PromptCache passes the request through; the
     # snapshot is the plain system prompt with an empty tail.
     req = _Req("protolabs/reasoning", SystemMessage(content="JUST-STABLE"), state={})
     with request_metadata_scope({"a2a.task_id": "task-plain"}):
-        _run_chained(req, _response())
+        _run_chained(req, _response(), cache=PromptCacheMiddleware(enabled=False))
     row = prompt_snapshots().calls_for_task("task-plain")[0]
     assert row["stable_text"] == "JUST-STABLE"
     assert row["context_text"] == ""

@@ -256,7 +256,10 @@ FIELDS: list[Field] = [
         "Enable prefix caching",
         "bool",
         "Caching",
-        "Anthropic prefix caching on the stable prompt; no-op on non-Anthropic models.",
+        "Prefix caching on the stable prompt — attempted for EVERY model, gateway aliases "
+        "included. A provider that rejects cache blocks falls back automatically; one that "
+        "silently ignores them draws a warning in the logs so you know you're paying full "
+        "input price.",
         scope="host",
     ),
     Field("prompt_cache.ttl", "prompt_cache_ttl", "Cache TTL", "select", "Caching", options=["5m", "1h"], scope="host"),
