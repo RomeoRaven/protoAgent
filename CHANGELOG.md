@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Console-side for now; the underlying gap belongs in `@protolabsai/ui` — a segmented
   strip should never overflow its container regardless of who renders it.
 ### Added
+- **The ACP layer no longer discards `stopReason` — a coder can declare a dead end
+  (#2279).** ACP already told us *why* a turn ended and we logged it and dropped it on the
+  floor. Because `prompt()` returns text, `end_turn`, `refusal`, `max_tokens` and
+  `cancelled` all collapsed into one downstream signal — "no commits" — and silence reads
+  as failure-worth-retrying. In the reported case a board feature named a file that does
+  not exist, and the loop burned three coder runs across three model tiers (~20 minutes)
+  escalating against a spec no model could satisfy.
+
+  `AcpClient.last_stop_reason` now carries the value straight off the wire, and
+  `dead_end()` answers the question an orchestrator actually has: is retrying pointless?
+  `refusal` and `cancelled` are dead ends — a bigger model refuses too, and a deliberate
+  cancel shouldn't be fought. `max_tokens` deliberately is **not**: hitting a limit is
+  precisely when escalating a tier or splitting the work is the right move. `end_turn` is
+  a normal completion whose productivity stays the caller's judgement.
 - **Keyboard shortcuts work with sandboxed plugin views (#1457).** A plugin view is an
   iframe, which broke keyboards in both directions: keys pressed inside it never reached
   the host listener (so *every* host shortcut was dead while a plugin view had focus), and
