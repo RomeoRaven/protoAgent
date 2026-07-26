@@ -23,6 +23,13 @@ from time import time
 # the tick and `Watch.active` all agree on.
 TERMINAL_STATUSES = ("met", "expired")
 
+# What makes a watch FIRE its reaction.
+#   met     — the verifier passed. A tripwire: "when the deploy finishes, run the smoke test."
+#   change  — the verifier's EVIDENCE differs from last check, whatever the predicate says. A
+#             monitor: "tell me whenever the treasury moves." The first check only establishes
+#             the baseline; it never fires.
+TRIGGERS = ("met", "change")
+
 # Default global poll cadence, in seconds. THE source of truth: ``LangGraphConfig``
 # imports it as the default for its ``watch_interval`` field (``watches.interval``), and
 # the controller / server loop fall back to it when handed a config object that has no
@@ -42,6 +49,12 @@ MIN_WATCH_INTERVAL_S = 5.0
 # claims to report it.
 DEFAULT_KEEP_TERMINAL_H = 24.0
 
+# Consecutive fires that mark a repeating watch as FLAPPING. A healthy repeating watch fires
+# on edges, which are rare; one that fires on back-to-back checks is either oscillating or
+# monitoring a value that moves every poll. Either way each fire can enqueue an agent turn, so
+# it costs far more than intended — worth a loud, deduped warning and a metric.
+FLAP_WARN_CONSECUTIVE_FIRES = 5
+
 
 @dataclass
 class Watch:
@@ -60,6 +73,24 @@ class Watch:
     interval_s: float | None = None  # per-watch cadence override; None → config watch_interval
     deadline: float | None = None  # epoch seconds; past → expired (fires on_expired)
     stall_after: int | None = None  # N unchanged checks → on_stalled (watch stays active)
+    # What fires the reaction (see TRIGGERS) and whether firing ENDS the watch. The two are
+    # orthogonal: `trigger` picks the event, `repeat` picks the lifetime.
+    #   met   + repeat=False → the original one-shot tripwire (the default)
+    #   met   + repeat=True  → fires on every rising EDGE, stays active
+    #   change+ repeat=True  → fires on every value change, stays active
+    trigger: str = "met"
+    repeat: bool = False
+    # Edge state for a repeating `met` watch: was the predicate satisfied at the LAST check?
+    # Without this a repeating watch is level-triggered — a predicate that stays true (e.g.
+    # "credits >= 1,000,000", true forever once crossed) would re-fire every single tick.
+    was_met: bool = False
+    # Observability for the repeating/monitor dispositions (see FLAP_WARN_CONSECUTIVE_FIRES).
+    # `check_count`/`fire_count` give a lifetime fire RATE straight off GET /api/watches;
+    # `consecutive_fires` is the burst signal — it resets on any check that doesn't fire.
+    check_count: int = 0
+    fire_count: int = 0
+    consecutive_fires: int = 0
+    flap_warned: bool = False
     # Reaction (ADR 0067 D3): on met, enqueue this prompt as a one-shot agent turn in
     # ``run_session`` via sdk.run_in_session. Both empty → the watch reacts via hooks only.
     run_prompt: str = ""
@@ -85,6 +116,12 @@ class Watch:
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in known})
 
+    @property
+    def repeating(self) -> bool:
+        """Whether firing leaves the watch active. A repeating watch only ends on its
+        deadline or an explicit clear — give it an expiry if it shouldn't run forever."""
+        return bool(self.repeat)
+
     def status_line(self) -> str:
         """One-line human summary for list output + status.
 
@@ -103,6 +140,10 @@ class Watch:
     def _lifetime_suffix(self) -> str:
         """`` (every 30m, expires in 2h, stall after 3)`` — only the parts that are set."""
         parts = []
+        if self.trigger == "change":
+            parts.append("on change")
+        if self.repeat:
+            parts.append("repeating")
         if self.interval_s:
             parts.append(f"every {_duration(self.interval_s)}")
         if self.deadline is not None:
