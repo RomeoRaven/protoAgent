@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It warns rather than refuses: a headless box legitimately binds a single interface, and
   refusing to boot would trade a reachable-elsewhere server for no server at all.
 ### Fixed
+- **The desktop app can open a second window — "New Window" is no longer a no-op
+  (#1706).** The shell's `on_new_window` handler only ever forwarded *external* http(s)
+  links to the system browser and denied everything else, so a same-origin new-window
+  request — which is what the menu item and any in-app "open in new window" gesture
+  produce — was silently swallowed. There was no path to a second window at all.
+
+  Same-origin requests now open a real Tauri window carrying the same API-base handoff and
+  title-bar treatment as the primary one (an unmanaged child webview would have had
+  neither). A "New Window" tray item makes it discoverable, and a `new_window` command
+  lets the console request one — optionally at a route, so a link to a specific agent
+  opens a window already pointed at it. New windows are offset rather than centred, since
+  a second window landing exactly on the first reads as "nothing happened".
+
+  Loopback on a *different* port is still treated as somebody else's server and opens in
+  the browser.
 - **Plugin endpoint errors answer with a structured JSON error instead of a bare 500
   (#2259).** A plugin route handler that raised produced `HTTP 500` with the plain-text
   body `Internal Server Error` and nothing a caller could parse — so "my request was
