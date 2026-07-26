@@ -269,6 +269,13 @@ export const WATCHES = {
       status: "active",
       verifier: { type: "llm" },
       last_checked: NOW_SEC - 120,
+      // Lifetime knobs (ADR 0067 / #2325) so the panel's meta line is exercised. Relative
+      // to NOW so the rendered spans stay stable whenever the suite runs. Deliberately on
+      // the EXISTING active watch rather than a new row — an extra watch would shift the
+      // card's badge count and pulse, which other assertions in work-overview pin.
+      interval_s: 1800,
+      deadline: NOW_SEC + 7200,
+      stall_after: 3,
     },
     {
       id: "watch-2",
@@ -277,6 +284,11 @@ export const WATCHES = {
       verifier: { type: "llm" },
       last_checked: MET_AT_SEC - 300,
       finished_at: MET_AT_SEC,
+      // Knobs deliberately SET on a terminal watch: the panel must suppress them (a met
+      // watch has nothing left to expire), so the spec proves suppression rather than
+      // just the absence of data.
+      interval_s: 600,
+      stall_after: 2,
     },
     {
       id: "watch-3",
