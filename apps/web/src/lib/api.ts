@@ -55,9 +55,11 @@ import type {
   WatchState,
   WorkflowPausedRun,
   WorkflowRunResult,
+  VerifierCatalog,
   WorkflowSummary,
 } from "./types";
 
+import type { WatchCreateBody } from "../chat/watchForm";
 import { notifyAuthRequired } from "./auth";
 import { errMsg } from "./format";
 
@@ -1361,6 +1363,26 @@ export const api = {
   // instead of polling — same pattern as goals.
   watches() {
     return request<{ watches: WatchState[]; enabled: boolean }>("/api/watches");
+  },
+
+  // What a goal or watch can be checked WITH, from every source (ADR 0028/0067). The
+  // creators build their verifier pickers from this instead of a hardcoded list — a UI-side
+  // copy of a server registry drifts, and this one had already lost the whole `plugin` class.
+  verifiers() {
+    return request<VerifierCatalog>("/api/verifiers");
+  },
+
+  // Operator watch-create. This is the TRUSTED channel (ADR 0066 path ceiling), so unlike
+  // the agent's plugin-only `create_watch` it accepts command/test/ci/data verifiers; a
+  // rejected spec comes back 400 → `request` throws, which the caller surfaces as a toast.
+  // `body` is the raw object — `request` serializes it (and sets the JSON content type).
+  // Pre-stringifying here double-encodes it, which the mock server happily accepts and
+  // FastAPI's `body: dict` rejects with a 422.
+  createWatch(body: WatchCreateBody) {
+    return request<{ ok: boolean; message?: string }>("/api/watches", {
+      method: "POST",
+      body,
+    });
   },
 
   clearWatch(id: string) {

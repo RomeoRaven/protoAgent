@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { findSlashCommand } from "../ext/slashRegistry";
 import "./coreSlashCommands"; // side-effect: registers /new, /clear, /effort
@@ -134,5 +134,46 @@ describe("/help — the live command/shortcut reference card (#1700)", () => {
     expect(card).toContain("incognito");
     expect(card).toContain("⌘/Ctrl+Enter"); // moved out of the placeholder
     expect(card).toContain("**Capabilities**");
+  });
+});
+
+describe("/watch (ADR 0067)", () => {
+  const cmd = () => findSlashCommand("watch")!;
+
+  it("is registered and never falls through", () => {
+    // Unlike /goal, there is NO server-side /watch to fall through to — returning false
+    // would send the literal text "/watch" to the agent as a message. Every branch must
+    // claim the token, including with no session and no form panel.
+    expect(cmd()).toBeTruthy();
+    expect(cmd().run(ctx())).toBe(true);
+    expect(cmd().run(ctx({ rest: "new" }))).toBe(true);
+    expect(cmd().run(ctx({ rest: "nonsense" }))).toBe(true);
+  });
+
+  it("/watch new opens the SAME form the Work panel's creator renders", async () => {
+    let spec: ComposerFormSpec | null = null;
+    // The command fetches the verifier catalog first, so `openForm` lands a microtask later —
+    // `run` still returns true synchronously to intercept the send. With no server here the
+    // fetch rejects and the form opens on the core types, which is the intended degradation.
+    expect(cmd().run(ctx({ rest: "new", sessionId: "s1", openForm: (s) => (spec = s) }))).toBe(true);
+    await vi.waitFor(() => expect(spec).not.toBeNull());
+    const payload = spec!.payload;
+    expect(payload.title).toBe("New watch");
+    expect(payload.steps).toHaveLength(2);
+    expect((payload.steps![0].schema as { required: string[] }).required).toEqual(["condition"]);
+  });
+
+  it("/watch new says so when the host has no form panel, instead of dropping the command", async () => {
+    const notes: string[] = [];
+    // openForm is optional in SlashContext — a host that never wired the panel must still
+    // get a readable outcome.
+    expect(cmd().run(ctx({ rest: "new", sessionId: "s1", noteToThread: (m) => notes.push(m) }))).toBe(true);
+    await vi.waitFor(() => expect(notes.join(" ")).toMatch(/can't open the watch form/i));
+  });
+
+  it("an unknown subcommand explains the usage rather than guessing", () => {
+    const notes: string[] = [];
+    cmd().run(ctx({ rest: "clear all", noteToThread: (m) => notes.push(m) }));
+    expect(notes.join(" ")).toMatch(/\/watch new/);
   });
 });
