@@ -256,21 +256,35 @@ def register_config_routes(app) -> None:
         registry = list(getattr(cfg, "projects", []) or [])
         explicit = list(getattr(cfg, "filesystem_projects", []) or [])
         enabled = bool(getattr(cfg, "filesystem_enabled", False))
-        fenced_names = {
-            str(p.get("name") or "")
-            for p in (cfg.fenced_projects() if hasattr(cfg, "fenced_projects") else [])
-        }
+        # The PROJECTION, in order — not a set. fenced_projects() already drops the
+        # malformed and duplicate entries (keeping the first of a duplicate name), so
+        # matching a raw registry row by name against a set would mark BOTH halves of a
+        # duplicate as fenced when only one root is reachable.
+        fenced_rows = cfg.fenced_projects() if hasattr(cfg, "fenced_projects") else []
+        # Keyed on (name, PATH), not name alone. fenced_projects() resolves duplicates by
+        # keeping the first entry — which may be a different PATH than a later row sharing
+        # the name. Matching on name would then mark the wrong row as fenced: with
+        # [{dup, /missing}, {dup, /exists}] the fence holds /missing (dropped downstream as
+        # a non-directory, so the real fence is EMPTY) while the API would report the
+        # /exists row as live. That is the declared-vs-enforced divergence this endpoint
+        # exists to expose, so it must not be reintroduced here.
+        fenced_keys = {(str(p.get("name") or ""), str(p.get("path") or "")) for p in fenced_rows}
 
         if not enabled:
             fence_source = "disabled"
         elif explicit:
             fence_source = "explicit"
-        elif fenced_names:
+        elif registry:
+            # A CONFIGURED registry is the fence source even when it projects nothing —
+            # that's the whole point of honouring `fs: false` literally rather than
+            # substituting the workspace default. Refined to "unbound" below when no
+            # row actually feeds the fence.
             fence_source = "registry"
         else:
             fence_source = "workspace_default"
 
         projects = []
+        claimed: set[tuple[str, str]] = set()
         for entry in registry:
             row = dict(entry) if isinstance(entry, dict) else {}
             raw = str(row.get("path") or "").strip()
@@ -284,12 +298,34 @@ def register_config_routes(app) -> None:
             # isn't a directory. So a registered-but-missing folder contributes
             # nothing, and reporting it as fenced would be the same declared-vs-
             # enforced lie this endpoint exists to expose.
+            name = str(row.get("name") or "")
+            # Compare the EXPANDED path, since fenced_projects() expands `~` — a row
+            # written as `~/dev/x` must still match the fence entry it produced.
+            try:
+                # Resolved, in lockstep with fenced_projects() — it emits resolved paths,
+                # so comparing an unresolved one here would never match a symlinked entry.
+                key = (name, str(Path(raw).expanduser().resolve())) if raw else (name, "")
+            except (OSError, ValueError):
+                key = (name, raw)
             row["fenced"] = bool(
                 fence_source == "registry"
                 and row["exists"]
-                and str(row.get("name") or "") in fenced_names
+                and key in fenced_keys
+                and key not in claimed  # the SECOND row of a duplicate isn't the fenced one
             )
+            if row["fenced"]:
+                claimed.add(key)
             projects.append(row)
+
+        # A configured registry where NO row feeds the fence resolves to an empty fence,
+        # and build_fs_tools then unbinds the entire toolset (#2251). Reporting
+        # "registry" there would claim the registry is driving a fence that doesn't
+        # exist. Two distinct ways to land here, both worth naming rather than hiding:
+        # every entry opted out with `fs: false` (deliberate), or every folder is
+        # missing (a mistake). The console tells them apart from the rows.
+        if fence_source == "registry" and not any(p.get("fenced") for p in projects):
+            fence_source = "unbound"
+
         return {
             "enabled": enabled,
             "fence_source": fence_source,

@@ -236,3 +236,62 @@ def test_default_mode_still_blocks_all_private():
     # The model-probe path keeps the strict default — private + loopback blocked too.
     for bad in ("http://10.0.0.5/", "http://127.0.0.1/", "http://169.254.169.254/"):
         assert egress.check_url(bad) is not None, bad
+
+
+def test_policy_expands_tilde_to_match_the_enforced_fence(tmp_path, monkeypatch):
+    """The generator emitted the RAW path string while the enforced fence resolves
+    every root with Path(...).expanduser() — so a `~/…` entry produced a Landlock
+    policy containing a literal "~", which matches nothing. A policy that silently
+    disagrees with the fence it describes is worse than no policy."""
+    from graph.config import LangGraphConfig
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home_dir = tmp_path / "dev" / "proj"
+    home_dir.mkdir(parents=True)
+
+    p = tmp_path / "c.yaml"
+    p.write_text("projects:\n  - {name: proj, path: ~/dev/proj}\n")
+    policy = _gen().build_policy(LangGraphConfig.from_yaml(p))
+
+    assert str(home_dir) in policy
+    assert "~/dev/proj" not in policy
+
+
+def test_policy_never_emits_the_cwd_for_a_blank_path(tmp_path):
+    """A whitespace-only path used to become "." — the SERVER's current directory —
+    and got emitted as a fenced Landlock root. Both obvious guards miss it: the raw
+    value is truthy, and Path("") is Path("."), so the result is truthy too."""
+    from graph.config import LangGraphConfig
+
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "filesystem:\n"
+        "  enabled: true\n"
+        "  projects:\n"
+        '    - {name: blank, path: "   ", write: true}\n'
+        f"    - {{name: real, path: {tmp_path}, write: true}}\n"
+    )
+    policy = _gen().build_policy(LangGraphConfig.from_yaml(p))
+
+    assert "project: blank" not in policy
+    assert "\n    - .\n" not in policy  # never the bare cwd
+    assert str(tmp_path) in policy  # the real root still lands
+
+
+def test_policy_resolves_paths_like_the_enforced_fence(tmp_path):
+    """tools/fs_tools.py resolves every root with expanduser().resolve(); a policy
+    that normalizes differently describes directories the agent doesn't have."""
+    from graph.config import LangGraphConfig
+
+    real = tmp_path / "real"
+    real.mkdir()
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "filesystem:\n"
+        "  enabled: true\n"
+        "  projects:\n"
+        f"    - {{name: dotted, path: {tmp_path}/./real, write: true}}\n"
+    )
+    policy = _gen().build_policy(LangGraphConfig.from_yaml(p))
+    assert str(real.resolve()) in policy
+    assert "/./" not in policy

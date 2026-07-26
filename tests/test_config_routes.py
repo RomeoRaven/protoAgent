@@ -541,3 +541,91 @@ def test_projects_get_workspace_default_and_disabled(monkeypatch):
     body = _client().get("/api/projects").json()
     assert body["fence_source"] == "disabled" and body["enabled"] is False
     assert body["projects"][0]["fenced"] is False
+
+
+def test_projects_get_marks_only_the_first_of_a_duplicate_name(monkeypatch, tmp_path):
+    """fenced_projects() keeps the FIRST of a duplicate name, so the API must not
+    report both rows as fenced — only one root is actually reachable."""
+    _projects_state(
+        monkeypatch,
+        projects=[
+            {"name": "dup", "path": str(tmp_path)},
+            {"name": "dup", "path": str(tmp_path)},
+        ],
+    )
+    rows = _client().get("/api/projects").json()["projects"]
+    assert [r["fenced"] for r in rows] == [True, False]
+
+
+def test_projects_get_reports_unbound_when_every_folder_is_gone(monkeypatch, tmp_path):
+    """A registry that projects rows but whose paths are all missing resolves to an
+    EMPTY fence — build_fs_tools then unbinds the whole toolset (#2251). Reporting
+    "registry" there would claim a fence that doesn't exist."""
+    _projects_state(
+        monkeypatch,
+        projects=[
+            {"name": "gone", "path": str(tmp_path / "nope")},
+            {"name": "alsogone", "path": str(tmp_path / "nope2")},
+        ],
+    )
+    body = _client().get("/api/projects").json()
+    assert body["fence_source"] == "unbound"
+    assert [r["fenced"] for r in body["projects"]] == [False, False]
+
+
+def test_projects_get_stays_registry_when_one_folder_survives(monkeypatch, tmp_path):
+    _projects_state(
+        monkeypatch,
+        projects=[
+            {"name": "here", "path": str(tmp_path)},
+            {"name": "gone", "path": str(tmp_path / "nope")},
+        ],
+    )
+    body = _client().get("/api/projects").json()
+    assert body["fence_source"] == "registry"
+    assert [r["fenced"] for r in body["projects"]] == [True, False]
+
+
+def test_projects_get_reports_unbound_when_every_entry_opts_out(monkeypatch, tmp_path):
+    """`fs: false` everywhere is now honoured literally — no workspace-default
+    substitution — so the API must say the fence is unbound rather than pretending
+    a registry is driving it."""
+    _projects_state(
+        monkeypatch,
+        projects=[
+            {"name": "a", "path": str(tmp_path), "fs": False},
+            {"name": "b", "path": str(tmp_path), "fs": False},
+        ],
+    )
+    body = _client().get("/api/projects").json()
+    assert body["fence_source"] == "unbound"
+    assert [r["fenced"] for r in body["projects"]] == [False, False]
+
+
+def test_projects_get_does_not_credit_a_duplicate_with_a_different_path(monkeypatch, tmp_path):
+    """The nastiest divergence: fenced_projects() keeps the FIRST duplicate, which
+    only validates absoluteness — not existence. So [{dup,/missing},{dup,/exists}]
+    puts /missing in the fence, fs_tools drops it as a non-directory, and the REAL
+    fence is empty. Matching rows by name alone credited the /exists row as live —
+    exactly the declared-vs-enforced lie this endpoint exists to expose."""
+    _projects_state(
+        monkeypatch,
+        projects=[
+            {"name": "dup", "path": str(tmp_path / "missing")},
+            {"name": "dup", "path": str(tmp_path)},  # exists, but NOT the fenced entry
+        ],
+    )
+    body = _client().get("/api/projects").json()
+    assert [r["fenced"] for r in body["projects"]] == [False, False]
+    assert body["fence_source"] == "unbound"
+
+
+def test_projects_get_matches_a_tilde_row_against_its_expanded_fence_entry(monkeypatch, tmp_path):
+    """fenced_projects() expands `~`, so a row written as `~/x` has to be compared
+    against the EXPANDED path or it would never match its own fence entry."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "proj").mkdir()
+    _projects_state(monkeypatch, projects=[{"name": "p", "path": "~/proj"}])
+    body = _client().get("/api/projects").json()
+    assert body["fence_source"] == "registry"
+    assert body["projects"][0]["fenced"] is True

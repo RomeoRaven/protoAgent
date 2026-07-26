@@ -197,6 +197,25 @@ def _env_default(name: str, default, cast=str):
         return default
 
 
+_FALSE_STRINGS = {"false", "no", "off", "0", ""}
+
+
+def _falsey(value, *, default: bool) -> bool:
+    """Is this config value a NO? ``default`` is the answer when the key is absent.
+
+    YAML already yields real booleans for ``false``/``no``/``off``, but a value that
+    arrives from JSON, an env overlay or a hand-edit can be the *string* ``"false"`` —
+    which is truthy, so a bare ``bool()`` would read it as YES. Every caller here gates
+    filesystem access, so the string forms are honoured and the ambiguous direction
+    resolves toward LESS access, never more.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in _FALSE_STRINGS
+    return not bool(value)
+
+
 def _default_filesystem_allow_run() -> bool:
     """Tier-aware app-default for ``filesystem.allow_run`` (#1849). ``run_command``
     is HITL-gated (``run_requires_approval``) — safe when an operator is watching to
@@ -1023,17 +1042,73 @@ class LangGraphConfig:
         Entries opt out with ``fs: false``; everything else is fenced read-write
         by default (D3). Only the fence keys are emitted — ``github`` /
         ``default_branch`` are identity for other consumers and have no business
-        in the fence's vocabulary."""
+        in the fence's vocabulary.
+
+        This grants filesystem access, so every rejection is **loud** and every
+        ambiguity resolves toward *less* access:
+
+        - a malformed entry (no name, no path, duplicate name, non-absolute path)
+          is dropped with a WARNING naming it. ADR 0095's own constraint is that a
+          wrong entry must be visible; these are dropped here, so nothing
+          downstream can report them and this is the only place that can.
+        - ``fs`` / ``write`` are read with :func:`_falsey`, so a string
+          ``"false"`` from JSON or a hand-edit opts out instead of silently
+          granting read-write on a truthy non-empty string.
+        - ``~`` is expanded here so every consumer (the fence, and the ADR 0008
+          OpenShell policy) sees the same path. A RELATIVE path is refused
+          outright for the reason the work-folders POST route already refuses it:
+          it resolves against the server's CWD (``/`` under the desktop sidecar),
+          never the operator's.
+        """
         fenced: list[dict] = []
+        seen: set[str] = set()
         for entry in self.projects or []:
-            if not isinstance(entry, dict) or entry.get("fs") is False:
+            if not isinstance(entry, dict):
+                log.warning("[projects] skipping non-object entry: %r", entry)
                 continue
             name = str(entry.get("name") or "").strip()
             path = str(entry.get("path") or "").strip()
+            # Malformed is reported BEFORE the opt-out is honoured: `{fs: false}` with no
+            # name or path is junk config, and staying quiet about it because it happens
+            # to be opted out is the same invisibility the warnings exist to end. A
+            # WELL-FORMED opt-out below stays silent — that one is deliberate, not a typo.
             if not name or not path:
-                continue  # tools/fs_tools.py logs the skip when it builds the registry
-            projected = {"name": name, "path": path, "write": bool(entry.get("write", True))}
-            if entry.get("no_delete"):
+                log.warning("[projects] skipping entry missing name/path: %r", entry)
+                continue
+            if _falsey(entry.get("fs"), default=False):
+                continue  # registered for other consumers; no filesystem reach
+            if name in seen:
+                log.warning(
+                    "[projects] duplicate project name %r — keeping the first, dropping this one. "
+                    "Names are the fence's identifier; two entries can't share one.",
+                    name,
+                )
+                continue
+            # Absoluteness is checked on the EXPANDED-but-unresolved path, because
+            # `.resolve()` makes every path absolute (it resolves a relative one against
+            # the process CWD) — resolving first would silently swallow the very input
+            # this rejects.
+            expanded = Path(path).expanduser()
+            if not expanded.is_absolute():
+                log.warning(
+                    "[projects] project %r path is not absolute: %s — skipped. A relative path "
+                    "resolves against the SERVER's working directory, never yours.",
+                    name,
+                    path,
+                )
+                continue
+            seen.add(name)
+            projected = {
+                "name": name,
+                # Emitted RESOLVED, matching tools/fs_tools.py and gen_openshell_policy.py.
+                # Without this a symlinked project is projected as the link while the
+                # enforced fence and the Landlock policy follow it to the target — the
+                # declared-vs-enforced divergence this registry exists to prevent, in the
+                # one function whose docstring promises every consumer sees the same path.
+                "path": str(expanded.resolve()),
+                "write": not _falsey(entry.get("write"), default=False),
+            }
+            if not _falsey(entry.get("no_delete"), default=True):
                 projected["no_delete"] = True
             fenced.append(projected)
         return fenced
@@ -1048,12 +1123,21 @@ class LangGraphConfig:
             return self.filesystem_projects
         if not self.filesystem_enabled:
             return []
-        # A registry whose entries ALL opt out (``fs: false``) projects to nothing —
-        # fall through to the workspace default rather than handing back an empty
-        # fence, which unbinds the whole fs toolset with no visible cause (#2251).
-        fenced = self.fenced_projects()
-        if fenced:
-            return fenced
+        # A CONFIGURED registry is the answer, even when it projects to nothing.
+        # ``fs: false`` on every entry means "registered, but NOT in the fence at all"
+        # (D3) and is honoured literally — substituting the workspace default would
+        # grant read-write on a directory the operator just said they didn't want.
+        #
+        # This used to fall through to that default, on the grounds that an empty fence
+        # unbinds the whole toolset with no visible cause (#2251). That reason is gone:
+        # every dropped entry now WARNs by name, and ``/api/projects`` reports
+        # ``fence_source: "unbound"`` with a console banner. The failure is loud, so it
+        # no longer has to be papered over with access nobody asked for.
+        #
+        # An ABSENT registry still gets the workspace default below — that's the
+        # default-install path and it is deliberately unchanged.
+        if self.projects:
+            return self.fenced_projects()
         from infra.paths import workspace_dir
 
         return [{"name": "workspace", "path": str(workspace_dir(create=create)), "write": True}]
