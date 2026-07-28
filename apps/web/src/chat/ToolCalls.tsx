@@ -18,6 +18,7 @@ import { ToolCard, ToolCardList, ToolCardSummary, ToolSection } from "@protolabs
 
 import type { ToolCall } from "../lib/types";
 import { useUI } from "../state/uiStore";
+import { SHOW_ELAPSED_AFTER_MS, formatElapsed, useElapsed } from "./elapsed";
 import { ToolValue } from "./tool-renderers";
 import { humanizeSeconds, parseWaitInput } from "./waitInfo";
 
@@ -296,18 +297,35 @@ function ToolGroup({
   // A running count of the subagent's tools, in the header — so a collapsed delegation
   // reads "task → researcher · 3 tools" at a glance without expanding.
   const kidCount = kids?.length ?? 0;
-  const name =
-    kidCount > 0 ? (
-      <>
-        {cardLabel(call)}
+
+  // Live elapsed, in the header, while the call is in flight. The DS renders `duration`
+  // on the right once a call SETTLES; until then there is nothing to render, so a card
+  // three seconds in and one fifteen minutes in look identical — and "how long has this
+  // been going?" is the question behind "should I stop it?".
+  //
+  // It reports AGE, not liveness: the value is `now - startedAt`, so it climbs the same
+  // whether the call is working or wedged. Nothing client-side can tell those apart —
+  // that is the server's job (a wedged turn is failed by the stall watchdog, #2349).
+  const elapsedMs = useElapsed(call.status === "running" ? call.startedAt : undefined);
+  const showElapsed = elapsedMs !== undefined && elapsedMs >= SHOW_ELAPSED_AFTER_MS;
+
+  const name = (
+    <>
+      {cardLabel(call)}
+      {kidCount > 0 ? (
         <span className="tool-nested-count">
           {" · "}
           {kidCount} {kidCount === 1 ? "tool" : "tools"}
         </span>
-      </>
-    ) : (
-      cardLabel(call)
-    );
+      ) : null}
+      {showElapsed ? (
+        <span className="tool-elapsed" title="How long this call has been running">
+          {" · "}
+          {formatElapsed(elapsedMs)}
+        </span>
+      ) : null}
+    </>
+  );
 
   return (
     <ToolCard
