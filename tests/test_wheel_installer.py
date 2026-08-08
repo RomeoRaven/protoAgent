@@ -159,7 +159,6 @@ def test_install_end_to_end_unpacks_pins_and_syspaths(box, monkeypatch):
 
     assert str(dest) in sys.path
     # …and the resolved dep is pinned in the lock.
-    inst._write_lock(inst._read_lock())
     lock = json.loads((box / "plugins.lock").read_text())
     assert lock["plugins"] == [{"id": "demoplug", "deps": [{"name": "demolib", "version": "1.0.0", "sha256": sha}]}]
 
@@ -184,7 +183,6 @@ def test_record_lock_preserves_regular_plugin_entry(box, monkeypatch):
     )
 
     wi._record_lock("demoplug", [("demolib", "1.0.0", "b" * 64)])
-    inst._write_lock(inst._read_lock())
 
     lock = json.loads(lock_path.read_text())
     assert set(lock) == {"plugins"}
@@ -217,7 +215,33 @@ def test_read_lock_migrates_legacy_top_level_wheel_deps(box, monkeypatch):
     assert "demoplug" not in lock
     assert lock["plugins"][0]["deps"] == deps
     inst._write_lock(lock)
-    assert set(json.loads(lock_path.read_text())) == {"plugins"}
+    persisted = json.loads(lock_path.read_text())
+    assert persisted == {
+        "plugins": [
+            {
+                "id": "demoplug",
+                "source_url": "https://example.test/demoplug.git",
+                "deps": deps,
+            }
+        ]
+    }
+
+
+def test_lock_migration_preserves_malformed_plugin_ids(box, monkeypatch):
+    import graph.plugins.installer as inst
+
+    lock_path = box / "plugins.lock"
+    monkeypatch.setattr(inst, "lock_path", lambda: lock_path)
+    malformed = {"id": [], "note": "preserve opaque data"}
+    deps = [{"name": "demolib", "version": "1.0.0", "sha256": "d" * 64}]
+    lock_path.write_text(json.dumps({"plugins": [malformed], "demoplug": {"deps": deps}}))
+
+    lock = inst._read_lock()
+    inst._write_lock(lock)
+
+    persisted = json.loads(lock_path.read_text())
+    assert malformed in persisted["plugins"]
+    assert {"id": "demoplug", "deps": deps} in persisted["plugins"]
 
 
 def test_unpack_wheel_rejects_traversal(box):

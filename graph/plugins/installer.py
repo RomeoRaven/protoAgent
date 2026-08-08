@@ -142,7 +142,11 @@ def _normalize_lock(data: object) -> dict:
         plugins = []
         normalized["plugins"] = plugins
 
-    by_id = {e.get("id"): e for e in plugins if isinstance(e, dict) and e.get("id")}
+    by_id = {
+        plugin_id: e
+        for e in plugins
+        if isinstance(e, dict) and isinstance(plugin_id := e.get("id"), str) and plugin_id
+    }
     for key, value in list(normalized.items()):
         if key in {"plugins", "bundles"} or not isinstance(value, dict) or not isinstance(value.get("deps"), list):
             continue
@@ -168,7 +172,9 @@ def _read_lock() -> dict:
 
 def _write_lock(data: dict) -> None:
     data = _normalize_lock(data)
-    data["plugins"].sort(key=lambda e: e.get("id", ""))
+    data["plugins"].sort(
+        key=lambda e: e.get("id", "") if isinstance(e, dict) and isinstance(e.get("id"), str) else ""
+    )
     lock = lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text(json.dumps(data, indent=2) + "\n")
@@ -662,17 +668,19 @@ def install(
     if warnings:
         summary["warnings"] = warnings
     lock = _read_lock()
+    prior_entry = next((e for e in lock["plugins"] if e.get("id") == pid), None)
+    entry = {
+        "id": pid,
+        "source_url": url,
+        "requested_ref": ref or "",
+        "resolved_sha": sha,
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "by": by,
+    }
+    if prior_entry is not None and isinstance(prior_entry.get("deps"), list):
+        entry["deps"] = prior_entry["deps"]
     lock["plugins"] = [e for e in lock["plugins"] if e.get("id") != pid]
-    lock["plugins"].append(
-        {
-            "id": pid,
-            "source_url": url,
-            "requested_ref": ref or "",
-            "resolved_sha": sha,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
-            "by": by,
-        }
-    )
+    lock["plugins"].append(entry)
     _write_lock(lock)
     _audit("install", {"url": url, "ref": ref or "", "sha": sha, "id": pid}, f"installed {pid}@{sha[:10]}")
     log.info("[plugins] installed %s@%s from %s", pid, sha[:10], url)
