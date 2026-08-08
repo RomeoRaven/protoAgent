@@ -126,17 +126,48 @@ def _source_allowed(url: str, allow: list[str] | None) -> bool:
     return any(fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(norm, pat + "*") for pat in allow)
 
 
+def _normalize_lock(data: object) -> dict:
+    """Return the canonical lock shape and absorb the legacy wheel-deps layout.
+
+    ADR 0027 owns ``plugins.lock`` as a top-level ``plugins`` list. The original
+    ADR 0093 writer instead added ``{plugin_id: {deps: [...]}}`` beside that list.
+    Normalize those released entries in memory so the next ordinary write
+    persists one schema without dropping dependency pins.
+    """
+    if not isinstance(data, dict):
+        return {"plugins": []}
+    normalized = dict(data)
+    plugins = normalized.get("plugins")
+    if not isinstance(plugins, list):
+        plugins = []
+        normalized["plugins"] = plugins
+
+    by_id = {e.get("id"): e for e in plugins if isinstance(e, dict) and e.get("id")}
+    for key, value in list(normalized.items()):
+        if key in {"plugins", "bundles"} or not isinstance(value, dict) or not isinstance(value.get("deps"), list):
+            continue
+        entry = by_id.get(key)
+        if entry is None:
+            entry = {"id": key}
+            plugins.append(entry)
+            by_id[key] = entry
+        entry["deps"] = value["deps"]
+        del normalized[key]
+    return normalized
+
+
 def _read_lock() -> dict:
     lock = lock_path()
     if lock.exists():
         try:
-            return json.loads(lock.read_text())
+            return _normalize_lock(json.loads(lock.read_text()))
         except (json.JSONDecodeError, OSError):
             log.warning("[plugins] %s is unreadable — starting a fresh lock", lock)
     return {"plugins": []}
 
 
 def _write_lock(data: dict) -> None:
+    data = _normalize_lock(data)
     data["plugins"].sort(key=lambda e: e.get("id", ""))
     lock = lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
