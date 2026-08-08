@@ -1,12 +1,15 @@
 """Tests for tools.shell.run_command."""
 
+import asyncio
 import ctypes
 import os
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
+import tools.shell as shell
 from tools.shell import run_command
 
 
@@ -40,6 +43,45 @@ async def test_timeout_kills_process():
     assert res.timed_out is True
     assert not res.ok
     assert "timed out" in (res.error or "")
+
+
+@pytest.mark.asyncio
+async def test_windows_taskkill_wait_is_bounded(monkeypatch):
+    class _FakeKiller:
+        killed = False
+        reaped = False
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            self.reaped = True
+            return 0
+
+    class _FakeProcess:
+        pid = 1234
+        killed = False
+
+        def kill(self):
+            self.killed = True
+
+    killer = _FakeKiller()
+    proc = _FakeProcess()
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        return killer
+
+    monkeypatch.setattr(shell, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(shell.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    await shell._kill_process_tree(proc, cleanup_timeout=0.01)
+
+    assert killer.killed is True
+    assert killer.reaped is True
+    assert proc.killed is True
 
 
 @pytest.mark.asyncio

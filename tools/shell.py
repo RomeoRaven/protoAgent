@@ -35,7 +35,11 @@ class ShellResult:
         return self.error is None and not self.timed_out and self.returncode == 0
 
 
-async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+async def _kill_process_tree(
+    proc: asyncio.subprocess.Process,
+    *,
+    cleanup_timeout: float = 5.0,
+) -> None:
     """Best-effort termination of ``proc`` and every child it spawned."""
     if os.name == "nt":
         # Windows has no os.killpg(). taskkill /T is the built-in process-tree
@@ -50,7 +54,17 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await killer.communicate()
+            try:
+                await asyncio.wait_for(killer.communicate(), timeout=cleanup_timeout)
+            except asyncio.TimeoutError:
+                try:
+                    killer.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(killer.wait(), timeout=cleanup_timeout)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    pass
         except (FileNotFoundError, OSError):
             # Fall through to killing the immediate process if taskkill is
             # unavailable in a constrained Windows environment.
