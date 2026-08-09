@@ -1,7 +1,7 @@
 """``protoagent operations`` — list the operations on the shared ops layer (ADR 0075 D2).
 
 The CLI projection of the operations catalog (the same registry `GET /api/operations` serves),
-so an operator can see every op — name, read/write, one-liner — from the terminal.
+so an operator can see every op — name, safety risk, mutation bit, one-liner — from the terminal.
 """
 
 from __future__ import annotations
@@ -21,13 +21,13 @@ def run_operations_cli(argv: list[str]) -> int:
 
     specs = sorted(load_all().values(), key=lambda s: s.name)
     if args.json:
-        print(json.dumps([{"name": s.name, "mutates": s.mutates, "summary": s.summary} for s in specs], indent=2))
+        print(json.dumps([s.as_dict() for s in specs], indent=2))
         return 0
     if not specs:
         print("no operations registered")
         return 0
     width = max(len(s.name) for s in specs)
+    risk_width = max(len(s.risk) for s in specs)
     for s in specs:
-        tag = "write" if s.mutates else "read "
-        print(f"  [{tag}] {s.name:<{width}}  {s.summary}")
+        print(f"  [{s.risk:<{risk_width}}] {s.name:<{width}}  {s.summary}")
     return 0

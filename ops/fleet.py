@@ -14,21 +14,25 @@ import asyncio
 from ops import op
 
 
-@op(name="fleet.up", mutates=True, summary="Start fleet member agents (named, or all workspaces) as background processes.")
+@op(
+    name="fleet.up",
+    risk="disruptive",
+    summary="Start fleet member agents (named, or all workspaces) as background processes.",
+)
 async def up(names: list[str] | None = None) -> list[dict]:
     from graph.fleet import supervisor
 
     return await asyncio.to_thread(supervisor.up, names)
 
 
-@op(name="fleet.down", mutates=True, summary="Stop fleet member agents (named, or all running).")
+@op(name="fleet.down", risk="disruptive", summary="Stop fleet member agents (named, or all running).")
 async def down(names: list[str] | None = None) -> list[dict]:
     from graph.fleet import supervisor
 
     return await asyncio.to_thread(supervisor.down, names)
 
 
-@op(name="fleet.status", mutates=False, summary="List fleet members (host + workspaces + remotes) with live status.")
+@op(name="fleet.status", risk="read", summary="List fleet members (host + workspaces + remotes) with live status.")
 async def status() -> list[dict]:
     from graph.fleet import supervisor
 

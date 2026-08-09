@@ -14,10 +14,10 @@ maps to its surface (a tool string, an HTTP status). Ops live in `ops/` — a ne
 package that must never import `server` / `operator_api` (import-layering) — so any surface
 can call them.
 
-Each op registers metadata via `@op(...)`: its name, whether it **mutates** state, and a
-one-line summary. That registry is the single source for the `safe-operator` MCP profile
-(read vs. write) and the `GET /api/operations` catalog (ADR 0075 D2/D3/D4) — so those are
-derived, not hand-maintained.
+Each op registers metadata via `@op(...)`: its name, required safety risk, and a one-line
+summary. ``mutates`` is derived from risk for compatibility. That registry is the single
+source for the future `safe-operator` MCP profile and the `GET /api/operations` catalog
+(ADR 0075 D2/D3/D4) — so those are derived, not hand-maintained.
 """
 
 from __future__ import annotations
@@ -46,25 +46,48 @@ class OpContext:
 
 @dataclass(frozen=True)
 class OpSpec:
-    """Registered metadata for one op — the seed of the `safe-operator` profile
-    (``mutates``) and the `GET /api/operations` catalog (``name`` / ``summary``)."""
+    """Registered metadata for one op — the seed of safe-operator admission and consent."""
 
     name: str
-    mutates: bool
+    risk: str
     summary: str
+
+    @property
+    def mutates(self) -> bool:
+        """Compatibility projection: every non-read risk changes persistent/runtime state."""
+
+        return self.risk != "read"
+
+    def as_dict(self) -> dict[str, object]:
+        """Stable catalog row shared by CLI and HTTP projections."""
+
+        return {
+            "name": self.name,
+            "risk": self.risk,
+            "mutates": self.mutates,
+            "summary": self.summary,
+        }
 
 
 _REGISTRY: dict[str, OpSpec] = {}
+OPERATION_RISKS = frozenset({"read", "reversible", "disruptive", "destructive"})
 
 
-def op(*, name: str, mutates: bool, summary: str) -> Callable:
-    """Decorator that records an op's :class:`OpSpec` in the registry and stamps
-    ``fn.op_spec``. ``mutates`` is the read/write bit the middle MCP tier keys on:
-    ``False`` ops are admissible to ``read-only``/``safe-operator``; ``True`` ops need
-    ``full`` (or an explicit safe-operator allowance)."""
+def op(*, name: str, risk: str, summary: str) -> Callable:
+    """Register an operation with one explicit safety risk.
+
+    Risk is metadata only in this slice: no MCP execution path is enabled from it. Later
+    consent/admission code can distinguish bounded reversible curation from disruptive or
+    destructive changes without maintaining a second operation list.
+    """
+
+    normalized_risk = str(risk).strip().lower()
+    if normalized_risk not in OPERATION_RISKS:
+        expected = ", ".join(sorted(OPERATION_RISKS))
+        raise ValueError(f"op {name!r} has invalid risk {risk!r}; expected one of: {expected}")
 
     def deco(fn: Callable) -> Callable:
-        spec = OpSpec(name=name, mutates=mutates, summary=summary)
+        spec = OpSpec(name=name, risk=normalized_risk, summary=summary)
         if name in _REGISTRY and _REGISTRY[name] != spec:
             raise ValueError(f"op {name!r} already registered with different metadata")
         _REGISTRY[name] = spec

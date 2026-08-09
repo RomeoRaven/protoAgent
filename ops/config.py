@@ -26,7 +26,7 @@ class ConfigSetResult:
 
 @op(
     name="config.set",
-    mutates=True,
+    risk="disruptive",
     summary="Apply config updates — hot-reload the live agent, or write config.yaml on disk.",
 )
 async def set_config(
@@ -59,7 +59,7 @@ async def set_config(
 
 @op(
     name="config.get",
-    mutates=False,
+    risk="read",
     summary="Read the live config (or the on-disk config.yaml when no agent is running).",
 )
 async def get_config(*, ctx: OpContext | None = None) -> dict:
