@@ -1176,11 +1176,49 @@ export const api = {
     );
   },
 
-  models(apiBase: string, apiKey: string) {
+  models(apiBase: string, apiKey: string, provider = "") {
     return request<{ models: string[]; error: string }>("/api/config/models", {
       method: "POST",
-      body: { api_base: apiBase, api_key: apiKey },
+      // `provider` (ADR 0097): a native OAuth provider lists the subscription
+      // account's models instead of the gateway's; blank = gateway.
+      body: { api_base: apiBase, api_key: apiKey, provider },
     });
+  },
+
+  /** Sign-in status for the native OAuth providers (ADR 0097) — "✓ signed in" or a
+   *  sign-in hint per provider, so the setup UX never asks for a key it doesn't need. */
+  oauthStatus() {
+    return request<{
+      providers: { provider: string; signed_in: boolean; source: string; detail: string; hint: string }[];
+    }>("/api/config/oauth-status");
+  },
+
+  /** Begin an in-console OAuth sign-in (ADR 0097). `mode: "device"` (Codex) returns a
+   *  user_code + verification_uri to poll; `mode: "redirect"` (Claude) returns an
+   *  authorize_url to open and complete with the pasted code. */
+  oauthStart(provider: string) {
+    return request<{
+      flow_id: string;
+      mode: "device" | "redirect";
+      user_code?: string;
+      verification_uri?: string;
+      interval?: number;
+      authorize_url?: string;
+    }>("/api/config/oauth/start", { method: "POST", body: { provider } });
+  },
+  /** Poll a Codex device sign-in until the user approves. */
+  oauthPoll(flowId: string) {
+    return request<{ status: "pending" | "complete" | "error"; error?: string }>(
+      "/api/config/oauth/poll",
+      { method: "POST", body: { flow_id: flowId } },
+    );
+  },
+  /** Complete a Claude sign-in with the pasted `code#state`. */
+  oauthComplete(flowId: string, code: string) {
+    return request<{ status: "complete" | "error"; error?: string }>(
+      "/api/config/oauth/complete",
+      { method: "POST", body: { flow_id: flowId, code } },
+    );
   },
 
   // ── Agent snapshot (ADR 0091 Slice 1) ──
@@ -1234,10 +1272,12 @@ export const api = {
   },
 
   // lists). Blank fields fall back to the saved config (Settings re-test).
-  testModel(apiBase: string, apiKey: string, model: string) {
+  testModel(apiBase: string, apiKey: string, model: string, provider = "") {
     return request<{ ok: boolean; error: string }>("/api/config/test-model", {
       method: "POST",
-      body: { api_base: apiBase, api_key: apiKey, model },
+      // `provider` (ADR 0097): a native OAuth provider tests through the subscription
+      // (a real streamed turn), ignoring api_base/api_key; blank = gateway.
+      body: { api_base: apiBase, api_key: apiKey, model, provider },
     });
   },
 

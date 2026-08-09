@@ -209,6 +209,23 @@ def _build_middleware(
         if mw is not None:
             middleware.append(mw)
 
+    # Claude Code OAuth (ADR 0097) requires its identity line to LEAD the system
+    # prompt or Anthropic's OAuth infra refuses the traffic. Added innermost among
+    # system-touching middleware (last word on system_message, after PromptCache /
+    # context injection) and only for anthropic-oauth — a hard no-op elsewhere.
+    _provider = (getattr(config, "model_provider", "") or "").strip().lower()
+    if _provider == "anthropic-oauth":
+        from graph.middleware.claude_code_identity import ClaudeCodeIdentityMiddleware
+
+        middleware.append(ClaudeCodeIdentityMiddleware())
+    elif _provider == "openai-codex":
+        # The Codex backend forbids system-role input items (ADR 0097) — move the
+        # system prompt into the Responses `instructions` field. Innermost, so it
+        # sees the final assembled system prompt.
+        from graph.middleware.codex_responses_input import CodexResponsesInputMiddleware
+
+        middleware.append(CodexResponsesInputMiddleware())
+
     middleware.append(MessageCaptureMiddleware())
 
     return middleware
@@ -453,7 +470,9 @@ async def _run_subagent(
         body = None
         for msg in reversed(messages):
             if isinstance(msg, AIMessage) and msg.content:
-                body = msg.content if isinstance(msg.content, str) else str(msg.content)
+                # `.text` flattens Responses-API content blocks (openai-codex, ADR 0097)
+                # to a string; a plain string passes through unchanged.
+                body = msg.content if isinstance(msg.content, str) else msg.text
                 break
 
         if body is None:

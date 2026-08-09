@@ -38,6 +38,19 @@ class ModelsProbeRequest(BaseModel):
     # Only used by the connection test (a real completion needs a model);
     # the model-list probe ignores it. Blank falls back to the saved config.
     model: str = ""
+    # Native OAuth providers (ADR 0097) probe the subscription account instead of
+    # the gateway — for "anthropic-oauth"/"openai-codex" the model list + connection
+    # test route through the OAuth path, ignoring api_base/api_key. Blank = gateway.
+    provider: str = ""
+
+
+class OAuthLoginRequest(BaseModel):
+    """Drives the in-console OAuth sign-in (ADR 0097): `provider` starts a flow,
+    `flow_id` (+ `code` for Claude) advances it."""
+
+    provider: str = ""
+    flow_id: str = ""
+    code: str = ""
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -153,10 +166,61 @@ def register_config_routes(app) -> None:
         from graph.config_io import list_gateway_models
 
         body = req or ModelsProbeRequest()
+        # Native OAuth providers list the subscription account's models, not the gateway's.
+        provider = (body.provider or getattr(STATE.graph_config, "model_provider", "") or "").strip().lower()
+        from graph.providers import is_native_oauth_provider
+
+        if is_native_oauth_provider(provider):
+            from graph.providers.discovery import list_provider_models
+
+            models, error = await asyncio.to_thread(
+                list_provider_models, provider, STATE.graph_config
+            )
+            return {"models": models, "error": error}
         base = body.api_base or (STATE.graph_config.api_base if STATE.graph_config else "")
         key = body.api_key or (STATE.graph_config.api_key if STATE.graph_config else "")
         models, error = list_gateway_models(base, key)
         return {"models": models, "error": error}
+
+    @app.get("/api/config/oauth-status")
+    async def _api_oauth_status():
+        """Sign-in status for the native OAuth providers (ADR 0097) — the wizard +
+        Settings render "✓ signed in" / a sign-in hint per provider. Read-only."""
+        from graph.providers.discovery import all_oauth_status
+
+        return {"providers": await asyncio.to_thread(all_oauth_status)}
+
+    @app.post("/api/config/oauth/start")
+    async def _api_oauth_start(req: OAuthLoginRequest):
+        """Begin an in-console OAuth sign-in (ADR 0097). Codex returns a device code +
+        URL to poll; Claude returns an authorize URL to open + complete with a code."""
+        from graph.providers.oauth_login import OAuthLoginError, login_start
+
+        try:
+            return await asyncio.to_thread(login_start, req.provider)
+        except OAuthLoginError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/config/oauth/poll")
+    async def _api_oauth_poll(req: OAuthLoginRequest):
+        """Poll a Codex device sign-in — returns {status: pending|complete|error}. On
+        completion the tokens are stored and oauth-status flips to signed in."""
+        from graph.providers.oauth_login import OAuthLoginError, codex_login_poll
+
+        try:
+            return await asyncio.to_thread(codex_login_poll, req.flow_id)
+        except OAuthLoginError as exc:
+            return {"status": "error", "error": str(exc)}
+
+    @app.post("/api/config/oauth/complete")
+    async def _api_oauth_complete(req: OAuthLoginRequest):
+        """Complete a Claude sign-in with the pasted `code#state` — exchanges + stores."""
+        from graph.providers.oauth_login import OAuthLoginError, anthropic_login_complete
+
+        try:
+            return await asyncio.to_thread(anthropic_login_complete, req.flow_id, req.code)
+        except OAuthLoginError as exc:
+            return {"status": "error", "error": str(exc)}
 
     @app.post("/api/config/test-model")
     async def _api_test_model(req: ModelsProbeRequest | None = None):
@@ -171,9 +235,21 @@ def register_config_routes(app) -> None:
         from graph.config_io import validate_model_connection
 
         body = req or ModelsProbeRequest()
+        model = body.model or (STATE.graph_config.model_name if STATE.graph_config else "")
+        # Native OAuth providers (ADR 0097) test through the subscription, not a gateway
+        # key — build the real client and stream a 1-token turn.
+        provider = (body.provider or getattr(STATE.graph_config, "model_provider", "") or "").strip().lower()
+        from graph.providers import is_native_oauth_provider
+
+        if is_native_oauth_provider(provider):
+            from graph.providers.discovery import validate_oauth_connection
+
+            ok, error = await asyncio.to_thread(
+                validate_oauth_connection, provider, model, STATE.graph_config
+            )
+            return {"ok": ok, "error": error}
         base = body.api_base or (STATE.graph_config.api_base if STATE.graph_config else "")
         key = body.api_key or (STATE.graph_config.api_key if STATE.graph_config else "")
-        model = body.model or (STATE.graph_config.model_name if STATE.graph_config else "")
         ok, error = await asyncio.to_thread(validate_model_connection, base, key, model)
         # A successful test of the LIVE saved key (no form-local override) proves the
         # gateway + key are good again — so clear any open embedding circuit breaker
