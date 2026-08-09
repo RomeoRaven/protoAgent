@@ -141,7 +141,7 @@ async def _extract(source: IngestSource, ctx: OpContext):
 
 @op(
     name="knowledge.ingest",
-    mutates=True,
+    risk="reversible",
     summary="Extract a URL / file / text source and index it into long-term knowledge.",
 )
 async def ingest(source: IngestSource, *, domain: str = "general", title: str | None = None, ctx: OpContext) -> IngestResult:
@@ -179,7 +179,7 @@ async def ingest(source: IngestSource, *, domain: str = "general", title: str | 
 
 @op(
     name="knowledge.ingest_preview",
-    mutates=False,
+    risk="read",
     summary="Dry-run an ingest: extract + count chunks for a source without persisting.",
 )
 async def ingest_preview(source: IngestSource, *, title: str | None = None, ctx: OpContext, snippet_chars: int = 600) -> PreviewResult:

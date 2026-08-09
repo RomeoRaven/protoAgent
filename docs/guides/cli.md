@@ -157,7 +157,21 @@ snapshot. Pass them with `--secret NAME=VALUE` (repeatable, written `0600` to th
 only), or set them afterwards in that agent's Settings ▸ Secrets. Only credentials the
 *source* agent actually had are reported missing.
 
-## Roadmap
+## Inspect operation safety
 
-Later slices of ADR 0075 add a shared operation layer so every verb here has a matching
-MCP tool and REST endpoint. See the ADR for the plan.
+```bash
+protoagent operations
+protoagent operations --json
+```
+
+The CLI and `GET /api/operations` read the same registry. Every operation has one required
+safety risk:
+
+- `read` — no persistent or runtime state change;
+- `reversible` — a bounded persistent change whose result identifies what was changed;
+- `disruptive` — changes config, code, or process/runtime state and needs a stronger gate;
+- `destructive` — may remove data or state without a reliable operation-level undo.
+
+`mutates` remains in JSON as a compatibility field and is derived from risk: only `read` is
+false. Risk is catalog metadata, not execution permission. In particular, it does not expose
+admin operations over MCP or complete the `safe-operator` consent profile by itself.

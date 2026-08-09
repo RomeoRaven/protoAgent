@@ -9,9 +9,10 @@ from fastapi.testclient import TestClient
 
 
 def test_load_all_registers_every_op_family():
-    from ops import load_all
+    from ops import OPERATION_RISKS, load_all
 
-    names = set(load_all())
+    specs = load_all()
+    names = set(specs)
     assert {
         "knowledge.ingest",
         "knowledge.ingest_preview",
@@ -22,6 +23,19 @@ def test_load_all_registers_every_op_family():
         "fleet.down",
         "fleet.status",
     } <= names
+    assert OPERATION_RISKS == frozenset({"read", "reversible", "disruptive", "destructive"})
+    expected_risks = {
+        "config.get": "read",
+        "config.set": "disruptive",
+        "fleet.down": "disruptive",
+        "fleet.status": "read",
+        "fleet.up": "disruptive",
+        "knowledge.ingest": "reversible",
+        "knowledge.ingest_preview": "read",
+        "plugins.install_and_activate": "disruptive",
+    }
+    assert {name: specs[name].risk for name in expected_risks} == expected_risks
+    assert all(spec.mutates is (spec.risk != "read") for spec in specs.values())
 
 
 def test_operations_route_lists_sorted_catalog():
@@ -31,6 +45,8 @@ def test_operations_route_lists_sorted_catalog():
     register_operations_routes(app)
     body = TestClient(app).get("/api/operations").json()
     by_name = {o["name"]: o for o in body["operations"]}
+    assert by_name["config.set"]["risk"] == "disruptive"
+    assert by_name["knowledge.ingest"]["risk"] == "reversible"
     assert by_name["config.set"]["mutates"] is True
     assert by_name["config.get"]["mutates"] is False and by_name["fleet.status"]["mutates"] is False
     assert by_name["knowledge.ingest"]["summary"]
@@ -44,10 +60,12 @@ def test_operations_cli_prints_catalog(capsys):
     assert run_operations_cli([]) == 0
     out = capsys.readouterr().out
     assert "config.set" in out and "fleet.status" in out
+    assert "[disruptive]" in out and "[read" in out
 
     assert run_operations_cli(["--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert any(o["name"] == "plugins.install_and_activate" for o in data)
+    plugin_install = next(o for o in data if o["name"] == "plugins.install_and_activate")
+    assert plugin_install["risk"] == "disruptive" and plugin_install["mutates"] is True
 
 
 def test_config_cli_set_writes_disk(monkeypatch, capsys):

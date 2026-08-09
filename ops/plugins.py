@@ -58,7 +58,7 @@ def _installed_ids_from_summary(summary: dict) -> list[str]:
 
 @op(
     name="plugins.install_and_activate",
-    mutates=True,
+    risk="disruptive",
     summary="Install a plugin from git and (by default) enable + hot-reload it.",
 )
 async def install_and_activate(

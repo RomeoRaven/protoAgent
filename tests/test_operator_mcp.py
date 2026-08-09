@@ -184,6 +184,11 @@ def test_unknown_profile_falls_back_to_allowlist():
     assert names == {"calculator"}  # unknown profile ignored, explicit names honored
 
 
+def test_safe_operator_profile_stays_closed_until_consent_admission_exists():
+    names = {t.name for t in operator_tools(_cfg_profile("safe-operator"))}
+    assert names == set()
+
+
 def test_env_trust_full_overrides_deny_default(monkeypatch):
     monkeypatch.setenv("PROTOAGENT_MCP_TRUST", "full")
     names = {t.name for t in operator_tools(_cfg([]))}  # empty allowlist would be deny-all
