@@ -22,6 +22,7 @@ def test_load_all_registers_every_op_family():
         "fleet.up",
         "fleet.down",
         "fleet.status",
+        "environment.doctor",
     } <= names
     assert OPERATION_RISKS == frozenset({"read", "reversible", "disruptive", "destructive"})
     expected_risks = {
@@ -49,6 +50,7 @@ def test_operations_route_lists_sorted_catalog():
     assert by_name["knowledge.ingest"]["risk"] == "reversible"
     assert by_name["config.set"]["mutates"] is True
     assert by_name["config.get"]["mutates"] is False and by_name["fleet.status"]["mutates"] is False
+    assert by_name["environment.doctor"]["mutates"] is False
     assert by_name["knowledge.ingest"]["summary"]
     names = [o["name"] for o in body["operations"]]
     assert names == sorted(names)

@@ -42,6 +42,19 @@ def test_dispatch_forward_none_result_is_zero(monkeypatch):
     assert cli.dispatch(["config", "explain"]) == 0  # None → 0
 
 
+def test_dispatch_forwards_doctor_subcommand(monkeypatch):
+    seen = {}
+
+    def run_doctor_cli(argv):
+        seen["argv"] = argv
+        return 7
+
+    fake = types.SimpleNamespace(run_doctor_cli=run_doctor_cli)
+    monkeypatch.setattr(cli.importlib, "import_module", lambda name: fake)
+    assert cli.dispatch(["doctor", "--json", "--port", "17870"]) == 7
+    assert seen["argv"] == ["--json", "--port", "17870"]
+
+
 def test_main_bare_prints_help(capsys):
     assert cli.main([]) == 0
     out = capsys.readouterr().out
@@ -116,7 +129,7 @@ def test_help_lists_every_command(capsys):
     # so the CLI never silently gains an undiscoverable command again.
     cli.main(["--help"])
     out = capsys.readouterr().out
-    for name in ("serve", "up", "down", "status", "setup", "plugin", "workspace", "skills", "fleet", "config"):
+    for name in ("serve", "up", "down", "status", "setup", "plugin", "workspace", "skills", "fleet", "config", "doctor"):
         assert name in out
 
 
