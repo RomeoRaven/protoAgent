@@ -190,14 +190,15 @@ jobs:
           if [ "${RUNNER_OS}" = "Windows" ]; then BIN="${BIN}.exe"; fi
           python scripts/live_smoke.py --bin "${BIN}" --timeout 180 --expect-console
 
-      - name: Run Windows-native path and process regressions
+      - name: Run Windows-native path, process, and wheel regressions
         if: runner.os == 'Windows'
         shell: bash
         # The main PR suite runs on Linux. Keep the Windows-only release leg from
-        # regressing process-tree timeouts or box-root isolation before bundling.
+        # regressing process-tree timeouts, box-root isolation, or wheel installs
+        # before bundling.
         run: |
           pip install pytest pytest-asyncio
-          python -m pytest tests/test_shell.py tests/test_data_version.py -q
+          python -m pytest tests/test_shell.py tests/test_data_version.py tests/test_wheel_installer.py -q
 
       - name: Install desktop CLI deps
         shell: bash
