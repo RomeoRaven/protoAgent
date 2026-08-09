@@ -42,7 +42,6 @@ tests/test_atomic_writes.py
 tests/test_config_secrets.py
 tests/test_fleet_service_token.py
 tests/test_settings_save_atomicity.py
-tests/test_wheel_installer.py
 
 # ── Path semantics: tilde/separators/symlinks/`:`-in-filename expectations ──
 tests/test_agent_snapshot_import.py
