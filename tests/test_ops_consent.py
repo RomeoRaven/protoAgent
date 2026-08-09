@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -13,10 +14,39 @@ from ops import OpSpec
 _NOW = datetime(2026, 8, 9, 23, 0, tzinfo=UTC)
 
 
+def test_consent_authority_does_not_accept_a_caller_controlled_token_factory():
+    from ops.consent import ConsentAuthority
+
+    with pytest.raises(TypeError):
+        ConsentAuthority(token_factory=lambda: "predictable-token")
+
+
+def test_token_collision_retries_are_bounded(monkeypatch):
+    from ops.consent import ConsentError
+
+    calls = 0
+
+    def repeated_token(_size):
+        nonlocal calls
+        calls += 1
+        if calls > 9:
+            raise AssertionError("token generation did not stop")
+        return "repeated-csprng-token"
+
+    monkeypatch.setattr("ops.consent.secrets.token_urlsafe", repeated_token)
+    authority = _authority()
+    plan = _plan(authority)
+    authority.approve(plan, approved_by="local-operator")
+
+    with pytest.raises(ConsentError) as refusal:
+        authority.approve(plan, approved_by="local-operator")
+    assert refusal.value.code == "token_collision"
+
+
 def _authority():
     from ops.consent import ConsentAuthority
 
-    return ConsentAuthority(clock=lambda: _NOW, token_factory=lambda: "raw-capability-token")
+    return ConsentAuthority(clock=lambda: _NOW)
 
 
 def _plan(authority):
@@ -51,8 +81,8 @@ def test_exact_plan_consent_is_single_use_and_secret_free():
     assert admission.approved_by == "local-operator"
     assert admission.plan_digest == plan.digest
     assert "private" not in repr(plan)
-    assert "raw-capability-token" not in repr(grant)
-    assert "raw-capability-token" not in repr(admission)
+    assert grant.token not in repr(grant)
+    assert grant.token not in repr(admission)
 
     with pytest.raises(ConsentError, match="already used") as replay:
         authority.consume(
@@ -100,6 +130,8 @@ def test_knowledge_ingest_receipt_requires_operation_specific_postcondition():
     assert "Private source title" not in repr(receipt)
     assert "example.com/private" not in repr(receipt)
     assert "[41, 42]" not in repr(receipt)
+    with pytest.raises(TypeError):
+        cast(Any, receipt.facts)["leak"] = 1
 
 
 @pytest.mark.parametrize(
@@ -138,6 +170,32 @@ def test_changed_inputs_or_target_state_revoke_the_approval(inputs, state, code)
     assert replay.value.code == "replayed_approval"
 
 
+def test_malformed_changed_inputs_still_consume_the_approval_attempt():
+    from ops.consent import ConsentError
+
+    authority = _authority()
+    plan = _plan(authority)
+    grant = authority.approve(plan, approved_by="local-operator")
+
+    with pytest.raises(ConsentError) as malformed:
+        authority.consume(
+            grant.token,
+            plan,
+            inputs=object(),
+            current_target_state={"generation": 7, "runtime_version": "0.127.0"},
+        )
+    assert malformed.value.code == "unsupported_value"
+
+    with pytest.raises(ConsentError) as replay:
+        authority.consume(
+            grant.token,
+            plan,
+            inputs={"source": {"url": "https://example.com/private"}, "domain": "research"},
+            current_target_state={"generation": 7, "runtime_version": "0.127.0"},
+        )
+    assert replay.value.code == "replayed_approval"
+
+
 def test_expected_effect_tampering_revokes_the_approval():
     from ops.consent import ConsentError
 
@@ -160,7 +218,7 @@ def test_expired_approval_fails_closed():
     from ops.consent import ConsentAuthority, ConsentError
 
     current = [_NOW]
-    authority = ConsentAuthority(clock=lambda: current[0], token_factory=lambda: "expiring-token")
+    authority = ConsentAuthority(clock=lambda: current[0])
     plan = _plan(authority)
     grant = authority.approve(plan, approved_by="local-operator", ttl_seconds=5)
     current[0] += timedelta(seconds=5)
@@ -295,6 +353,55 @@ def test_failed_postcondition_raises_with_secret_free_failure_receipt():
     assert "[51, 52]" not in repr(receipt)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("target_id", "agent:default\nBearer raw-token"),
+        ("approved_by", "Bearer raw-token"),
+        ("plan_digest", "not-a-digest"),
+        ("expected_effect_digest", "not-a-digest"),
+        ("risk", "destructive"),
+    ],
+)
+def test_verification_rejects_unsafe_or_noncanonical_admission_metadata(field, value):
+    from ops.consent import Admission, ConsentError, default_verification_registry
+    from ops.knowledge import IngestResult
+
+    admission = Admission(
+        operation="knowledge.ingest",
+        risk="reversible",
+        target_id="agent:default",
+        plan_digest=f"sha256:{'a' * 64}",
+        expected_effect_digest=f"sha256:{'b' * 64}",
+        approved_by="local-operator",
+        approved_at=_NOW,
+        admitted_at=_NOW,
+    )
+    admission = replace(admission, **{field: value})
+    result = IngestResult(ids=[41], chunks=1, chars=20, title="safe", source_type="text", source="inline")
+
+    with pytest.raises(ConsentError) as refusal:
+        default_verification_registry(clock=lambda: _NOW).verify(
+            admission,
+            result,
+            context={"chunk_exists": lambda chunk_id: chunk_id == 41},
+        )
+    assert refusal.value.code == "invalid_admission"
+
+
+def test_verifier_name_must_be_a_safe_receipt_identifier():
+    from ops.consent import ConsentError, VerificationRegistry, VerificationResult
+
+    registry = VerificationRegistry(clock=lambda: _NOW)
+    with pytest.raises(ConsentError) as refusal:
+        registry.register(
+            "knowledge.ingest",
+            "Bearer raw-secret",
+            lambda _admission, _result, _context: VerificationResult(True, {}, {}),
+        )
+    assert refusal.value.code == "invalid_verifier"
+
+
 def test_operation_without_registered_postcondition_fails_closed():
     from ops.consent import Admission, ConsentError, VerificationRegistry
 
@@ -302,8 +409,8 @@ def test_operation_without_registered_postcondition_fails_closed():
         operation="config.set",
         risk="disruptive",
         target_id="agent:default",
-        plan_digest="sha256:plan",
-        expected_effect_digest="sha256:effect",
+        plan_digest=f"sha256:{'a' * 64}",
+        expected_effect_digest=f"sha256:{'b' * 64}",
         approved_by="local-operator",
         approved_at=_NOW,
         admitted_at=_NOW,

@@ -30,15 +30,20 @@ consent checks:
   downgrades fail closed.
 - Inputs and target state are canonicalized and SHA-256 bound. Raw values are not
   retained in plans, grants, admissions, or receipts.
-- Capability tokens use `secrets.token_urlsafe`, are returned once with hidden
-  representation, and are retained only as hashes.
+- Capability tokens are generated directly with `secrets.token_urlsafe`; callers
+  cannot substitute a token generator. They are returned once with hidden
+  representation, retained only as hashes, and collision retries are bounded.
 - Plans and grants expire in at most 15 minutes. Grants are in-memory and per-run;
   process restart revokes all of them.
-- Missing, expired, replayed, mismatched, or stale approval attempts fail with
-  stable `ConsentError.code` values and revoke any matching unused grant.
-- Receipt identifiers use a conservative identifier grammar. Receipt facts may
-  contain only integer and Boolean values; private verifier evidence leaves only
-  a digest.
+- A located grant is consumed before any caller-controlled plan, input, or state
+  validation. Missing, expired, replayed, mismatched, malformed, or stale approval
+  attempts fail with stable `ConsentError.code` values and cannot preserve that
+  grant for a second attempt.
+- Verification revalidates operation/risk against the live registry and requires
+  safe target, approver, verifier, and SHA-256 digest metadata before constructing
+  a receipt. Receipt facts may contain only integer and Boolean values, are
+  immutable after construction, and private verifier evidence leaves only a
+  digest.
 - There is no generic caller-supplied `verified=True` path. An operation must have
   a registered verifier.
 

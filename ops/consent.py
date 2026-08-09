@@ -16,12 +16,15 @@ import secrets
 import threading
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 
 from ops import OPERATION_RISKS, OpSpec
 
 MAX_CONSENT_TTL_SECONDS = 15 * 60
+MAX_TOKEN_GENERATION_ATTEMPTS = 8
 _SAFE_IDENTIFIER = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,127}\Z")
+_SHA256_DIGEST = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 
 
 class ConsentError(Exception):
@@ -92,6 +95,36 @@ def _identifier(value: Any, *, code: str, label: str) -> str:
     if not _SAFE_IDENTIFIER.fullmatch(identifier):
         raise ConsentError(code, f"{label} must be a safe identifier")
     return identifier
+
+
+def _receipt_admission_metadata(admission: Admission) -> tuple[str, str, str, str, str, str]:
+    from ops import load_all
+
+    try:
+        operation = _identifier(admission.operation, code="invalid_admission", label="operation")
+        target_id = _identifier(admission.target_id, code="invalid_admission", label="operation target")
+        approved_by = _identifier(admission.approved_by, code="invalid_admission", label="approving operator")
+    except (ConsentError, TypeError, ValueError) as exc:
+        raise ConsentError("invalid_admission", "admission contains unsafe receipt metadata") from exc
+    if operation != admission.operation or target_id != admission.target_id or approved_by != admission.approved_by:
+        raise ConsentError("invalid_admission", "admission contains noncanonical receipt metadata")
+    registered = load_all().get(operation)
+    if registered is None or admission.risk != registered.risk:
+        raise ConsentError("invalid_admission", "admission operation metadata does not match the registry")
+    if not isinstance(admission.plan_digest, str) or not _SHA256_DIGEST.fullmatch(admission.plan_digest):
+        raise ConsentError("invalid_admission", "admission plan digest is invalid")
+    if not isinstance(admission.expected_effect_digest, str) or not _SHA256_DIGEST.fullmatch(
+        admission.expected_effect_digest
+    ):
+        raise ConsentError("invalid_admission", "admission expected-effect digest is invalid")
+    return (
+        operation,
+        registered.risk,
+        target_id,
+        admission.plan_digest,
+        admission.expected_effect_digest,
+        approved_by,
+    )
 
 
 @dataclass(frozen=True)
@@ -169,14 +202,12 @@ class ConsentAuthority:
         *,
         allowed_risks: Iterable[str] = ("reversible",),
         clock: Callable[[], datetime] | None = None,
-        token_factory: Callable[[], str] | None = None,
     ) -> None:
         risks = frozenset(str(risk).strip().lower() for risk in allowed_risks)
         if not risks or not risks <= OPERATION_RISKS or "read" in risks:
             raise ConsentError("invalid_policy", "consent policy must name one or more non-read operation risks")
         self._allowed_risks = risks
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._grants: dict[str, _GrantRecord] = {}
         self._lock = threading.Lock()
 
@@ -239,13 +270,13 @@ class ConsentAuthority:
             raise ConsentError("expired_plan", "operation plan has expired")
         expires_at = min(plan.expires_at, now + timedelta(seconds=ttl))
         with self._lock:
-            while True:
-                token = str(self._token_factory())
-                if not token:
-                    raise ConsentError("invalid_token", "consent token factory returned an empty token")
+            for _ in range(MAX_TOKEN_GENERATION_ATTEMPTS):
+                token = secrets.token_urlsafe(32)
                 token_digest = digest_value(token)
                 if token_digest not in self._grants:
                     break
+            else:
+                raise ConsentError("token_collision", "could not issue a unique consent token")
             self._grants[token_digest] = _GrantRecord(
                 plan_digest=plan.digest,
                 approved_by=approver,
@@ -276,9 +307,12 @@ class ConsentAuthority:
                 raise ConsentError("missing_approval", "approval not found")
             if record.used:
                 raise ConsentError("replayed_approval", "approval was already used")
+            # A located grant authorizes exactly one admission attempt. Consume it
+            # before validating any caller-controlled plan/input/state so malformed
+            # values cannot preserve a capability for a second try.
+            record.used = True
 
             def refuse(code: str, detail: str) -> None:
-                record.used = True
                 raise ConsentError(code, detail)
 
             if now >= record.expires_at:
@@ -295,7 +329,6 @@ class ConsentAuthority:
                 refuse("changed_inputs", "operation inputs changed after approval")
             if digest_value(current_target_state) != plan.target_state_digest:
                 refuse("stale_target", "target state changed after planning")
-            record.used = True
             return Admission(
                 operation=plan.operation,
                 risk=plan.risk,
@@ -375,10 +408,13 @@ class VerificationRegistry:
         self._verifiers: dict[str, tuple[str, Verifier]] = {}
 
     def register(self, operation: str, verifier_name: str, verifier: Verifier) -> None:
-        op_name = str(operation).strip()
-        check_name = str(verifier_name).strip()
-        if not op_name or not check_name or not callable(verifier):
-            raise ConsentError("invalid_verifier", "postcondition verifier requires names and a callable")
+        try:
+            op_name = _identifier(operation, code="invalid_verifier", label="verifier operation")
+            check_name = _identifier(verifier_name, code="invalid_verifier", label="postcondition verifier")
+        except (ConsentError, TypeError, ValueError) as exc:
+            raise ConsentError("invalid_verifier", "postcondition verifier requires safe names and a callable") from exc
+        if not callable(verifier):
+            raise ConsentError("invalid_verifier", "postcondition verifier requires safe names and a callable")
         candidate = (check_name, verifier)
         if op_name in self._verifiers and self._verifiers[op_name] != candidate:
             raise ConsentError("duplicate_verifier", f"operation {op_name!r} already has a postcondition verifier")
@@ -391,9 +427,10 @@ class VerificationRegistry:
         *,
         context: Mapping[str, Any],
     ) -> ExecutionReceipt:
-        registered = self._verifiers.get(admission.operation)
+        operation, risk, target_id, plan_digest, effect_digest, approved_by = _receipt_admission_metadata(admission)
+        registered = self._verifiers.get(operation)
         if registered is None:
-            raise ConsentError("missing_verifier", f"operation {admission.operation!r} has no postcondition verifier")
+            raise ConsentError("missing_verifier", f"operation {operation!r} has no postcondition verifier")
         verifier_name, verifier = registered
         try:
             outcome = verifier(admission, result, context)
@@ -405,12 +442,12 @@ class VerificationRegistry:
             )
         facts = _safe_facts(outcome.facts)
         receipt = ExecutionReceipt(
-            operation=admission.operation,
-            risk=admission.risk,
-            target_id=admission.target_id,
-            plan_digest=admission.plan_digest,
-            expected_effect_digest=admission.expected_effect_digest,
-            approved_by=admission.approved_by,
+            operation=operation,
+            risk=risk,
+            target_id=target_id,
+            plan_digest=plan_digest,
+            expected_effect_digest=effect_digest,
+            approved_by=approved_by,
             verifier=verifier_name,
             verified=bool(outcome.passed),
             facts=facts,
@@ -422,7 +459,7 @@ class VerificationRegistry:
         return receipt
 
 
-def _safe_facts(facts: Mapping[str, int | bool]) -> dict[str, int | bool]:
+def _safe_facts(facts: Mapping[str, int | bool]) -> Mapping[str, int | bool]:
     safe: dict[str, int | bool] = {}
     for key in sorted(facts):
         value = facts[key]
@@ -434,7 +471,7 @@ def _safe_facts(facts: Mapping[str, int | bool]) -> dict[str, int | bool]:
             safe[key] = value
         else:
             raise ConsentError("unsafe_evidence", "receipt facts may contain only integers and booleans")
-    return safe
+    return MappingProxyType(safe)
 
 
 def _verify_knowledge_ingest(
