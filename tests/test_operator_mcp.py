@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import httpx
 import pytest
 from langchain_core.tools import tool
 
@@ -187,6 +190,132 @@ def test_unknown_profile_falls_back_to_allowlist():
 def test_safe_operator_profile_stays_closed_until_consent_admission_exists():
     names = {t.name for t in operator_tools(_cfg_profile("safe-operator"))}
     assert names == set()
+
+
+def test_safe_operator_profile_cannot_be_widened_by_the_explicit_tools_allowlist():
+    cfg = _cfg_profile("safe-operator")
+    cfg.operator_mcp_tools = ["calculator", "current_time"]
+
+    assert {t.name for t in operator_tools(cfg)} == set()
+    _, exposed = build_server(cfg, consent_http=True)
+    assert exposed == ["knowledge_ingest"]
+
+
+def test_explicit_full_trust_env_selects_full_instead_of_combining_with_managed_safe(monkeypatch):
+    monkeypatch.setenv("PROTOAGENT_MCP_TRUST", "full")
+
+    _, exposed = build_server(_cfg_profile("safe-operator"), consent_http=True)
+
+    assert "calculator" in exposed
+    assert "knowledge_ingest" not in exposed  # bare fixture has no store-bound legacy ingest
+
+
+def test_safe_operator_http_exposes_only_consented_ingest_and_human_approval_route():
+    server, exposed = build_server(_cfg_profile("safe-operator"), consent_http=True)
+
+    assert exposed == ["knowledge_ingest"]
+    routes = {route.path for route in server.streamable_http_app().routes}
+    assert "/consent/knowledge-ingest/approve" in routes
+
+
+@pytest.mark.asyncio
+async def test_safe_operator_ingest_requires_human_route_then_returns_verified_receipt(tmp_path, monkeypatch):
+    from knowledge.store import KnowledgeStore
+
+    source = tmp_path / "approved.md"
+    source.write_text("An operator-approved knowledge document. " * 20)
+    store = KnowledgeStore(tmp_path / "knowledge.sqlite")
+    cfg = _cfg_profile("safe-operator")
+    cfg.auth_token = "operator-secret"
+    monkeypatch.setattr(STATE, "knowledge_store", store, raising=False)
+    monkeypatch.setattr(STATE, "graph_config", cfg, raising=False)
+    server, _ = build_server(cfg, consent_http=True)
+    args = {"source": str(source), "domain": "approved", "title": "Approved document"}
+
+    planned = json.loads((await server.call_tool("knowledge_ingest", args))[0].text)
+    assert planned["ok"] is False
+    assert planned["code"] == "approval_required"
+    assert set(planned) == {"ok", "code", "operation", "risk", "target_id", "plan_digest", "expires_at"}
+    assert str(source) not in repr(planned)
+
+    app = server.streamable_http_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        denied = await client.post(
+            "/consent/knowledge-ingest/approve",
+            json={"plan_digest": planned["plan_digest"], "approved_by": "local-operator"},
+        )
+        assert denied.status_code == 401
+        approved = await client.post(
+            "/consent/knowledge-ingest/approve",
+            headers={"Authorization": "Bearer operator-secret"},
+            json={"plan_digest": planned["plan_digest"], "approved_by": "local-operator"},
+        )
+        assert approved.status_code == 200
+        assert approved.json()["ok"] is True
+
+    executed = json.loads(
+        (
+            await server.call_tool(
+                "knowledge_ingest",
+                {**args, "plan_digest": planned["plan_digest"]},
+            )
+        )[0].text
+    )
+    assert executed["ok"] is True
+    assert executed["verified"] is True
+    assert executed["operation"] == "knowledge.ingest"
+    assert executed["facts"]["stored_chunks"] > 0
+    assert str(source) not in repr(executed)
+    assert "operator-secret" not in repr(executed)
+
+
+@pytest.mark.asyncio
+async def test_safe_operator_failed_verification_rolls_back_every_reported_chunk(tmp_path):
+    from knowledge.store import KnowledgeStore
+    from server.operator_consent import SafeKnowledgeIngestAdapter
+
+    source = tmp_path / "rollback.md"
+    source.write_text("A postcondition rollback document. " * 20)
+    inner = KnowledgeStore(tmp_path / "knowledge.sqlite")
+
+    class FailVerificationStore:
+        rollback_started = False
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+        def get_chunk(self, chunk_id):
+            return inner.get_chunk(chunk_id) if self.rollback_started else None
+
+        def delete_by_id(self, chunk_id):
+            self.rollback_started = True
+            return inner.delete_by_id(chunk_id)
+
+    store = FailVerificationStore()
+    cfg = _cfg_profile("safe-operator")
+    adapter = SafeKnowledgeIngestAdapter(
+        knowledge_store=store,
+        graph_config=cfg,
+        auth_token="operator-secret",
+    )
+    args = {"source": str(source), "domain": "rollback", "title": "Rollback document"}
+    planned = await adapter.plan_or_execute(**args)
+    adapter.approve(plan_digest=planned["plan_digest"], approved_by="local-operator")
+
+    failed = await adapter.plan_or_execute(**args, plan_digest=planned["plan_digest"])
+
+    assert failed["ok"] is False
+    assert failed["code"] == "verification_failed"
+    assert failed["receipt"]["verified"] is False
+    assert failed["rollback"]["attempted"] > 0
+    assert failed["rollback"] == {
+        "attempted": failed["rollback"]["attempted"],
+        "remaining": 0,
+        "complete": True,
+    }
+    assert inner.stats()["total"] == 0
+    assert str(source) not in repr(failed)
 
 
 def test_env_trust_full_overrides_deny_default(monkeypatch):

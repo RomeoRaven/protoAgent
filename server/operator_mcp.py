@@ -94,7 +94,7 @@ __all__ = [
 ]
 
 
-def build_server(config, *, name: str = "protoAgent-operator"):
+def build_server(config, *, name: str = "protoAgent-operator", consent_http: bool = False):
     """Return (FastMCP server, [exposed tool names]) for the allowlisted tools."""
     from langchain_mcp_adapters.tools import to_fastmcp
     from mcp.server.fastmcp import FastMCP
@@ -107,6 +107,12 @@ def build_server(config, *, name: str = "protoAgent-operator"):
         except Exception:  # noqa: BLE001 — one bad tool shouldn't sink the server
             log.exception("[operator-mcp] could not expose %s", getattr(t, "name", "?"))
     server = FastMCP(name, tools=fast_tools)
+    profile = str(getattr(config, "operator_mcp_profile", "") or "").strip().lower().replace("_", "-")
+    managed_safe = profile == "safe-operator" and resolve_allow(config) != {"*"}
+    if consent_http and managed_safe:
+        from server.operator_consent import register_safe_operator_ingest
+
+        exposed.extend(register_safe_operator_ingest(server, config))
     log.info(
         "[operator-mcp] exposing %d tool(s): %s",
         len(exposed),
@@ -133,7 +139,7 @@ def main(argv: list[str] | None = None) -> None:
     if env_tools is not None:
         config.operator_mcp_tools = [t.strip() for t in env_tools.split(",") if t.strip()]
     _boot_stores_only(config)
-    server, exposed = build_server(config)
+    server, exposed = build_server(config, consent_http=args.http)
     if not exposed:
         log.warning("[operator-mcp] no tools exposed — add names to operator_mcp.tools in config")
     if args.http:

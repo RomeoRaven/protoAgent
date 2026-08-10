@@ -35,12 +35,10 @@ _STAR_EXCLUDE = {"execute_code"}
 # runner to resume them, so they HANG the client (ADR 0075 D3 — a real bug, not a gate).
 _MCP_INCOMPATIBLE = {"ask_human", "request_user_input"}
 
-# Curated profile presets over the allowlist (ADR 0075 D3). A profile is just a preset set
-# of names layered on ``operator_mcp_tools`` — unset keeps deny-by-default (a foreign client
-# gets only what you name). ``read-only`` is a stable, principled set (reads/queries, no state
-# change). ``full`` = ``"*"``. The middle tier ``safe-operator`` (read + non-destructive
-# writes) lands with the ops layer (ADR 0075 D2), which carries per-op read/write metadata so
-# it's principled rather than a hand-maintained list — so it's deliberately NOT hardcoded here.
+# Curated profile presets over the allowlist (ADR 0075 D3). ``read-only`` and ``full``
+# remain convenience presets unioned with explicitly named tools. ``safe-operator`` is
+# different: it is a managed consent profile whose direct tools are registered by the
+# FastMCP adapter. Explicit legacy tools must not widen or bypass that profile.
 _READ_ONLY_TOOLS = frozenset(
     {
         "current_time", "calculator", "web_search", "fetch_url", "load_skill",
@@ -61,17 +59,23 @@ def _profile_allow(profile: str) -> set[str] | None:
         return {"*"}
     if p in ("read-only", "readonly"):
         return set(_READ_ONLY_TOOLS)
+    if p == "safe-operator":
+        return set()
     log.warning("[operator-mcp] unknown profile %r — falling back to the tools allowlist", profile)
     return None
 
 
 def resolve_allow(config) -> set[str]:
     """The effective allowlist: ``PROTOAGENT_MCP_TRUST=full`` env override > the profile
-    (unioned with any explicit names) > the explicit ``operator_mcp_tools`` list."""
+    (unioned with any explicit names, except managed ``safe-operator``) > the explicit
+    ``operator_mcp_tools`` list."""
     if os.environ.get("PROTOAGENT_MCP_TRUST", "").strip().lower() == "full":
         return {"*"}
+    profile = str(getattr(config, "operator_mcp_profile", "") or "")
+    if profile.strip().lower().replace("_", "-") == "safe-operator":
+        return set()
     allow = set(getattr(config, "operator_mcp_tools", []) or [])
-    prof = _profile_allow(getattr(config, "operator_mcp_profile", ""))
+    prof = _profile_allow(profile)
     if prof is not None:
         allow |= prof
     return allow

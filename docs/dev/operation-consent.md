@@ -1,6 +1,6 @@
 # Operation consent and verification core
 
-Status: RR foundation only; no operator-MCP or HTTP execution adapter is enabled.
+Status: neutral core plus one bounded HTTP-mode `safe-operator` adapter.
 
 Owner module: `ops/consent.py`
 
@@ -59,10 +59,36 @@ consent checks:
 Missing lookup support, a lookup error, an absent ID, or incoherent result data
 raises `VerificationFailed` with a secret-free failed receipt.
 
-## Explicit non-capabilities
+## First adapter: HTTP-mode safe knowledge ingest
 
-This foundation does not complete `safe-operator`. It adds no MCP tool, REST
-route, CLI approval command, global authority, persistent consent, operation
-invocation, automatic rollback, config write, plugin install, fleet control, or
-upstream publication. A future adapter must keep human grant issuance separate
-from model-visible execution and must own rollback for its admitted operation.
+`server/operator_consent.py` is the first execution adapter. It is active only
+when the operator MCP runs with `--http` and the configured profile is
+`safe-operator`. The profile exposes exactly one managed MCP tool,
+`knowledge_ingest`, and ignores `operator_mcp.tools` so an explicit legacy tool
+cannot bypass the consent wrapper.
+
+The first tool call with a URL or local path creates an expiring exact-input plan
+and returns its digest without executing. A human then POSTs that digest and a
+safe approver identifier to `/consent/knowledge-ingest/approve` using the
+instance's configured operator bearer. The bearer-gated route and MCP tool live
+in the same process and share one in-memory authority; raw capability tokens
+never cross either interface. Repeating the MCP call with the unchanged inputs
+and approved plan digest atomically consumes the grant, runs
+`ops.knowledge.ingest`, and verifies that every reported chunk exists.
+
+If verification fails, the adapter attempts deletion of every valid reported
+chunk ID and checks the post-rollback absence. The result distinguishes complete
+rollback from `rollback_incomplete`; both responses contain only safe receipt
+metadata and counts/digests, never source values or grant tokens.
+
+HTTP mode requires a non-empty `auth.token`; blank-auth instances fail closed.
+Stdio mode remains zero-tool for `safe-operator` because it has no independent
+human approval channel.
+
+## Explicit remaining non-capabilities
+
+This slice does not complete the full `safe-operator` roadmap. It adds no stdio
+approval side channel, generic operation invocation, persistent consent, config
+write, plugin install, fleet control, or approval route for any operation other
+than `knowledge.ingest`. URLs and local files are the only admitted ingest source
+shapes. Further operations require their own adapter, rollback, tests, and review.
