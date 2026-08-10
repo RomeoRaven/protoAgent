@@ -318,6 +318,23 @@ def test_structurally_malformed_plugin_lock_fails_closed(monkeypatch, tmp_path):
     assert finding.evidence == {"reason": "lock_unreadable"}
 
 
+def test_whitespace_plugin_lock_id_fails_closed(monkeypatch, tmp_path):
+    from infra.paths import instance_paths
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    _write_runtime_config(root)
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    lock = instance_paths().plugins_lock
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text('{"plugins": [{"id": "   "}]}\n', encoding="utf-8")
+
+    finding = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))["plugins.lock"]
+
+    assert finding.status.value == "fail"
+    assert finding.evidence == {"reason": "lock_unreadable"}
+
+
 def test_plugin_compatibility_detects_missing_entrypoint_without_import(monkeypatch, tmp_path):
     from ops.doctor import DoctorOptions, run_doctor
 

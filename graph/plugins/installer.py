@@ -186,7 +186,10 @@ def plugin_lock_readable() -> bool:
         return False
     plugins = raw.get("plugins", [])
     if not isinstance(plugins, list) or any(
-        not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"] for entry in plugins
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("id"), str)
+        or not entry["id"].strip()
+        for entry in plugins
     ):
         return False
     return True
