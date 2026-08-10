@@ -28,6 +28,7 @@ def test_load_all_registers_every_op_family():
     expected_risks = {
         "config.get": "read",
         "config.set": "disruptive",
+        "environment.doctor": "read",
         "fleet.down": "disruptive",
         "fleet.status": "read",
         "fleet.up": "disruptive",
@@ -50,6 +51,7 @@ def test_operations_route_lists_sorted_catalog():
     assert by_name["knowledge.ingest"]["risk"] == "reversible"
     assert by_name["config.set"]["mutates"] is True
     assert by_name["config.get"]["mutates"] is False and by_name["fleet.status"]["mutates"] is False
+    assert by_name["environment.doctor"]["risk"] == "read"
     assert by_name["environment.doctor"]["mutates"] is False
     assert by_name["knowledge.ingest"]["summary"]
     names = [o["name"] for o in body["operations"]]

@@ -125,6 +125,22 @@ def test_clean_isolated_runtime_report_is_secret_free_and_no_write(monkeypatch, 
     assert secret not in rendered
 
 
+def test_host_layer_only_config_is_valid_without_agent_leaf(monkeypatch, tmp_path):
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    host_config = tmp_path / "host-config.yaml"
+    host_config.write_text("model:\n  api_base: http://127.0.0.1:9/v1\n", encoding="utf-8")
+    monkeypatch.setenv("PROTOAGENT_HOST_CONFIG", str(host_config))
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+
+    findings = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))
+
+    assert findings["config.parse"].status.value == "pass"
+    assert findings["config.runtime_requirements"].status.value == "pass"
+    assert not root.exists()
+
+
 def test_missing_and_malformed_config_fail_without_seeding_or_leaking(monkeypatch, tmp_path):
     from ops.doctor import DoctorOptions, report_to_dict, run_doctor
 
@@ -145,6 +161,39 @@ def test_missing_and_malformed_config_fail_without_seeding_or_leaking(monkeypatc
     assert finding.status.value == "fail"
     assert finding.evidence["error"] in {"ParserError", "ScannerError"}
     assert secret not in payload
+
+
+def test_malformed_plugin_id_lists_fail_config_without_crashing(monkeypatch, tmp_path):
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    config = root / "config"
+    config.mkdir(parents=True)
+    (config / "langgraph-config.yaml").write_text(
+        "model:\n  api_base: http://127.0.0.1:9/v1\nplugins:\n  enabled:\n    - bad: value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+
+    findings = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))
+
+    assert findings["config.parse"].status.value == "fail"
+    assert findings["config.parse"].evidence["error"] == "ValueError"
+    assert findings["plugins.compatibility"].status.value == "skipped"
+
+
+def test_unknown_acp_runtime_fails_runtime_readiness(monkeypatch, tmp_path):
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    config = root / "config"
+    config.mkdir(parents=True)
+    (config / "langgraph-config.yaml").write_text("agent_runtime: acp:no-such-agent\n", encoding="utf-8")
+
+    finding = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))["config.runtime_requirements"]
+
+    assert finding.status.value == "fail"
+    assert finding.evidence == {"reason": "missing_acp_adapter"}
 
 
 def test_occupied_port_is_an_attributable_failure(monkeypatch, tmp_path):
@@ -191,6 +240,63 @@ def test_plugin_compatibility_does_not_import_entrypoint(monkeypatch, tmp_path):
     assert finding.status.value == "fail"
     assert "future-plugin" in finding.evidence["plugins"]
     assert not marker.exists()
+
+
+def test_malformed_manifest_logging_does_not_echo_source_lines(monkeypatch, tmp_path, caplog):
+    from ops.doctor import DoctorOptions, report_to_dict, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    _write_runtime_config(root, plugins=["broken"])
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    plugin = root / "plugins" / "broken"
+    plugin.mkdir(parents=True)
+    sentinel = "DOCTOR-MANIFEST-SECRET-SENTINEL"
+    (plugin / "protoagent.plugin.yaml").write_text(
+        f"id: broken\nname: Broken\napi_token: [{sentinel}\n",
+        encoding="utf-8",
+    )
+
+    report = run_doctor(options=DoctorOptions(port=_free_port()))
+
+    assert _finding_map(report)["plugins.manifests"].status.value == "fail"
+    assert sentinel not in caplog.text
+    assert sentinel not in json.dumps(report_to_dict(report))
+
+
+def test_malformed_plugin_lock_fails_closed(monkeypatch, tmp_path):
+    from infra.paths import instance_paths
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    _write_runtime_config(root)
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    lock = instance_paths().plugins_lock
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("{not-json", encoding="utf-8")
+
+    finding = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))["plugins.lock"]
+
+    assert finding.status.value == "fail"
+    assert finding.evidence == {"reason": "lock_unreadable"}
+
+
+def test_plugin_compatibility_detects_missing_entrypoint_without_import(monkeypatch, tmp_path):
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    _write_runtime_config(root, plugins=["missing-entry"])
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    plugin = root / "plugins" / "missing-entry"
+    plugin.mkdir(parents=True)
+    (plugin / "protoagent.plugin.yaml").write_text(
+        "id: missing-entry\nname: Missing Entry\nversion: 1.0.0\nentrypoint: absent.py\n",
+        encoding="utf-8",
+    )
+
+    finding = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))["plugins.compatibility"]
+
+    assert finding.status.value == "fail"
+    assert finding.evidence["plugins"]["missing-entry"] == ["missing_entrypoint"]
 
 
 def test_doctor_cli_renders_json_and_maps_exit(monkeypatch, capsys):

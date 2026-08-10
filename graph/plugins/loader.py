@@ -360,6 +360,8 @@ def inspect_plugin_compatibility(config) -> tuple[PluginCompatibility, ...]:
                 for name in sorted(manifest.requires_env)
                 if not os.environ.get(name)
             )
+            if _entry_file(manifest) is None:
+                issues.append("missing_entrypoint")
             if _min_version_gate(manifest):
                 issues.append("host_version_too_old")
         rows.append(PluginCompatibility(id=manifest.id, enabled=enabled, issues=tuple(issues)))

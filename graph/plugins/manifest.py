@@ -413,7 +413,14 @@ def load_manifest(plugin_dir: Path) -> PluginManifest | None:
     try:
         data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
-        log.warning("[plugins] %s: unreadable manifest: %s", plugin_dir.name, exc)
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {int(mark.line) + 1}, column {int(mark.column) + 1}" if mark is not None else ""
+        log.warning(
+            "[plugins] %s: unreadable manifest (%s%s)",
+            plugin_dir.name,
+            type(exc).__name__,
+            location,
+        )
         return None
     if not isinstance(data, dict):
         log.warning("[plugins] %s: manifest is not a mapping", plugin_dir.name)

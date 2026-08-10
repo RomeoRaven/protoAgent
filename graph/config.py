@@ -69,10 +69,15 @@ def _read_config_docs(p: Path) -> tuple[dict, dict, bool]:
     return merged, _load_secrets_doc(p.parent), True
 
 
+def load_config_docs_with_presence(path: str | Path) -> tuple[dict, dict, bool]:
+    """Return layered config docs plus whether any host or agent config exists."""
+    return _read_config_docs(Path(path))
+
+
 def load_config_docs(path: str | Path) -> tuple[dict, dict]:
     """Public doc loader for callers that need the raw (merged, secrets) pair without
     a full parse — the secrets refresh loop and operator sync/test routes (ADR 0080)."""
-    merged, secrets, _ = _read_config_docs(Path(path))
+    merged, secrets, _ = load_config_docs_with_presence(path)
     return merged, secrets
 
 

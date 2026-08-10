@@ -97,9 +97,7 @@ def render_doctor_report(report: DoctorReport) -> str:
             lines.append(f"     remediation: {finding.remediation}")
     counts = _report_summary(report)["counts"]
     lines.append(
-        "Summary: "
-        f"{counts['pass']} pass, {counts['warn']} warn, "
-        f"{counts['fail']} fail, {counts['skipped']} skipped"
+        f"Summary: {counts['pass']} pass, {counts['warn']} warn, {counts['fail']} fail, {counts['skipped']} skipped"
     )
     return "\n".join(lines)
 
@@ -173,25 +171,33 @@ def _path_findings(paths) -> list[DoctorFinding]:
 
 
 def _config_findings(config_path: Path) -> tuple[list[DoctorFinding], Any | None]:
-    if not config_path.is_file():
-        return [
-            _finding(
-                "config.parse",
-                FindingStatus.FAIL,
-                "live agent config is missing",
-                evidence={"path": str(config_path), "reason": "missing"},
-                remediation="run setup or provide the instance config before runtime startup",
-            ),
-            _finding("config.runtime_requirements", FindingStatus.SKIPPED, "config parsing did not pass"),
-        ], None
-
     try:
-        from graph.config import LangGraphConfig, load_config_docs
+        from graph.config import LangGraphConfig, load_config_docs_with_presence
         from graph.config_io import validate_for_headless
 
-        merged, secrets = load_config_docs(config_path)
+        merged, secrets, present = load_config_docs_with_presence(config_path)
+        if not present:
+            return [
+                _finding(
+                    "config.parse",
+                    FindingStatus.FAIL,
+                    "live config is missing",
+                    evidence={"path": str(config_path), "reason": "missing"},
+                    remediation="run setup or provide host or instance config before runtime startup",
+                ),
+                _finding("config.runtime_requirements", FindingStatus.SKIPPED, "config parsing did not pass"),
+            ], None
         if not isinstance(merged, dict) or not isinstance(secrets, dict):
             raise TypeError("config roots must be mappings")
+        plugins_doc = merged.get("plugins", {}) or {}
+        if not isinstance(plugins_doc, dict):
+            raise ValueError("plugins config must be a mapping")
+        for field_name in ("enabled", "disabled"):
+            plugin_ids = plugins_doc.get(field_name, []) or []
+            if not isinstance(plugin_ids, list) or any(
+                not isinstance(plugin_id, str) or not plugin_id.strip() for plugin_id in plugin_ids
+            ):
+                raise ValueError(f"plugins.{field_name} must be a list of nonblank plugin ids")
         config = LangGraphConfig.from_dict(merged, secrets=secrets, config_dir=config_path.parent)
     except (OSError, yaml.YAMLError, TypeError, ValueError, AttributeError) as exc:
         mark = getattr(exc, "problem_mark", None)
@@ -211,10 +217,29 @@ def _config_findings(config_path: Path) -> tuple[list[DoctorFinding], Any | None
 
     rows = [_finding("config.parse", FindingStatus.PASS, "host, agent, and secrets config parsed")]
     ok, reason = validate_for_headless(config)
+    runtime_name = str(getattr(config, "agent_runtime", "native") or "native")
+    if ok and runtime_name.startswith("acp:"):
+        from runtime.acp_runtime import adapter_for, resolve_runtime
+
+        _, agent = resolve_runtime(config)
+        try:
+            adapter_for(agent, config)
+        except ValueError:
+            ok, reason = False, "missing_acp_adapter"
     if ok:
-        rows.append(_finding("config.runtime_requirements", FindingStatus.PASS, "offline runtime requirements are present"))
+        rows.append(
+            _finding("config.runtime_requirements", FindingStatus.PASS, "offline runtime requirements are present")
+        )
     else:
-        code = "missing_model_api_base" if "api_base" in reason else "missing_model_api_key" if "api_key" in reason else "invalid_runtime_config"
+        code = (
+            "missing_acp_adapter"
+            if reason == "missing_acp_adapter"
+            else "missing_model_api_base"
+            if "api_base" in reason
+            else "missing_model_api_key"
+            if "api_key" in reason
+            else "invalid_runtime_config"
+        )
         rows.append(
             _finding(
                 "config.runtime_requirements",
@@ -240,7 +265,13 @@ def _port_finding(port: int) -> DoctorFinding:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", port))
     except OSError as exc:
-        reason = "occupied" if exc.errno == errno.EADDRINUSE else "permission_denied" if exc.errno == errno.EACCES else "unavailable"
+        reason = (
+            "occupied"
+            if exc.errno == errno.EADDRINUSE
+            else "permission_denied"
+            if exc.errno == errno.EACCES
+            else "unavailable"
+        )
         return _finding(
             "network.loopback_port",
             FindingStatus.FAIL,
@@ -263,7 +294,7 @@ def _plugin_findings(config: Any | None) -> list[DoctorFinding]:
             _finding("plugins.compatibility", FindingStatus.SKIPPED, "config parsing did not pass"),
             _finding("plugins.lock", FindingStatus.SKIPPED, "config parsing did not pass"),
         ]
-    from graph.plugins.installer import list_installed
+    from graph.plugins.installer import list_installed, plugin_lock_readable
     from graph.plugins.loader import inspect_plugin_compatibility
 
     compatibility = inspect_plugin_compatibility(config)
@@ -280,24 +311,51 @@ def _plugin_findings(config: Any | None) -> list[DoctorFinding]:
         _finding(
             "plugins.compatibility",
             FindingStatus.FAIL if incompatible else FindingStatus.PASS,
-            "enabled plugins have compatibility failures" if incompatible else "enabled plugin manifests are compatible",
+            "enabled plugins have compatibility failures"
+            if incompatible
+            else "enabled plugin manifests are compatible",
             evidence={"plugins": incompatible},
-            remediation="satisfy the named environment requirement or use a compatible plugin version" if incompatible else "",
+            remediation="satisfy the named environment requirement or use a compatible plugin version"
+            if incompatible
+            else "",
         ),
     ]
+    if not plugin_lock_readable():
+        rows.append(
+            _finding(
+                "plugins.lock",
+                FindingStatus.FAIL,
+                "plugin lock could not be read",
+                evidence={"reason": "lock_unreadable"},
+                remediation="inspect plugins.lock with the existing plugin tooling",
+            )
+        )
+        return rows
     try:
         inventory = list_installed()
-        missing_tracked = sorted(row.get("id", "") for row in inventory if row.get("tracked") and not row.get("present"))
+        missing_tracked = sorted(
+            row.get("id", "") for row in inventory if row.get("tracked") and not row.get("present")
+        )
         untracked = sorted(row.get("id", "") for row in inventory if row.get("present") and not row.get("tracked"))
         status = FindingStatus.FAIL if missing_tracked else FindingStatus.WARN if untracked else FindingStatus.PASS
-        summary = "plugin lock has tracked entries missing from disk" if missing_tracked else "untracked live plugins are present" if untracked else "plugin lock and live inventory agree"
+        summary = (
+            "plugin lock has tracked entries missing from disk"
+            if missing_tracked
+            else "untracked live plugins are present"
+            if untracked
+            else "plugin lock and live inventory agree"
+        )
         rows.append(
             _finding(
                 "plugins.lock",
                 status,
                 summary,
                 evidence={"tracked_missing": missing_tracked, "untracked_present": untracked},
-                remediation="run the existing plugin sync workflow" if missing_tracked else "review and explicitly install or remove untracked plugins" if untracked else "",
+                remediation="run the existing plugin sync workflow"
+                if missing_tracked
+                else "review and explicitly install or remove untracked plugins"
+                if untracked
+                else "",
             )
         )
     except (OSError, TypeError, ValueError, KeyError):
@@ -315,7 +373,7 @@ def _plugin_findings(config: Any | None) -> list[DoctorFinding]:
 
 @op(
     name="environment.doctor",
-    mutates=False,
+    risk="read",
     summary="Check offline runtime readiness without changing the instance.",
 )
 def run_doctor(*, options: DoctorOptions | None = None) -> DoctorReport:
@@ -324,7 +382,13 @@ def run_doctor(*, options: DoctorOptions | None = None) -> DoctorReport:
 
     opts = options or DoctorOptions()
     paths = instance_paths()
-    distribution = "frozen" if getattr(sys, "frozen", False) else "source" if (paths.app_root / "pyproject.toml").is_file() else "wheel"
+    distribution = (
+        "frozen"
+        if getattr(sys, "frozen", False)
+        else "source"
+        if (paths.app_root / "pyproject.toml").is_file()
+        else "wheel"
+    )
     environment = {
         "os": platform.system(),
         "architecture": platform.machine(),
