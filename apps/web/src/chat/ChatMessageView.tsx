@@ -5,9 +5,20 @@ import { Spinner } from "@protolabsai/ui/data";
 import { ArrowDownToLine, Check, Clock, Coins, Copy, FileText, GitBranch, Gauge, History, Maximize2, RotateCcw, X } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 
+import { useQuery } from "@tanstack/react-query";
+
 import { openDocument } from "../docviewer";
 import { slashCommandName } from "../ext/slashRegistry";
 import { loadBackgroundReport } from "../lib/api";
+import { runtimeStatusQuery } from "../lib/queries";
+import {
+  costAriaLabel,
+  costPrefix,
+  costTipLabel,
+  costTipSub,
+  isSubscriptionProvider,
+  usageTipNote,
+} from "./costLabel";
 import { useUI } from "../state/uiStore";
 import type { ChatMessage, ChatPart, ContextWindow, TurnUsage } from "../lib/types";
 import { ChatComponent } from "./ChatComponent";
@@ -31,6 +42,13 @@ export type ChatMessageActions = {
   onDismiss?: (id: string) => void;
   lastAssistantId?: string;
   regenDisabled?: boolean;
+  // The conversational tail (chat/parts.rewindableTailId): "Rewind to here" hides on
+  // it — discarding "everything below" the tail is a no-op behind a destructive
+  // confirm, which reads as either scary or broken (Josh, 2026-08-10).
+  rewindTailId?: string;
+  // Incognito sessions retain no prompt snapshots BY DESIGN — offering "View prompt"
+  // there 404s and reads as data loss instead of privacy working (#2484).
+  incognito?: boolean;
 };
 
 // The single chat message renderer (ADR 0035) — shared by the main chat (ChatSurface) and the
@@ -186,10 +204,10 @@ export function ChatMessageView({
           {actions.onFork ? (
             <MessageAction label="Fork from here" icon={<GitBranch size={14} />} onClick={() => actions.onFork!(message)} />
           ) : null}
-          {actions.onRewind ? (
+          {actions.onRewind && message.id !== actions.rewindTailId ? (
             <MessageAction label="Rewind to here" icon={<History size={14} />} onClick={() => actions.onRewind!(message)} />
           ) : null}
-          {message.taskId ? (
+          {message.taskId && !actions.incognito ? (
             <MessageAction
               label="View prompt"
               icon={<FileText size={14} />}
@@ -324,11 +342,13 @@ function UsageTip({
   threshold,
   context,
   usage,
+  subscription,
 }: {
   ctxTokens?: number;
   threshold?: number;
   context?: ContextWindow;
   usage?: TurnUsage;
+  subscription: boolean;
 }) {
   const compaction =
     context == null
@@ -351,8 +371,14 @@ function UsageTip({
         <TipRow label="Cache" value={`${usage.cacheReadTokens.toLocaleString()} tokens`} sub="reused from cache" />
       ) : null}
       {usage?.durationMs ? <TipRow label="Time" value={fmtDuration(usage.durationMs)} /> : null}
-      {usage?.costUsd != null ? <TipRow label="Cost" value={fmtCost(usage.costUsd)} /> : null}
-      <p className="chat-usage-tip-note">Context is the live prompt size; cost is summed across the turn's calls.</p>
+      {usage?.costUsd != null ? (
+        <TipRow
+          label={costTipLabel(subscription)}
+          value={`${costPrefix(subscription)}${fmtCost(usage.costUsd)}`}
+          sub={costTipSub(subscription)}
+        />
+      ) : null}
+      <p className="chat-usage-tip-note">{usageTipNote(subscription)}</p>
     </div>
   );
 }
@@ -368,9 +394,13 @@ function UsageFooter({ usage, context }: { usage?: TurnUsage; context?: ContextW
   const threshold = context?.compactionAtTokens;
   const pct =
     ctxTokens != null && threshold ? Math.min(100, Math.round((ctxTokens / threshold) * 100)) : null;
+  // Subscription-backed turns (#2463): dollars are an API-equivalent estimate, not a
+  // charge — the footer and tip must say so. Cached app-wide; same key as the topbar.
+  const { data: rt } = useQuery(runtimeStatusQuery());
+  const subscription = isSubscriptionProvider(rt?.model?.provider);
 
   return (
-    <Tooltip label={<UsageTip ctxTokens={ctxTokens} threshold={threshold} context={context} usage={usage} />} side="top" align="start">
+    <Tooltip label={<UsageTip ctxTokens={ctxTokens} threshold={threshold} context={context} usage={usage} subscription={subscription} />} side="top" align="start">
       <div className="chat-usage">
         {ctxTokens != null ? (
           <span className="chat-usage-item" aria-label="context window">
@@ -397,8 +427,9 @@ function UsageFooter({ usage, context }: { usage?: TurnUsage; context?: ContextW
           </span>
         ) : null}
         {usage?.costUsd != null ? (
-          <span className="chat-usage-item" aria-label="cost">
+          <span className="chat-usage-item" aria-label={costAriaLabel(subscription)}>
             <Coins size={13} aria-hidden />
+            {costPrefix(subscription)}
             {fmtCost(usage.costUsd)}
           </span>
         ) : null}

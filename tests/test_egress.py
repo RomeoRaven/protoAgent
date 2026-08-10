@@ -148,8 +148,11 @@ def test_policy_reflects_projects_and_egress(tmp_path):
     # filesystem_policy: the write:true project lands under read_write, write:false
     # under read_only — verify by section ORDER, not just presence.
     rw_idx, ro_idx = policy.index("read_write:"), policy.index("read_only:")
-    assert rw_idx < policy.index("/work/pixelgen") < ro_idx  # write:true → read_write
-    assert ro_idx < policy.index("/work/ORBIS")  # write:false → read_only
+    # The generator emits each root .resolve()'d — on Windows that anchors "/work/x" to
+    # the CWD drive (C:\work\x); resolve the expected values the same way (no-op on POSIX).
+    pixelgen, orbis = str(Path("/work/pixelgen").resolve()), str(Path("/work/ORBIS").resolve())
+    assert rw_idx < policy.index(pixelgen) < ro_idx  # write:true → read_write
+    assert ro_idx < policy.index(orbis)  # write:false → read_only
     assert "project: pixelgen" in policy and "project: orbis" in policy
     assert "/sandbox" in policy  # data root, read-write
     # network_policies: deny-by-default egress allowlist (only listed endpoints
@@ -196,19 +199,29 @@ def test_policy_includes_the_projects_registry(tmp_path):
     through the same effective-fence accessor, including its fs:false opt-out."""
     from graph.config import LangGraphConfig
 
+    # Real absolute paths (tmp_path subdirs), NOT "/work/rw": fenced_projects() refuses a
+    # non-absolute path, and a POSIX "/work/rw" has a root but no DRIVE on Windows, so
+    # WindowsPath("/work/rw").is_absolute() is False — the whole registry would be dropped
+    # and the policy would carry no project at all. .as_posix() keeps the YAML drive-colon
+    # safe under double quotes on both platforms.
+    rw_dir, ro_dir, nf_dir = tmp_path / "rw", tmp_path / "ro", tmp_path / "nofence"
     p = tmp_path / "c.yaml"
     p.write_text(
         "projects:\n"
-        "  - {name: rw, path: /work/rw}\n"  # registry default = read-write (D3)
-        "  - {name: ro, path: /work/ro, write: false}\n"
-        "  - {name: nofence, path: /work/nofence, fs: false}\n"
+        f'  - {{name: rw, path: "{rw_dir.as_posix()}"}}\n'  # registry default = read-write (D3)
+        f'  - {{name: ro, path: "{ro_dir.as_posix()}", write: false}}\n'
+        f'  - {{name: nofence, path: "{nf_dir.as_posix()}", fs: false}}\n'
     )
     policy = _gen().build_policy(LangGraphConfig.from_yaml(p))
 
     rw_idx, ro_idx = policy.index("read_write:"), policy.index("read_only:")
-    assert rw_idx < policy.index("/work/rw") < ro_idx
-    assert ro_idx < policy.index("/work/ro")
-    assert "/work/nofence" not in policy  # fs:false grants no filesystem reach
+    # Order by the platform-independent "project: <name>" marker the generator always emits
+    # (`f"project: {name}"`) — its resolved path form is drive-anchored on Windows, but the
+    # marker is identical on every platform and tests the actual intent (which fence section
+    # each project lands in).
+    assert rw_idx < policy.index("project: rw") < ro_idx  # registry default = read-write
+    assert ro_idx < policy.index("project: ro")  # write:false → read_only
+    assert "project: nofence" not in policy  # fs:false grants no filesystem reach
 
 
 # ── #871: allow_private mode (fleet remotes) ────────────────────────────────────
@@ -246,6 +259,7 @@ def test_policy_expands_tilde_to_match_the_enforced_fence(tmp_path, monkeypatch)
     from graph.config import LangGraphConfig
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expands ~ via USERPROFILE, not HOME
     home_dir = tmp_path / "dev" / "proj"
     home_dir.mkdir(parents=True)
 

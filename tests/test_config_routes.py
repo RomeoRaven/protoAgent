@@ -382,6 +382,7 @@ def test_fs_projects_set_normalizes_and_enables(monkeypatch, tmp_path):
     docs.mkdir()
     inbox.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expands ~ via USERPROFILE, not HOME
     monkeypatch.setitem(sys.modules, "server.agent_init", _fake_module("server.agent_init", _apply_settings_changes=_apply))
     body = _client().post(
         "/api/settings/filesystem-projects",
@@ -624,8 +625,115 @@ def test_projects_get_matches_a_tilde_row_against_its_expanded_fence_entry(monke
     """fenced_projects() expands `~`, so a row written as `~/x` has to be compared
     against the EXPANDED path or it would never match its own fence entry."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expands ~ via USERPROFILE, not HOME
     (tmp_path / "proj").mkdir()
     _projects_state(monkeypatch, projects=[{"name": "p", "path": "~/proj"}])
     body = _client().get("/api/projects").json()
     assert body["fence_source"] == "registry"
     assert body["projects"][0]["fenced"] is True
+
+
+def test_settings_schema_lists_native_oauth_models(monkeypatch, tmp_path):
+    """#2473: with a native OAuth provider configured, the schema's model.name
+    options must come from subscription discovery (list_provider_models), not the
+    gateway probe — /model and the composer read the schema, so a gateway-only
+    probe collapsed their pickers to one card while Settings ▸ Get models saw nine."""
+    import types as _t
+
+    import runtime.state as rs
+
+    monkeypatch.setattr(
+        rs.STATE,
+        "graph_config",
+        _t.SimpleNamespace(model_provider="openai-codex", api_base="", api_key=""),
+        raising=False,
+    )
+    discovered = [f"gpt-5.6-sol-{i}" for i in range(9)]
+    monkeypatch.setattr(
+        "graph.providers.discovery.list_provider_models",
+        lambda provider, cfg: (discovered, ""),
+    )
+
+    def _gateway_probe_must_not_run(base, key):  # the pre-#2473 path
+        raise AssertionError("gateway probe called for a native OAuth provider")
+
+    monkeypatch.setattr("graph.config_io.list_gateway_models", _gateway_probe_must_not_run)
+    monkeypatch.setattr("graph.config_io.config_yaml_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setattr("graph.config._load_host_layer", lambda: {})
+    captured = {}
+
+    def _capture_schema(cfg, model_options=None, agent_doc=None, host_doc=None):
+        captured["model_options"] = model_options
+        return []
+
+    monkeypatch.setattr("graph.settings_schema.build_schema", _capture_schema)
+
+    resp = _client().get("/api/settings/schema").json()
+    assert resp == {"groups": []}
+    assert captured["model_options"] == discovered
+
+
+def test_finish_setup_delegates_offloaded(monkeypatch):
+    """#2486 coverage gap: POST /api/config/setup forwards config+soul to the
+    finish_setup callback and returns its outcome."""
+    import operator_api.config_routes as cr
+
+    seen = {}
+
+    def _finish(config, soul):
+        seen["config"], seen["soul"] = config, soul
+        return True, "agent is ready"
+
+    monkeypatch.setattr(cr, "_build_settings_callbacks", lambda: {"finish_setup": _finish})
+    body = _client().post("/api/config/setup", json={"config": {"a": 1}, "soul": "S"}).json()
+    assert body == {"ok": True, "message": "agent is ready"}
+    assert seen == {"config": {"a": 1}, "soul": "S"}
+
+
+def test_config_explain_delegates(monkeypatch):
+    """#2486 coverage gap: GET /api/config/explain returns build_config_explain's
+    dict for the LIVE config verbatim."""
+    import runtime.state as rs
+
+    cfg = object()
+    monkeypatch.setattr(rs.STATE, "graph_config", cfg, raising=False)
+    seen = {}
+
+    def _explain(c):
+        seen["cfg"] = c
+        return {"identity": "x", "paths": {}}
+
+    monkeypatch.setattr("graph.config_explain.build_config_explain", _explain)
+    body = _client().get("/api/config/explain").json()
+    assert body == {"identity": "x", "paths": {}}
+    assert seen["cfg"] is cfg
+
+
+def test_read_preset_404_on_unknown_200_on_known(monkeypatch):
+    """#2486: an unknown preset name is a 404 — the old empty-string 200 was
+    indistinguishable from a real-but-blank preset. Membership decides."""
+    monkeypatch.setattr("graph.config_io.list_soul_presets", lambda: ["cowork", "blank-slate"])
+    monkeypatch.setattr("graph.config_io.read_soul_preset", lambda name: f"# {name}")
+    c = _client()
+    assert c.get("/api/config/presets/nope").status_code == 404
+    ok = c.get("/api/config/presets/cowork")
+    assert ok.status_code == 200 and ok.json() == {"name": "cowork", "content": "# cowork"}
+
+
+def test_projects_route_survives_none_config(monkeypatch):
+    """Regression pin for a review claim that turned out FALSE (#2486): every
+    config access in _api_projects is getattr-defaulted / hasattr-guarded, so a
+    pre-setup None config yields a clean disabled-fence response, not a 500."""
+    import runtime.state as rs
+
+    monkeypatch.setattr(rs.STATE, "graph_config", None, raising=False)
+    body = _client().get("/api/projects").json()
+    assert body["fence_source"] == "disabled"
+    assert body["projects"] == []
+
+
+def test_reset_setup_offloaded(monkeypatch):
+    seen = []
+    monkeypatch.setattr("graph.config_io.reset_setup", lambda: seen.append(1))
+    body = _client().post("/api/config/reset-setup").json()
+    assert body["ok"] is True and seen == [1]

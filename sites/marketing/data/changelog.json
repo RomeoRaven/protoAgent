@@ -1,5 +1,89 @@
 [
   {
+    "version": "v0.131.1",
+    "date": "2026-08-10",
+    "changes": [
+      "Config-route hardening: no more event-loop stalls or ambiguous responses (#2486)."
+    ]
+  },
+  {
+    "version": "v0.131.0",
+    "date": "2026-08-10",
+    "changes": [
+      "OAuth account lifecycle controls now live in Settings ▸ Model (#2460).",
+      "An OAuth disconnect no longer makes the server unbootable (#2458).",
+      "OAuth disconnect now signs the live graph out too (#2459).",
+      "Setup Finish no longer leaves stale model/provider UI until a restart (#2462).",
+      "Subscription-provider dollars are now labeled as estimates, not charges (#2463).",
+      "Catalog and theme reads no longer depend on the Windows locale codepage (#2464).",
+      "A legacy non-UTF-8 catalog override degrades safely instead of 500ing (#2465).",
+      "Escape in a Settings dropdown no longer closes all of Settings (#2466).",
+      "The Keyboard settings hint now speaks the viewer's platform (#2467).",
+      "Telemetry timestamps now render in the operator's local timezone (#2468).",
+      "Windows Settings no longer speak macOS (#2470, #2469).",
+      "The bundled Docs view parses again (#2471).",
+      "/model and the composer picker now list native-OAuth subscription models (#2473).",
+      "The chat-focus shortcuts work from any surface (#2474).",
+      "Rewind works on Responses-API / reasoning models (#2480).",
+      "Deleting a chat now deletes its session-summary memory too (#2482).",
+      "/btw asides are truly saved nowhere now (#2483).",
+      "Incognito turns no longer offer a View prompt that 404s (#2484).",
+      "Regenerate replaces the turn everywhere, not just on screen (#2491).",
+      "The bare /effort (and /model) picker is mouse-usable again (#2492).",
+      "Disconnect no longer remotely revokes a credential borrowed from the Codex CLI (#2461)."
+    ]
+  },
+  {
+    "version": "v0.130.0",
+    "date": "2026-08-10",
+    "changes": [
+      "A persona that commands an action no tool backs now warns instead of failing silently (#2443).",
+      "The New/Edit schedule dialog is a real builder, with validation (#2159).",
+      "More of the test suite runs natively on Windows CI (#2412).",
+      "CHANGELOG.md is now split into dated monthly archives (#2437).",
+      "find_files and search_files return forward-slash paths on Windows (#2446).",
+      "Native OAuth sign-in now has cancel, disconnect, and revocation (#2440).",
+      "Concurrent Codex credential resolution no longer races the single-use refresh token (#2441).",
+      "The review panel can no longer publish its own reasoning to a pull request (#2447).",
+      "The coder plugin's test verifier now runs on Windows (#2450).",
+      "The media URL-signing key is now owner-only on Windows (#2451).",
+      "execute_code runs on Windows (#2453).",
+      "Coding-agent death errors are accurate on Windows (#2454)."
+    ]
+  },
+  {
+    "version": "v0.129.0",
+    "date": "2026-08-09",
+    "changes": [
+      "Run Claude or ChatGPT on your own coding-agent subscription, natively (#2420).",
+      "Setup wizard: pick a subscription brain, no config-file editing (#2420).",
+      "Sign in to Claude / ChatGPT from the console — no terminal (#2420)."
+    ]
+  },
+  {
+    "version": "v0.128.0",
+    "date": "2026-08-09",
+    "changes": [
+      "The system-prompt viewer answers \"what changed?\" and \"what's next?\" (#2415).",
+      "PRs are now gated by a native Windows test job (#2419).",
+      "One cross-platform process-tree lifecycle — infra/proc (#2424).",
+      "The console now uses the canonical --pl-* design tokens everywhere (#2414).",
+      "Plugin views fail loudly when the DS kit is missing instead of silently 401ing (#2409).",
+      "Windows shell and desktop paths are native (#2416).",
+      "Pure-Python wheel installs now work on Windows and keep dependency pins in the canonical lock schema (#2417, #2418).",
+      "The desktop sidecar now serves the console at /app — mobile QR pairing works from desktop installs (#2423).",
+      "Stopping an ACP delegate on Windows no longer leaks its backend (#2425).",
+      "Rapid persona saves can no longer prune the wrong history snapshot (#2426).",
+      "Fleet stop and protoagent down work on Windows — and take the whole member tree (#2427).",
+      "Concurrent metric writes can no longer be starved into \"database is locked\" (#2429).",
+      "Windows install/uninstall now sweeps the sidecar's stranded _MEI runtime dirs (#2430).",
+      "Installing a plugin from a local path works on Windows (#2433).",
+      "Watches and goals work on Windows — state writes no longer fail, verifiers no longer hit the WSL stub (#2434).",
+      "Windows credential files now have a real privacy contract (#2431).",
+      "The external-PR path is documented (#2421)."
+    ]
+  },
+  {
     "version": "v0.127.0",
     "date": "2026-08-08",
     "changes": [

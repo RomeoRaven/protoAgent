@@ -14,6 +14,7 @@ HTTP layer over it.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from fastapi import HTTPException
@@ -25,6 +26,8 @@ from server.agent_init import (
     _build_settings_callbacks,
     _reset_settings_keys,
 )
+
+log = logging.getLogger(__name__)
 
 
 class ConfigReloadRequest(BaseModel):
@@ -38,6 +41,19 @@ class ModelsProbeRequest(BaseModel):
     # Only used by the connection test (a real completion needs a model);
     # the model-list probe ignores it. Blank falls back to the saved config.
     model: str = ""
+    # Native OAuth providers (ADR 0097) probe the subscription account instead of
+    # the gateway — for "anthropic-oauth"/"openai-codex" the model list + connection
+    # test route through the OAuth path, ignoring api_base/api_key. Blank = gateway.
+    provider: str = ""
+
+
+class OAuthLoginRequest(BaseModel):
+    """Drives the in-console OAuth sign-in (ADR 0097): `provider` starts a flow,
+    `flow_id` (+ `code` for Claude) advances it."""
+
+    provider: str = ""
+    flow_id: str = ""
+    code: str = ""
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -68,6 +84,30 @@ def _reset_live_embed_breaker() -> None:
                 )
         except Exception:  # noqa: BLE001 — never let a breaker reset break the test route
             pass
+
+
+async def _rebuild_graph_after_reconnect(result: dict) -> dict:
+    """After a completed in-console sign-in, restore the live graph (#2458).
+
+    A server that booted signed-out (disconnect marker present) is serving
+    routes with ``STATE.graph = None`` — the reconnect that just succeeded is
+    the moment to rebuild, or the user stays chatless until a manual restart.
+    No-op unless the sign-in actually completed and a rebuild can help
+    (setup complete, no live graph). Reload failure is reported, not raised —
+    the sign-in itself DID succeed and the tokens are stored.
+    """
+    if result.get("status") != "complete":
+        return result
+    from graph.config_io import is_setup_complete
+
+    if STATE.graph is not None or not is_setup_complete():
+        return result
+    from server.agent_init import _reload_langgraph_agent
+
+    ok, message = await asyncio.to_thread(_reload_langgraph_agent)
+    if not ok:
+        return {**result, "graph_reloaded": False, "graph_reload_error": message}
+    return {**result, "graph_reloaded": True}
 
 
 def register_config_routes(app) -> None:
@@ -153,10 +193,127 @@ def register_config_routes(app) -> None:
         from graph.config_io import list_gateway_models
 
         body = req or ModelsProbeRequest()
+        # Native OAuth providers list the subscription account's models, not the gateway's.
+        provider = (body.provider or getattr(STATE.graph_config, "model_provider", "") or "").strip().lower()
+        from graph.providers import is_native_oauth_provider
+
+        if is_native_oauth_provider(provider):
+            from graph.providers.discovery import list_provider_models
+
+            models, error = await asyncio.to_thread(
+                list_provider_models, provider, STATE.graph_config
+            )
+            return {"models": models, "error": error}
         base = body.api_base or (STATE.graph_config.api_base if STATE.graph_config else "")
         key = body.api_key or (STATE.graph_config.api_key if STATE.graph_config else "")
-        models, error = list_gateway_models(base, key)
+        # Offloaded (#2486): the gateway probe is a blocking network call — running it
+        # inline stalled the event loop for the probe duration (the native-OAuth branch
+        # above already offloads).
+        models, error = await asyncio.to_thread(list_gateway_models, base, key)
         return {"models": models, "error": error}
+
+    @app.get("/api/config/oauth-status")
+    async def _api_oauth_status():
+        """Sign-in status for the native OAuth providers (ADR 0097) — the wizard +
+        Settings render "✓ signed in" / a sign-in hint per provider. Read-only."""
+        from graph.providers.discovery import all_oauth_status
+
+        return {"providers": await asyncio.to_thread(all_oauth_status)}
+
+    @app.post("/api/config/oauth/start")
+    async def _api_oauth_start(req: OAuthLoginRequest):
+        """Begin an in-console OAuth sign-in (ADR 0097). Codex returns a device code +
+        URL to poll; Claude returns an authorize URL to open + complete with a code."""
+        from graph.providers.oauth_login import OAuthLoginError, login_start
+
+        try:
+            return await asyncio.to_thread(login_start, req.provider)
+        except OAuthLoginError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/config/oauth/poll")
+    async def _api_oauth_poll(req: OAuthLoginRequest):
+        """Poll a Codex device sign-in — returns {status: pending|complete|error}. On
+        completion the tokens are stored and oauth-status flips to signed in."""
+        from graph.providers.oauth_login import OAuthLoginError, codex_login_poll
+
+        try:
+            result = await asyncio.to_thread(codex_login_poll, req.flow_id)
+        except OAuthLoginError as exc:
+            return {"status": "error", "error": str(exc)}
+        return await _rebuild_graph_after_reconnect(result)
+
+    @app.post("/api/config/oauth/complete")
+    async def _api_oauth_complete(req: OAuthLoginRequest):
+        """Complete a Claude sign-in with the pasted `code#state` — exchanges + stores."""
+        from graph.providers.oauth_login import OAuthLoginError, anthropic_login_complete
+
+        try:
+            result = await asyncio.to_thread(anthropic_login_complete, req.flow_id, req.code)
+        except OAuthLoginError as exc:
+            return {"status": "error", "error": str(exc)}
+        return await _rebuild_graph_after_reconnect(result)
+
+    @app.post("/api/config/oauth/cancel")
+    async def _api_oauth_cancel(req: OAuthLoginRequest):
+        """Abandon an in-progress sign-in (#2440) — drops the server-side pending flow so a
+        Cancel in the wizard actually cancels the flow, not just the browser timer."""
+        from graph.providers.oauth_login import cancel_login
+
+        return await asyncio.to_thread(cancel_login, req.flow_id)
+
+    @app.post("/api/config/oauth/disconnect")
+    async def _api_oauth_disconnect(req: OAuthLoginRequest):
+        """Disconnect a native OAuth provider (#2440): best-effort remote revoke + delete
+        protoAgent's own stored credential + suppress auto-reconnect until an in-console
+        sign-in. Never touches the vendor CLI's auth file. Idempotent.
+
+        Disconnect is an application-level auth transition, not just a storage
+        mutation (#2459): when the live graph runs on this provider, its in-memory
+        client still holds the just-revoked token — leaving it loaded lets the next
+        prompt reach the provider and surface a raw 401. Unload it into the same
+        signed-out state a disconnected boot produces (#2458); the completed
+        sign-in reload restores it.
+        """
+        from graph.providers.oauth import OAuthCredentialError, disconnect
+
+        if not (req.provider or "").strip():
+            raise HTTPException(status_code=400, detail="provider is required")
+        try:
+            result = await asyncio.to_thread(disconnect, req.provider)
+        except OAuthCredentialError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        provider = (req.provider or "").strip().lower()
+        live_provider = (getattr(STATE.graph_config, "model_provider", "") or "").strip().lower()
+        if STATE.graph is None or provider != live_provider:
+            return result.as_dict()
+        # TOCTOU guard (QA review): a sign-in completing during the disconnect
+        # thread's await rebuilds the graph AND clears the disconnect marker —
+        # its work must win. The marker is the storage truth for who finished
+        # last, so re-check it after the await; the mutations below then run
+        # synchronously (no awaits) so nothing on the loop can interleave.
+        from graph.providers.oauth import is_disconnected
+
+        if not is_disconnected(provider):
+            return {**result.as_dict(), "graph_unloaded": False}
+
+        warmer, STATE.cache_warmer = STATE.cache_warmer, None
+        STATE.graph = None
+        STATE.graph_auth_error = {
+            "provider": provider,
+            "message": f"{provider} is disconnected in protoAgent. Sign in again to reconnect.",
+            "relogin": True,
+        }
+        # The cache warmer pings this provider on a heartbeat — stopped AFTER the
+        # unload commit (its await is the yield point the guard above protects),
+        # detached from the just-committed signed-out state.
+        if warmer is not None:
+            try:
+                await warmer.stop()
+            except Exception:  # noqa: BLE001 — a warmer that won't stop must not block disconnect
+                log.warning("[oauth] cache warmer stop failed during disconnect", exc_info=True)
+        return {**result.as_dict(), "graph_unloaded": True}
 
     @app.post("/api/config/test-model")
     async def _api_test_model(req: ModelsProbeRequest | None = None):
@@ -171,9 +328,21 @@ def register_config_routes(app) -> None:
         from graph.config_io import validate_model_connection
 
         body = req or ModelsProbeRequest()
+        model = body.model or (STATE.graph_config.model_name if STATE.graph_config else "")
+        # Native OAuth providers (ADR 0097) test through the subscription, not a gateway
+        # key — build the real client and stream a 1-token turn.
+        provider = (body.provider or getattr(STATE.graph_config, "model_provider", "") or "").strip().lower()
+        from graph.providers import is_native_oauth_provider
+
+        if is_native_oauth_provider(provider):
+            from graph.providers.discovery import validate_oauth_connection
+
+            ok, error = await asyncio.to_thread(
+                validate_oauth_connection, provider, model, STATE.graph_config
+            )
+            return {"ok": ok, "error": error}
         base = body.api_base or (STATE.graph_config.api_base if STATE.graph_config else "")
         key = body.api_key or (STATE.graph_config.api_key if STATE.graph_config else "")
-        model = body.model or (STATE.graph_config.model_name if STATE.graph_config else "")
         ok, error = await asyncio.to_thread(validate_model_connection, base, key, model)
         # A successful test of the LIVE saved key (no form-local override) proves the
         # gateway + key are good again — so clear any open embedding circuit breaker
@@ -216,14 +385,22 @@ def register_config_routes(app) -> None:
     async def _api_reset_setup():
         from graph.config_io import reset_setup
 
-        reset_setup()
+        # Offloaded (#2486) — filesystem work stays off the event loop like its siblings.
+        await asyncio.to_thread(reset_setup)
         return {"ok": True, "message": "setup marker removed"}
 
     @app.get("/api/config/presets/{name}")
     async def _api_read_preset(name: str):
-        from graph.config_io import read_soul_preset
+        from graph.config_io import list_soul_presets, read_soul_preset
 
-        return {"name": name, "content": read_soul_preset(name)}
+        # An UNKNOWN name is a 404 (#2486) — the old empty-string 200 was
+        # indistinguishable from a real-but-blank preset. Membership decides, not
+        # content: read_soul_preset's ""-for-unknown contract stays for the wizard's
+        # internal blank-canvas path, and a listed preset that happens to be empty
+        # still 200s.
+        if name not in await asyncio.to_thread(list_soul_presets):
+            raise HTTPException(status_code=404, detail=f"no soul preset {name!r}")
+        return {"name": name, "content": await asyncio.to_thread(read_soul_preset, name)}
 
     @app.get("/api/projects")
     async def _api_projects():
@@ -443,7 +620,22 @@ def register_config_routes(app) -> None:
 
         models: list[str] = []
         if STATE.graph_config is not None:
-            models, _ = list_gateway_models(STATE.graph_config.api_base, STATE.graph_config.api_key)
+            # Native OAuth providers (ADR 0097) list the subscription's models, not the
+            # gateway's — same branch as POST /api/config/models. Without it the schema's
+            # model.name options collapsed to the configured model, so /model and the
+            # composer picker offered exactly one card while Settings ▸ Get models saw
+            # nine (#2473). Offloaded: both listers are blocking network probes.
+            provider = (getattr(STATE.graph_config, "model_provider", "") or "").strip().lower()
+            from graph.providers import is_native_oauth_provider
+
+            if is_native_oauth_provider(provider):
+                from graph.providers.discovery import list_provider_models
+
+                models, _ = await asyncio.to_thread(list_provider_models, provider, STATE.graph_config)
+            else:
+                models, _ = await asyncio.to_thread(
+                    list_gateway_models, STATE.graph_config.api_base, STATE.graph_config.api_key
+                )
         # Per-layer provenance (ADR 0047): the raw agent leaf doc + the filtered Host
         # layer let build_schema report each field's `source` (agent/host/default) so
         # the UI can badge inherited-vs-overridden.

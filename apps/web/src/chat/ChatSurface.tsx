@@ -38,7 +38,7 @@ import { useServerTurn, useServerTurnSessions } from "./server-turn-store";
 import { filesFromTransfer, isLargePaste, pastedTextFile } from "./paste";
 import { inputHistory, pushInputHistory } from "./inputHistory";
 import { finalizeStoppedMessages, resolveStopTarget } from "./stopTurn";
-import { addComponent, addToolRef, appendReasoning, appendText, replaceText } from "./parts";
+import { rewindableTailId, addComponent, addToolRef, appendReasoning, appendText, replaceText } from "./parts";
 import { createStreamWatchdog } from "./streamWatchdog";
 import { ADD_SELECTOR, isIncognitoAddClick, trackShiftHeld } from "./shiftCue";
 import { sessionsToClose } from "./bulkClose";
@@ -920,6 +920,8 @@ function ChatSessionSlot({
     () => [...messages].reverse().find((m) => m.role === "assistant")?.id,
     [messages],
   );
+  // The conversational tail — "Rewind to here" hides on it (nothing below to discard).
+  const rewindTailId = useMemo(() => rewindableTailId(messages), [messages]);
 
   // Sendable with text OR at least one ready attachment (file-only send, e.g.
   // "describe this image" with no caption). Matches the DS PromptInput gate,
@@ -947,6 +949,12 @@ function ChatSessionSlot({
     histIndexRef.current = null;
     histStashRef.current = "";
     setDraft("");
+    // The slash popover tracks the TEXTAREA's live token via keyup/click/focus
+    // refreshes — a mouse click on Send fires none of those, so the stale menu
+    // stayed mounted OVER the HITL form a bare command (e.g. /effort) opens and
+    // intercepted its pointer events (#2492). Clear it with the draft.
+    setSlashCtx(null);
+    setSlashIndex(0);
     // Deterministic client-side slash commands (ADR 0057) — handled locally, not sent.
     if (text.startsWith("/") && runClientSlash(text.slice(1).trim())) return;
     // Native-vision images ride the turn as multimodal parts; pipeline attachments
@@ -1133,14 +1141,36 @@ function ChatSessionSlot({
     if (status === "error") chatStore.setSessionStatus(session.id, "idle");
   }
 
-  function regenerate(assistantId?: string) {
+  async function regenerate(assistantId?: string) {
     if (!assistantId || !session || status === "streaming") return;
     const snap = chatStore.getSnapshot().sessions.find((s) => s.id === session.id);
     if (!snap) return;
     const i = snap.messages.findIndex((m) => m.id === assistantId);
     if (i < 0) return;
-    const user = [...snap.messages.slice(0, i)].reverse().find((m) => m.role === "user");
-    if (!user) return;
+    const userIndex = [...snap.messages.slice(0, i)].reverse().findIndex((m) => m.role === "user");
+    if (userIndex < 0) return;
+    const absUserIndex = i - 1 - userIndex;
+    const user = snap.messages[absUserIndex];
+    // Server-side rewind FIRST (#2491): discard the old user+assistant pair from
+    // the checkpoint so the resend below REPLACES the turn. Without this the
+    // server appended a second identical pair while the UI hid it — history,
+    // session summary, and /export silently diverged from what the chat showed.
+    // Same content-occurrence disambiguation confirmRewind uses; `before` makes
+    // the cut exclusive (the user message goes too — runTurn re-sends it).
+    const want = (user.content || "").trim();
+    const occurrence = snap.messages
+      .slice(0, absUserIndex)
+      .filter((m) => (m.content || "").trim() === want).length;
+    try {
+      const r = await api.rewindChatSession(session.id, "", user.content, occurrence, true);
+      if (!r.found) {
+        onError("Couldn't regenerate — the turn is no longer in the agent's live context.");
+        return;
+      }
+    } catch (e) {
+      onError(`Couldn't regenerate: ${errMsg(e)}`);
+      return;
+    }
     chatStore.updateMessages(session.id, snap.messages.slice(0, i));
     void runTurn(user.content, { hidden: true });
   }
@@ -1755,6 +1785,10 @@ function ChatSessionSlot({
                 onDismiss: dismissErroredMessage,
                 lastAssistantId,
                 regenDisabled: status === "streaming",
+                // No prompt snapshots exist for incognito turns (by design) —
+                // hide View prompt instead of offering a 404 (#2484).
+                incognito: session?.incognito,
+                rewindTailId,
               }}
             />
           ))

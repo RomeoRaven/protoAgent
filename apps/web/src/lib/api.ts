@@ -1176,11 +1176,66 @@ export const api = {
     );
   },
 
-  models(apiBase: string, apiKey: string) {
+  models(apiBase: string, apiKey: string, provider = "") {
     return request<{ models: string[]; error: string }>("/api/config/models", {
       method: "POST",
-      body: { api_base: apiBase, api_key: apiKey },
+      // `provider` (ADR 0097): a native OAuth provider lists the subscription
+      // account's models instead of the gateway's; blank = gateway.
+      body: { api_base: apiBase, api_key: apiKey, provider },
     });
+  },
+
+  /** Sign-in status for the native OAuth providers (ADR 0097) — "✓ signed in" or a
+   *  sign-in hint per provider, so the setup UX never asks for a key it doesn't need. */
+  oauthStatus() {
+    return request<{
+      providers: { provider: string; signed_in: boolean; source: string; detail: string; hint: string }[];
+    }>("/api/config/oauth-status");
+  },
+
+  /** Begin an in-console OAuth sign-in (ADR 0097). `mode: "device"` (Codex) returns a
+   *  user_code + verification_uri to poll; `mode: "redirect"` (Claude) returns an
+   *  authorize_url to open and complete with the pasted code. */
+  oauthStart(provider: string) {
+    return request<{
+      flow_id: string;
+      mode: "device" | "redirect";
+      user_code?: string;
+      verification_uri?: string;
+      interval?: number;
+      authorize_url?: string;
+    }>("/api/config/oauth/start", { method: "POST", body: { provider } });
+  },
+  /** Poll a Codex device sign-in until the user approves. `graph_reloaded` (#2458):
+   *  a completed sign-in on a graphless server rebuilt the graph inline. */
+  oauthPoll(flowId: string) {
+    return request<{ status: "pending" | "complete" | "error"; error?: string; graph_reloaded?: boolean; graph_reload_error?: string }>(
+      "/api/config/oauth/poll",
+      { method: "POST", body: { flow_id: flowId } },
+    );
+  },
+  /** Complete a Claude sign-in with the pasted `code#state`. */
+  oauthComplete(flowId: string, code: string) {
+    return request<{ status: "complete" | "error"; error?: string; graph_reloaded?: boolean; graph_reload_error?: string }>(
+      "/api/config/oauth/complete",
+      { method: "POST", body: { flow_id: flowId, code } },
+    );
+  },
+  /** Abandon an in-progress sign-in server-side (#2440) — so wizard Cancel truly cancels
+   *  the flow, not just the browser timer. */
+  oauthCancel(flowId: string) {
+    return request<{ ok: boolean; cancelled: boolean }>(
+      "/api/config/oauth/cancel",
+      { method: "POST", body: { flow_id: flowId } },
+    );
+  },
+  /** Disconnect a native OAuth provider (#2440): best-effort remote revoke + delete
+   *  protoAgent's own credential + suppress auto-reconnect until the next sign-in. */
+  oauthDisconnect(provider: string) {
+    return request<{ provider: string; removed: boolean; revoked: boolean; note: string; graph_unloaded?: boolean }>(
+      "/api/config/oauth/disconnect",
+      { method: "POST", body: { provider } },
+    );
   },
 
   // ── Agent snapshot (ADR 0091 Slice 1) ──
@@ -1234,10 +1289,12 @@ export const api = {
   },
 
   // lists). Blank fields fall back to the saved config (Settings re-test).
-  testModel(apiBase: string, apiKey: string, model: string) {
+  testModel(apiBase: string, apiKey: string, model: string, provider = "") {
     return request<{ ok: boolean; error: string }>("/api/config/test-model", {
       method: "POST",
-      body: { api_base: apiBase, api_key: apiKey, model },
+      // `provider` (ADR 0097): a native OAuth provider tests through the subscription
+      // (a real streamed turn), ignoring api_base/api_key; blank = gateway.
+      body: { api_base: apiBase, api_key: apiKey, model, provider },
     });
   },
 
@@ -1742,7 +1799,10 @@ export const api = {
   // intact. Intentionally DESTRUCTIVE (no archive) but never corrupting. `content`
   // is the visible bubble's text: the console's client-side message ids never appear
   // in the checkpoint, so the server locates the message by its rendered content.
-  rewindChatSession(sessionId: string, messageId: string, content?: string, occurrence?: number) {
+  // `before: true` = exclusive cut (#2491): the target itself is discarded too —
+  // Regenerate rewinds to just before the last user message so its resend REPLACES
+  // the turn instead of appending a duplicate pair.
+  rewindChatSession(sessionId: string, messageId: string, content?: string, occurrence?: number, before?: boolean) {
     return request<{
       found: boolean;
       kept: number;
@@ -1751,7 +1811,7 @@ export const api = {
       message: string;
     }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind`, {
       method: "POST",
-      body: { message_id: messageId, content, occurrence },
+      body: { message_id: messageId, content, occurrence, before },
     });
   },
 
