@@ -172,9 +172,24 @@ def _path_findings(paths) -> list[DoctorFinding]:
 
 def _config_findings(config_path: Path) -> tuple[list[DoctorFinding], Any | None]:
     try:
-        from graph.config import LangGraphConfig, load_config_docs_with_presence
+        from graph.config import LangGraphConfig, inspect_host_config, load_config_docs_with_presence
         from graph.config_io import validate_for_headless
 
+        host_status = inspect_host_config()
+        if host_status.present and host_status.error:
+            evidence: dict[str, Any] = {"error": host_status.error, "layer": "host"}
+            if host_status.line is not None:
+                evidence.update({"line": host_status.line, "column": host_status.column})
+            return [
+                _finding(
+                    "config.parse",
+                    FindingStatus.FAIL,
+                    "host config could not be parsed safely",
+                    evidence=evidence,
+                    remediation="correct the Host YAML structure without placing secrets in it",
+                ),
+                _finding("config.runtime_requirements", FindingStatus.SKIPPED, "config parsing did not pass"),
+            ], None
         merged, secrets, present = load_config_docs_with_presence(config_path)
         if not present:
             return [

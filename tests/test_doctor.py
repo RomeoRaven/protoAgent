@@ -141,6 +141,27 @@ def test_host_layer_only_config_is_valid_without_agent_leaf(monkeypatch, tmp_pat
     assert not root.exists()
 
 
+def test_malformed_host_layer_is_sanitized_and_reported_as_malformed(monkeypatch, tmp_path, caplog):
+    from ops.doctor import DoctorOptions, report_to_dict, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    host_config = tmp_path / "host-config.yaml"
+    sentinel = "DOCTOR-HOST-SECRET-SENTINEL"
+    host_config.write_text(f"model:\n  api_key: [{sentinel}\n", encoding="utf-8")
+    monkeypatch.setenv("PROTOAGENT_HOST_CONFIG", str(host_config))
+
+    report = run_doctor(options=DoctorOptions(port=_free_port()))
+    finding = _finding_map(report)["config.parse"]
+
+    assert finding.status.value == "fail"
+    assert finding.evidence["error"] in {"ParserError", "ScannerError"}
+    assert finding.evidence["layer"] == "host"
+    assert finding.evidence.get("reason") != "missing"
+    assert sentinel not in caplog.text
+    assert sentinel not in json.dumps(report_to_dict(report))
+    assert not root.exists()
+
+
 def test_missing_and_malformed_config_fail_without_seeding_or_leaking(monkeypatch, tmp_path):
     from ops.doctor import DoctorOptions, report_to_dict, run_doctor
 
@@ -273,6 +294,23 @@ def test_malformed_plugin_lock_fails_closed(monkeypatch, tmp_path):
     lock = instance_paths().plugins_lock
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("{not-json", encoding="utf-8")
+
+    finding = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))["plugins.lock"]
+
+    assert finding.status.value == "fail"
+    assert finding.evidence == {"reason": "lock_unreadable"}
+
+
+def test_structurally_malformed_plugin_lock_fails_closed(monkeypatch, tmp_path):
+    from infra.paths import instance_paths
+    from ops.doctor import DoctorOptions, run_doctor
+
+    root = _isolate(monkeypatch, tmp_path)
+    _write_runtime_config(root)
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-only")
+    lock = instance_paths().plugins_lock
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text('{"plugins": "not-a-list"}\n', encoding="utf-8")
 
     finding = _finding_map(run_doctor(options=DoctorOptions(port=_free_port())))["plugins.lock"]
 

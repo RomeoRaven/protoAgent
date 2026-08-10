@@ -282,30 +282,57 @@ def _warn_shadowed_host_keys(host_layer: dict, agent_data: dict) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class HostConfigStatus:
+    present: bool
+    error: str = ""
+    line: int | None = None
+    column: int | None = None
+
+
+def _read_host_layer_status() -> tuple[dict, HostConfigStatus]:
+    """Read the Host layer once and return secret-free parse status."""
+    try:
+        from infra.paths import host_config_path
+
+        hp = host_config_path()
+    except Exception:  # noqa: BLE001 — never let host-path resolution break config load
+        return {}, HostConfigStatus(False)
+    if not hp.exists():
+        return {}, HostConfigStatus(False)
+    try:
+        with open(hp) as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        mark = getattr(exc, "problem_mark", None)
+        return {}, HostConfigStatus(
+            True,
+            type(exc).__name__,
+            int(mark.line) + 1 if mark is not None else None,
+            int(mark.column) + 1 if mark is not None else None,
+        )
+    if not isinstance(raw, dict):
+        return {}, HostConfigStatus(True, "TypeError")
+    return _filter_to_host_keys(raw), HostConfigStatus(True)
+
+
+def inspect_host_config() -> HostConfigStatus:
+    """Return sanitized Host-layer presence/parse status for diagnostics."""
+    _, status = _read_host_layer_status()
+    return status
+
+
 def _load_host_layer() -> dict:
     """The Host layer (ADR 0047): ``host-config.yaml`` filtered to host-scoped keys.
 
     Returns ``{}`` when the file is absent, unreadable, or malformed — the cascade
     then collapses to App defaults + the agent leaf. Best-effort: a corrupt host
     file must never crash boot."""
-    try:
-        from infra.paths import host_config_path
-
-        hp = host_config_path()
-    except Exception:  # noqa: BLE001 — never let host-path resolution break config load
-        return {}
-    if not hp.exists():
-        return {}
-    try:
-        with open(hp) as f:
-            raw = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("host-config.yaml at %s is unreadable (%s); ignoring the Host layer", hp, exc)
-        return {}
-    if not isinstance(raw, dict):
-        log.warning("host-config.yaml at %s is not a mapping; ignoring the Host layer", hp)
-        return {}
-    return _filter_to_host_keys(raw)
+    layer, status = _read_host_layer_status()
+    if status.error:
+        location = f" at line {status.line}, column {status.column}" if status.line is not None else ""
+        log.warning("host-config.yaml is unreadable (%s%s); ignoring the Host layer", status.error, location)
+    return layer
 
 
 @dataclass

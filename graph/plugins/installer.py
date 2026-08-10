@@ -179,8 +179,15 @@ def plugin_lock_readable() -> bool:
     if not lock.exists():
         return True
     try:
-        _normalize_lock(json.loads(lock.read_text()))
+        raw = json.loads(lock.read_text())
     except (json.JSONDecodeError, OSError, TypeError, ValueError, KeyError, AttributeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    plugins = raw.get("plugins", [])
+    if not isinstance(plugins, list) or any(
+        not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"] for entry in plugins
+    ):
         return False
     return True
 
