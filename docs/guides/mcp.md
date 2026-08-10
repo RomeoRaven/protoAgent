@@ -270,8 +270,9 @@ operator_mcp:
 - **`read-only`** — a stable, principled set (recall/list/search/status; no writes).
 - **`full`** — everything (`"*"`), minus the danger set below.
 - **unset** (default) — deny-by-default: a foreign client gets *only* what `tools` names.
-- The safe middle tier **`safe-operator`** (reads + non-destructive writes) lands with the ops
-  layer (ADR 0075 D2), which carries per-op read/write metadata so it isn't a hand-maintained list.
+- **`safe-operator`** — a managed consent profile. In HTTP mode it currently exposes only the
+  consent-wrapped `knowledge_ingest`; stdio remains zero-tool. Unlike the other profiles, explicit
+  `tools` do not widen it. Choose `custom`, `read-only`, or `full` intentionally for legacy tools.
 
 **Env override:** `PROTOAGENT_MCP_TRUST=full` forces the `full` profile — for a trusted or
 headless box where you vouch for the client (CI, your own machine). Per-op grants stay the
@@ -288,6 +289,35 @@ Run it standalone:
 python -m server.operator_mcp                 # stdio (for an MCP client / ACP session)
 python -m server.operator_mcp --http --port 8848
 ```
+
+### Human-approved `safe-operator` ingest
+
+Configure a non-empty operator bearer and start the HTTP sidecar:
+
+```bash
+AUTH="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+protoagent config set auth.token="$AUTH"
+protoagent config set operator_mcp.profile=safe-operator
+python -m server.operator_mcp --http --port 8848
+```
+
+The first `knowledge_ingest` MCP call plans but does not write. It returns
+`approval_required` and a `plan_digest`. After inspecting the exact MCP tool
+arguments, the human approves that digest over the non-MCP route:
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:8848/consent/knowledge-ingest/approve \
+  -H "$(printf '%s: %s %s' Authorization Bearer "$AUTH")" \
+  -H 'Content-Type: application/json' \
+  --data '{"plan_digest":"sha256:...","approved_by":"local-operator"}'
+```
+
+The model can then repeat the same `knowledge_ingest` call with the unchanged
+`source`, `domain`, and `title`, plus `plan_digest`. Changed inputs, changed store
+state, expiry, replay, missing auth, or an unknown digest fail closed. Successful
+execution returns an operation-specific receipt. Failed verification deletes all
+reported chunks and reports whether rollback completed. Capability tokens never
+leave the sidecar process.
 
 **Core + plugin tools ride the same bridge** — a plugin's `register_tools` tools are exposed
 through this one server (no per-plugin MCP); plugins that *are* an MCP server (`register_mcp_server`)

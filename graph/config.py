@@ -804,9 +804,10 @@ class LangGraphConfig:
     operator_mcp_tools: list[str] = field(default_factory=list)
     # Curated profile preset over the allowlist (ADR 0075 D3): "" (default) = use
     # ``operator_mcp_tools`` verbatim (deny-by-default); "read-only" = reads/queries
-    # only; "full" = everything (≡ "*"). A profile UNIONs with any explicit names.
-    # env PROTOAGENT_MCP_TRUST=full forces "full" (vouch for the client). The safe
-    # middle tier "safe-operator" arrives with the ops layer (ADR 0075 D2).
+    # only; "full" = everything (≡ "*"). Those profiles UNION with explicit names.
+    # "safe-operator" is managed separately: HTTP mode exposes only consent-wrapped
+    # operations and explicit names cannot widen it. env PROTOAGENT_MCP_TRUST=full
+    # forces "full" (vouch for the client).
     operator_mcp_profile: str = ""
 
     # Agent runtime (ADR 0033) — which brain executes a turn. "native" = the built-in
