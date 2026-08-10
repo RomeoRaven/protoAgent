@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,6 +40,49 @@ def client(tmp_path, monkeypatch):
     app = FastAPI()
     register_fleet_routes(app)
     return TestClient(app)
+
+
+def test_load_archetype_catalog_reads_utf8_on_non_utf8_locale(tmp_path, monkeypatch):
+    """Repository-owned catalog text must not depend on the Windows locale."""
+    from infra import paths as infra_paths
+    from operator_api import fleet_routes
+
+    catalog_file = tmp_path / "archetype-catalog.json"
+    catalog_file.write_bytes(
+        b'{"archetypes":[{"id":"basic","label":"Basic","bundle":null,'
+        b'"blurb":"Plan \xe2\x80\x94 ship.","soul_preset":"base"}]}'
+    )
+    monkeypatch.setattr(
+        infra_paths,
+        "instance_paths",
+        lambda: SimpleNamespace(config_dir=tmp_path, bundle_dir=tmp_path / "bundle"),
+    )
+
+    original_read_text = Path.read_text
+
+    def read_text_with_windows_default(self, encoding=None, errors=None):
+        return original_read_text(self, encoding=encoding or "cp1252", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_windows_default)
+
+    entries = fleet_routes._load_archetype_catalog()
+
+    assert entries[0]["blurb"] == "Plan — ship."
+
+
+def test_load_archetype_catalog_falls_back_for_non_utf8_file(tmp_path, monkeypatch):
+    """A legacy local override must degrade to the safe fallback, not crash the API."""
+    from infra import paths as infra_paths
+    from operator_api import fleet_routes
+
+    (tmp_path / "archetype-catalog.json").write_bytes(b'{"archetypes":[{"blurb":"Plan \x96 ship."}]}')
+    monkeypatch.setattr(
+        infra_paths,
+        "instance_paths",
+        lambda: SimpleNamespace(config_dir=tmp_path, bundle_dir=tmp_path / "bundle"),
+    )
+
+    assert fleet_routes._load_archetype_catalog() == fleet_routes._FALLBACK_ARCHETYPES
 
 
 def test_archetypes_include_basic(client):
