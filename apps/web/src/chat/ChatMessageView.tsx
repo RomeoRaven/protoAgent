@@ -42,6 +42,9 @@ export type ChatMessageActions = {
   onDismiss?: (id: string) => void;
   lastAssistantId?: string;
   regenDisabled?: boolean;
+  // Incognito sessions retain no prompt snapshots BY DESIGN — offering "View prompt"
+  // there 404s and reads as data loss instead of privacy working (#2484).
+  incognito?: boolean;
 };
 
 // The single chat message renderer (ADR 0035) — shared by the main chat (ChatSurface) and the
@@ -200,7 +203,7 @@ export function ChatMessageView({
           {actions.onRewind ? (
             <MessageAction label="Rewind to here" icon={<History size={14} />} onClick={() => actions.onRewind!(message)} />
           ) : null}
-          {message.taskId ? (
+          {message.taskId && !actions.incognito ? (
             <MessageAction
               label="View prompt"
               icon={<FileText size={14} />}
