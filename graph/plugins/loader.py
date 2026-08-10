@@ -54,6 +54,15 @@ class PluginLoadResult:
     meta: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PluginCompatibility:
+    """Manifest-only readiness for one plugin; no plugin module is imported."""
+
+    id: str
+    enabled: bool
+    issues: tuple[str, ...] = ()
+
+
 def _version_key(v: str) -> tuple[int, int, int]:
     """Best-effort semver sort key: ``"0.14.0" → (0, 14, 0)``. A non-numeric part
     sorts as ``-1`` so a malformed version can't spuriously beat a real one."""
@@ -327,6 +336,41 @@ def _min_version_gate(manifest: PluginManifest) -> str | None:
     return None
 
 
+def _plugin_enabled(manifest: PluginManifest, enabled_ids: set[str], disabled_ids: set[str]) -> bool:
+    """Apply the runtime's builtin/manifest/operator enable rule in one place."""
+    return manifest.builtin or (
+        (manifest.enabled or manifest.id in enabled_ids) and manifest.id not in disabled_ids
+    )
+
+
+def inspect_plugin_compatibility(config) -> tuple[PluginCompatibility, ...]:
+    """Inspect enabled plugin manifests without importing or executing plugin code."""
+    enabled_ids = set(getattr(config, "plugins_enabled", []) or [])
+    disabled_ids = set(getattr(config, "plugins_disabled", []) or [])
+    manifests = discover_plugins(_plugin_roots(config))
+    found_ids = {manifest.id for manifest in manifests}
+    rows: list[PluginCompatibility] = []
+
+    for manifest in manifests:
+        enabled = _plugin_enabled(manifest, enabled_ids, disabled_ids)
+        issues: list[str] = []
+        if enabled:
+            issues.extend(
+                f"missing_required_env:{name}"
+                for name in sorted(manifest.requires_env)
+                if not os.environ.get(name)
+            )
+            if _entry_file(manifest) is None:
+                issues.append("missing_entrypoint")
+            if _min_version_gate(manifest):
+                issues.append("host_version_too_old")
+        rows.append(PluginCompatibility(id=manifest.id, enabled=enabled, issues=tuple(issues)))
+
+    for plugin_id in sorted(enabled_ids - disabled_ids - found_ids):
+        rows.append(PluginCompatibility(id=plugin_id, enabled=True, issues=("missing_manifest",)))
+    return tuple(sorted(rows, key=lambda row: row.id))
+
+
 def _served_paths(routers: list[dict]) -> set[str]:
     """The set of URL paths served by *routers* (``[{"router", "prefix"}, …]``).
 
@@ -465,9 +509,7 @@ def load_plugins(config, *, core_tool_names: set[str] | None = None) -> PluginLo
         # loads — it ignores the enable gate AND the disabled list, so it can't be
         # turned off. Otherwise plugins.disabled wins: turn off a bundled plugin (e.g.
         # a first-party surface) without deleting it or editing core.
-        enabled = manifest.builtin or (
-            (manifest.enabled or manifest.id in enabled_ids) and manifest.id not in disabled_ids
-        )
+        enabled = _plugin_enabled(manifest, enabled_ids, disabled_ids)
         entry = {
             "id": manifest.id,
             "name": manifest.name,

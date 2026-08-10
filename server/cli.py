@@ -43,6 +43,7 @@ _FORWARD: dict[str, tuple[str, str]] = {
     # `hermes` = sugar for `runtime use hermes` — the one-command preset for Hermes users.
     "hermes": ("runtime.cli", "run_hermes_cli"),
     "operations": ("ops.cli", "run_operations_cli"),
+    "doctor": ("server.doctor_cli", "run_doctor_cli"),
     # `agent export` — the ADR 0091 secret-free snapshot. Offline: reads the instance
     # root directly, so it works on a STOPPED agent (the usual case when moving one).
     "agent": ("graph.snapshot_cli", "run_snapshot_cli"),
@@ -64,6 +65,7 @@ _FORWARD_HELP = {
     "runtime": "Select the agent runtime — native (LangGraph) or an ACP agent (ADR 0033)",
     "hermes": "One-command Hermes preset: wrap protoAgent around your existing ~/.hermes agent",
     "operations": "List the operations on the ops layer — name, safety risk, summary (ADR 0075)",
+    "doctor": "Check offline runtime readiness without changing this instance",
     "knowledge": "Ingest a URL / file into this instance's knowledge base (ADR 0075)",
     "operator-mcp": "Serve the operator tools over MCP stdio (internal — mounted into ACP runtimes)",
     "agent": "Export this agent as a portable, secret-free snapshot zip (ADR 0091)",

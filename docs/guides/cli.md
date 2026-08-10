@@ -57,11 +57,37 @@ then exits:
 | `protoagent skills ls` · `promote <name>` | Inspect and curate the SKILL.md library. | [0041](../adr/0041-workspaces-and-tiered-stores.md) |
 | `protoagent config explain` · `get` · `set key=value …` | Explain the config cascade; print `config.yaml`; write dotted keys (JSON-typed) to disk. | [0047](../adr/0047-layered-settings-cascade.md) · [0075](../adr/0075-external-interfaces-cli-mcp-api.md) |
 | `protoagent knowledge ingest <url\|file>` | Fetch/extract a source and index it into this instance's knowledge base. | [0075](../adr/0075-external-interfaces-cli-mcp-api.md) |
-| `protoagent operations` | List the operations on the shared ops layer — name, read/write, one-line summary. | [0075](../adr/0075-external-interfaces-cli-mcp-api.md) |
+| `protoagent operations` | List the operations on the shared ops layer — name, safety risk, one-line summary. | [0075](../adr/0075-external-interfaces-cli-mcp-api.md) |
+| `protoagent doctor [--json] [--port N]` | Check this instance's offline runtime readiness without changing it. | [0075](../adr/0075-external-interfaces-cli-mcp-api.md) |
 | `protoagent agent export [-o PATH] [--dry-run]` | Write this agent's **secret-free snapshot** zip — the declarative recipe (SOUL, stripped config, plugin SHA pins, skills). Works on a **stopped** agent. | [0091](../adr/0091-agent-snapshot-portability.md) |
 | `protoagent agent import <zip> [--name N] [--dry-run] [--yes]` | Stand up a **fresh agent** from a snapshot. Prints the plan (plugins it will install and run, capabilities it grants) and refuses to apply without `--yes`. | [0091](../adr/0091-agent-snapshot-portability.md) |
 | `protoagent runtime use <rt>` · `list` | Select the agent runtime — `native` (LangGraph) or an ACP agent. | [0033](../adr/0033-pluggable-agent-runtime-acp.md) |
 | `protoagent hermes` | One-command **Hermes preset** — wrap protoAgent around your existing `~/.hermes` agent ([guide](hermes.md)). | [0033](../adr/0033-pluggable-agent-runtime-acp.md) |
+
+### Diagnose an instance without changing it
+
+`protoagent doctor` is the offline pre-start readiness check. It reports platform
+identity, resolved paths and free-space evidence, config/runtime requirements,
+loopback-port availability, and enabled-plugin manifest/compatibility/lock state.
+It does not seed config, create directories, contact model or secret-manager
+services, import plugin code, repair anything, or start the server.
+
+```bash
+protoagent doctor                  # terminal report
+protoagent doctor --json           # stable schema-v1 report for automation
+protoagent doctor --port 7871      # test the intended loopback port
+```
+
+Exit `0` means no failing finding (warnings remain advisory), exit `1` means at
+least one finding failed, and invalid arguments use exit `2`. Findings are
+`pass`, `warn`, `fail`, or `skipped`; human and JSON output derive from the same
+report.
+
+Doctor complements rather than replaces the narrower owners: `status` checks a
+running port/process, `setup` validates and writes the setup marker, `config
+explain` shows path/cascade provenance, `/healthz` proves a booted graph, and
+`scripts/live_smoke.py` exercises a real server. This first slice is offline
+runtime readiness; it does not claim Windows/Desktop or PC1 acceptance.
 
 ### Point at a local model
 
@@ -88,6 +114,7 @@ doesn't and the turn fails at the endpoint with `does not support tools`.
 
 ```bash
 # Stand up an instance and check it
+protoagent doctor --port 7870
 protoagent up --port 7870
 protoagent status
 protoagent config explain

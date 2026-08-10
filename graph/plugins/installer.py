@@ -173,6 +173,28 @@ def _read_lock() -> dict:
     return {"plugins": []}
 
 
+def plugin_lock_readable() -> bool:
+    """Whether the current instance lock can be parsed, without repairing it."""
+    lock = lock_path()
+    if not lock.exists():
+        return True
+    try:
+        raw = json.loads(lock.read_text())
+    except (json.JSONDecodeError, OSError, TypeError, ValueError, KeyError, AttributeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    plugins = raw.get("plugins", [])
+    if not isinstance(plugins, list) or any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("id"), str)
+        or not entry["id"].strip()
+        for entry in plugins
+    ):
+        return False
+    return True
+
+
 def _write_lock(data: dict) -> None:
     data = _normalize_lock(data)
     data["plugins"].sort(
