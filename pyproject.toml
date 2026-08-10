@@ -4,7 +4,7 @@
 # (see [project.scripts]); only the install identifier is namespaced under protolabs-,
 # matching the sibling `protolabs-a2a`.
 name = "protolabs-agent"
-version = "0.127.0"
+version = "0.131.1"
 description = "protoAgent — LangGraph + A2A template for spawning protoLabs agents"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -51,6 +51,11 @@ dependencies = [
   "langchain-core>=1.0",
   "langgraph>=1.1.0",
   "langchain-openai>=1.0",
+  # Native Anthropic Messages API client for the OAuth-subscription provider
+  # (ADR 0097): `model.provider: anthropic-oauth` drives Claude via a Claude Code
+  # OAuth token straight through the native pipeline (no gateway, no ACP). The
+  # gateway path (default) never imports this — the branch in graph/llm.py is lazy.
+  "langchain-anthropic>=1.0",
   "langgraph-checkpoint-sqlite>=2.0",
   "langchain-mcp-adapters>=0.2,<0.3",
   # Capped at <2 because langchain-mcp-adapters does not work on mcp 2.x — it imports

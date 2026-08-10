@@ -55,7 +55,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ComponentType, LazyExoticComponent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { FleetTurnWatch } from "./FleetTurnWatch";
@@ -125,6 +125,7 @@ import { onConnectionChange, onServerEvent, onTopic } from "../lib/events";
 import { useToast } from "@protolabsai/ui/overlays";
 import { StatusPill } from "./StatusPill";
 import { WorkPanel } from "./WorkPanel";
+import { invalidateAllAfterSetup } from "../setup/finish";
 import { SetupWizard } from "../setup/SetupWizard";
 import { hostRuntimeStatusQuery, installedPluginsQuery, pluginUpdatesQuery, runtimeStatusQuery } from "../lib/queries";
 import { buildViews } from "../lib/viewRegistry";
@@ -286,6 +287,7 @@ export function App() {
   // until the graph is compiled (`graph_loaded`) so the BootGate observes the
   // engine coming up — the post-setup compile runs inline on the server loop and
   // briefly freezes it, so we want to notice the moment it's live again.
+  const queryClient = useQueryClient();
   const runtimeQ = useQuery({
     ...runtimeStatusQuery(),
     // 30 boot-probe retries, but a 401 stops immediately: retrying can't fix a
@@ -1296,9 +1298,7 @@ export function App() {
         open={runtime?.setup_complete === false}
         projectPath={projectPath}
         onProjectPathChange={setProjectPath}
-        onFinished={() => {
-          void runtimeQ.refetch();
-        }}
+        onFinished={() => invalidateAllAfterSetup(queryClient)}
       />
 
       <ConfirmDialog

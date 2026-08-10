@@ -14,6 +14,8 @@ writer expects.
 
 from __future__ import annotations
 
+import sys
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -64,6 +66,11 @@ class Field:
 # (runtime/acp_agents.py) so the list lives in exactly one place.
 ACP_MODEL_OPTIONS = acp_runtime_options()
 
+# model.provider dropdown suggestions (ADR 0097): the gateway default plus the native
+# OAuth-subscription providers. Dynamic (options_source="providers"), so validate_flat
+# does NOT enforce it — a custom gateway provider label still saves.
+_PROVIDER_OPTIONS = ["openai", "anthropic-oauth", "openai-codex"]
+
 
 # Ordered registry. Section order here is the order the UI renders groups in.
 FIELDS: list[Field] = [
@@ -107,7 +114,18 @@ FIELDS: list[Field] = [
         options_source="models",
         scope="host",
     ),
-    Field("model.provider", "model_provider", "Provider", "string", "Model & runtime", scope="host"),
+    Field(
+        "model.provider",
+        "model_provider",
+        "Provider",
+        "select",
+        "Model & runtime",
+        "Gateway (openai) uses the API base + key below; anthropic-oauth / openai-codex "
+        "run Claude / ChatGPT on your own subscription (ADR 0097) and ignore them.",
+        scope="host",
+        # Dynamic (not a strict enum) so a custom gateway provider label still validates.
+        options_source="providers",
+    ),
     Field("model.api_base", "api_base", "API base URL", "string", "Model & runtime", scope="host"),
     Field("model.api_key", "api_key", "API key", "secret", "Model & runtime", "Stored in secrets.yaml, never echoed back."),
     Field("model.temperature", "temperature", "Temperature", "number", "Model & runtime", minimum=0, maximum=2),
@@ -347,9 +365,10 @@ FIELDS: list[Field] = [
         "Auto-inject namespaces",
         "string_list",
         "Knowledge",
-        "Restrict per-turn auto-injected knowledge (RAG) to chunks in these namespaces — one "
-        "per line; an empty line matches un-namespaced chunks. Empty = no filter (everything "
-        "is eligible, today's behavior). Tool-driven recall (memory_recall) is not affected.",
+        "Restrict per-turn auto-injected knowledge (RAG) to chunks in these namespaces — "
+        'comma- or newline-separated; enter `""` (quoted) to match un-namespaced chunks '
+        "(a bare blank line is dropped as noise). Empty = no filter (everything is "
+        "eligible, today's behavior). Tool-driven recall (memory_recall) is not affected.",
     ),
     # Trust floor for the auto-inject RAG hits (ADR 0069 D8).
     Field(
@@ -849,7 +868,15 @@ FIELDS: list[Field] = [
         "Autostart on boot",
         "bool",
         "Runtime",
-        "Install/remove the boot LaunchAgent.",
+        # Platform-aware (#2470): the mechanism is macOS-only today (infra/autostart);
+        # naming a LaunchAgent on Windows/Linux gave the wrong mental model for a
+        # toggle that reports unsupported there.
+        (
+            "Launch the server on login (installs/removes the login LaunchAgent)."
+            if sys.platform == "darwin"
+            else "Launch the server on login. Not yet supported on this platform — "
+            "the toggle reports unsupported instead of silently failing."
+        ),
         restart=True,
     ),
     # ── Host box-runtime knobs (Host layer, ADR 0047 D8) ─────────────────────
@@ -1362,6 +1389,8 @@ def build_schema(
                 if f.options_source == "models+acp"
                 else ["native", *acp_opts]
                 if f.options_source == "runtime"
+                else _PROVIDER_OPTIONS
+                if f.options_source == "providers"
                 else list(f.options)
             ),
             "default": _jsonable(getattr(defaults, f.attr, None)),

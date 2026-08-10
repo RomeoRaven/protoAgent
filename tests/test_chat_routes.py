@@ -265,6 +265,47 @@ def test_delete_session_purges_prompt_snapshots(monkeypatch):
     assert prompt_snapshots().last_for_session("s2") is not None
 
 
+def test_delete_session_purges_session_summary(monkeypatch, tmp_path):
+    # #2482: the delete dialog says the chat "and its history will be removed" —
+    # but the session-summary memory survived and kept riding <prior_sessions>
+    # into future prompts. Deleting a chat must remove its summary file(s);
+    # other sessions' summaries stay.
+    import operator_api.chat_routes as cr
+
+    async def _fake_retire(thread_id, *, harvest=None, cascade=True):
+        return None
+
+    monkeypatch.setattr(cr, "_retire_thread", _fake_retire)
+    monkeypatch.setenv("MEMORY_PATH", str(tmp_path))
+    (tmp_path / "s1.json").write_text('{"session_id": "s1"}', encoding="utf-8")
+    (tmp_path / "s2.json").write_text('{"session_id": "s2"}', encoding="utf-8")
+
+    c = _client(monkeypatch)
+    assert c.delete("/api/chat/sessions/s1").json()["deleted"] is True
+    assert not (tmp_path / "s1.json").exists()
+    assert (tmp_path / "s2.json").exists()
+
+
+def test_delete_session_purges_legacy_summary_name(monkeypatch, tmp_path):
+    # A pre-encoding build wrote raw-":" filenames on POSIX — the purge must
+    # remove every name the summary may live under, not just the encoded one.
+    import operator_api.chat_routes as cr
+
+    async def _fake_retire(thread_id, *, harvest=None, cascade=True):
+        return None
+
+    monkeypatch.setattr(cr, "_retire_thread", _fake_retire)
+    monkeypatch.setenv("MEMORY_PATH", str(tmp_path))
+    from graph.middleware.memory import session_filename
+
+    sid = "a2a:s1"
+    (tmp_path / session_filename(sid)).write_text("{}", encoding="utf-8")
+
+    c = _client(monkeypatch)
+    assert c.delete(f"/api/chat/sessions/{sid}").json()["deleted"] is True
+    assert not (tmp_path / session_filename(sid)).exists()
+
+
 def test_compact_session_route(monkeypatch):
     # The route is a thin pass-through to server.chat.compact_session — forwards the
     # path session_id and returns the compaction result dict verbatim. /compact is
@@ -326,7 +367,7 @@ def test_rewind_session_route(monkeypatch):
 
     seen: list[dict] = []
 
-    async def _fake_rewind(session_id, *, message_id=None, index=None, content=None, occurrence=None):
+    async def _fake_rewind(session_id, *, message_id=None, index=None, content=None, occurrence=None, before=False):
         seen.append(
             {
                 "session_id": session_id,
@@ -334,6 +375,7 @@ def test_rewind_session_route(monkeypatch):
                 "index": index,
                 "content": content,
                 "occurrence": occurrence,
+                "before": before,
             }
         )
         return {"found": True, "kept": 4, "removed": 2, "reason": "", "message": "Rewound"}
@@ -344,8 +386,11 @@ def test_rewind_session_route(monkeypatch):
         "/api/chat/sessions/s1/rewind", json={"message_id": "m9", "content": "the answer"}
     ).json()
     assert seen == [
-        {"session_id": "s1", "message_id": "m9", "index": None, "content": "the answer", "occurrence": None}
+        {"session_id": "s1", "message_id": "m9", "index": None, "content": "the answer", "occurrence": None, "before": False}
     ]
+    # The Regenerate path (#2491) requests the exclusive cut.
+    c.post("/api/chat/sessions/s1/rewind", json={"content": "q", "before": True})
+    assert seen[-1]["before"] is True
     assert body["removed"] == 2 and body["kept"] == 4 and body["found"] is True
     assert body["message"] == "Rewound"
 
