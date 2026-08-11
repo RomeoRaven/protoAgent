@@ -14,8 +14,53 @@ import sys
 import pytest
 
 
+# Every env var that can steer instance-path resolution. Cleared per test — see
+# `_isolate_instance_roots`.
+_INSTANCE_ROOT_ENV = (
+    "PROTOAGENT_HOME",
+    "PROTOAGENT_INSTANCE",
+    "PROTOAGENT_BOX_ROOT",
+    "PROTOAGENT_AUTO_SCOPE",
+    "PROTOAGENT_WORKSPACE",
+    "PROTOAGENT_PLUGINS_DIR",
+    "PROTOAGENT_PLUGINS_LOCK",
+)
+
+
 @pytest.fixture(autouse=True)
-def _reset_instance_paths():
+def _isolate_instance_roots(tmp_path, monkeypatch):
+    """Make the suite hermetic against AMBIENT instance env, whoever spawned it (#2543).
+
+    Running the suite from inside a live agent — a board gate, a coder verifying a
+    feature in a worktree — hands pytest that agent's environment. Store fixtures then
+    resolved their target from it and read and WROTE the live agent's data: 17 test
+    sessions (``hold-2``..``hold-6``, ``g1``, ``sess-BB``, ``s1``, ``iso1``…) appeared in
+    a running fleet member's session store on 2026-08-10, visible to its operator as a
+    flood of junk chats, and the same fixture ids had already landed there on 07-24. The
+    store-pollution sibling of the ADR-0096 incident where a coder's test run deleted
+    live data.
+
+    Two things have to be true, and neither alone is enough:
+
+    * the inherited vars are cleared — ``PROTOAGENT_HOME`` is TERMINAL (the dir it names
+      IS the instance root), so an exported one points every store straight at the live
+      instance no matter what the fallback says; and
+    * the fallback is pinned — with the vars gone, resolution lands on ``data_home()``,
+      i.e. the developer's real ``~/.protoagent``.
+
+    A test that wants its own roots still wins: its ``monkeypatch`` runs after this one.
+    That is how the ~41 tests that set these vars, and the handful that patch
+    ``data_home`` directly, keep working unchanged."""
+    from infra import paths as _paths
+
+    for var in _INSTANCE_ROOT_ENV:
+        monkeypatch.delenv(var, raising=False)
+    box = tmp_path / "box-root"
+    monkeypatch.setattr(_paths, "data_home", lambda: box)
+
+
+@pytest.fixture(autouse=True)
+def _reset_instance_paths(_isolate_instance_roots):
     """Re-resolve ``infra.paths.instance_paths()`` cleanly for every test.
 
     The frozen ``InstancePaths`` singleton is resolved-once-and-cached from the
@@ -23,7 +68,10 @@ def _reset_instance_paths():
     test that sets one of those vars (or monkeypatches ``data_home``) needs the
     cache cleared or it'd read a stale path. Reset BEFORE (so a test's env is seen
     on the first ``instance_paths()`` call) and AFTER (so a stale cache never leaks
-    into the next test)."""
+    into the next test).
+
+    Depends on ``_isolate_instance_roots`` for ORDER, not data: the ambient env has to
+    be gone before the first resolution, or the cache is seeded from the live agent."""
     from infra.paths import reset_instance_paths
 
     reset_instance_paths()
@@ -63,6 +111,20 @@ def _isolate_prompt_snapshots(tmp_path, monkeypatch):
     reset_prompt_snapshots()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_host_config(tmp_path, monkeypatch):
+    """Point the ADR-0047 Host layer at a per-test ABSENT tmp file.
+
+    The session-level setdefault in pytest_configure was enough while nothing ever
+    WROTE host-config.yaml — but #2533's host model-layer mirror writes it at the
+    reload commit, and the old '/nonexistent/…' sentinel is only unwritable on
+    POSIX: on Windows it resolves to a creatable path under the drive root, so one
+    test's mirror write polluted every later cascade read (the v0.132.0 release-PR
+    Windows failure). Per-test tmp keeps mirror writes real AND isolated; a test
+    that wants its own layer still wins with monkeypatch.setenv."""
+    monkeypatch.setenv("PROTOAGENT_HOST_CONFIG", str(tmp_path / "host-config.yaml"))
+
+
 def pytest_configure(config):  # noqa: ARG001
     """Prepend site-packages to sys.path before any test imports occur."""
     site_dirs = site.getsitepackages()
@@ -78,9 +140,8 @@ def pytest_configure(config):  # noqa: ARG001
     # `setdefault` never overrides a real key, and no test asserts key-absence.
     os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-    # Isolate the ADR-0047 Host layer: default PROTOAGENT_HOST_CONFIG to an absent
-    # path so from_yaml sees no host-config.yaml unless a test opts in (the cascade
-    # then collapses to App defaults + the agent leaf — today's behavior).
-    # Deterministic regardless of any host-config.yaml on the dev/CI machine.
-    # `setdefault` lets cascade tests override via monkeypatch.setenv.
+    # Isolate the ADR-0047 Host layer for IMPORT-TIME reads only — the autouse
+    # `_isolate_host_config` fixture owns per-test isolation (a per-test tmp path,
+    # writable so the #2533 mirror works but never shared between tests). This
+    # setdefault just keeps any pre-fixture read off the dev/CI machine's real file.
     os.environ.setdefault("PROTOAGENT_HOST_CONFIG", "/nonexistent/protoagent-host-config.test.yaml")

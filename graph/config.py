@@ -301,8 +301,9 @@ def _read_host_layer_status() -> tuple[dict, HostConfigStatus]:
     if not hp.exists():
         return {}, HostConfigStatus(False)
     try:
-        with open(hp) as f:
-            raw = yaml.safe_load(f) or {}
+        from infra.paths import read_text_utf8
+
+        raw = yaml.safe_load(read_text_utf8(hp)) or {}
     except (OSError, yaml.YAMLError) as exc:
         mark = getattr(exc, "problem_mark", None)
         return {}, HostConfigStatus(

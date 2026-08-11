@@ -1,6 +1,15 @@
 export type RuntimeStatus = {
   setup_complete: boolean;
   graph_loaded: boolean;
+  /** Signed-out native OAuth provider (#2458 → #2513): setup is complete but the
+   *  graph can't build until the operator reconnects. The console treats this as a
+   *  first-class ready state — no boot gate, a reconnect banner, composer gated —
+   *  never as a broken startup. `message` is server-authored and user-facing. */
+  graph_auth_error?: null | {
+    provider: string;
+    message: string;
+    relogin?: string;
+  };
   /** App version (pyproject [project].version; the frozen desktop sidecar reports
    *  its bundled version — #894). Surfaced in Settings ▸ Global ▸ Overview. */
   version?: string;
@@ -905,6 +914,63 @@ export type TelemetryInsights = {
   unproven_levers: string[];
 };
 
+// Fleet telemetry (ADR 0006 fleet extension, Slice 1) — mirrors GET /api/telemetry/fleet,
+// the hub-side read-only rollup fanned out across fleet members. Rendered in the core
+// Telemetry surface's Fleet section (Slice 2). Read-only: there is no write path here.
+export type FleetRollup = {
+  turns: number;
+  cost_usd: number;
+  success_rate: number;
+  cache_hit_ratio: number;
+};
+
+// One flagged problem's evidence: the member, the full per-turn row that tripped the
+// signal, its trace_id, the resolved Langfuse link, and the turn's timestamp.
+export type FleetFlagEvidence = {
+  member: string;
+  turn: Partial<TelemetryTurn>;
+  trace_id: string | null;
+  trace_url: string | null;
+  timestamp: string | null;
+};
+
+export type FleetFlag = {
+  // The member's routing SLUG (its immutable id) — for display, resolve the label
+  // from the members map instead (see fleetRollup.fleetFlagRows).
+  member: string;
+  reasons: string[];
+  evidence: FleetFlagEvidence;
+};
+
+export type FleetMemberTelemetry = {
+  name: string;
+  // Display label. Distinct from the members-map key (the routing slug): a live
+  // member is keyed by its immutable id (e.g. "protoEngineer-ba4c") while displaying
+  // "protoEngineer"; the host is keyed "host" while displaying "main".
+  label: string;
+  host: boolean;
+  remote: boolean;
+  running: boolean;
+  // The member answered the rollup fan-out. `false` → an informational unreachable
+  // row: reported, never restarted, never a failure of the rollup.
+  reachable: boolean;
+  telemetry_enabled: boolean;
+  rollup: FleetRollup | null;
+  flags: FleetFlag[];
+};
+
+export type FleetTelemetry = {
+  enabled: boolean;
+  summary: TelemetrySummary | null;
+  insights: TelemetryInsights | null;
+  // `false` for a single-box install (no peers) — the surface then shows today's
+  // per-instance view unchanged, with no Fleet section.
+  fleet: boolean;
+  langfuse_trace_url_template: string | null;
+  // Keyed by routing slug; the host is under the reserved "host" key.
+  members: Record<string, FleetMemberTelemetry>;
+};
+
 // Playbooks (skills surface, ADR 0009) — mirrors /api/playbooks (skills.db).
 export type Playbook = {
   id: number;
@@ -1040,13 +1106,18 @@ export type PromptCall = {
   call_index: number;
   ts: string;
   model: string;
-  system: { stable: string; context: string };
+  // wire_differs/wire (#2527): what the call ACTUALLY carried when a provider
+  // transform changed it. wire_differs with an EMPTY wire = nothing reached the
+  // wire at all (the #2519 failure class). Optional for pre-#2527 server skew.
+  system: { stable: string; context: string; wire_differs?: boolean; wire?: string };
   // Optional for skew with pre-P2 servers; empty = captured unsegmented.
   sections?: PromptSection[];
   // #2388 P3 — set on rows captured inside a subagent run; "" on main-loop calls.
   subagent_type?: string;
   // #2388 P3 — true on the speculative next-call preview (usage is all zeros).
   preview?: boolean;
+  // #2527 — provider delivery note on the preview (how the text ships on this wire).
+  delivery?: string;
   usage: PromptCallUsage;
 };
 
@@ -1100,7 +1171,10 @@ export type DelegateView = {
 
 // Fleet (ADR 0042) — many workspace agents on one host, switchable in place.
 export type FleetAgent = {
-  name: string; // also the instance id; unique, [A-Za-z0-9-_]
+  name: string; // the [A-Za-z0-9-_] addressing handle (control plane accepts it beside `id`)
+  /** Verbatim display name (#2520) — free-form UTF-8; render `label ?? name` everywhere
+   *  user-facing. Absent from pre-upgrade records, so keep the fallback. */
+  label?: string;
   id: string;
   port: number;
   pid: number | null; // null when stopped

@@ -29,6 +29,7 @@ import {
   SCHEDULER_JOBS,
   SETTINGS_SCHEMA,
   GATEWAY_MODELS,
+  CLAUDE_MODELS,
   settingsRestartRequired,
   SLASH_COMMANDS,
   PLAYBOOKS,
@@ -41,6 +42,8 @@ import {
   PROMPT_CALL,
   SECRETS_STATUS,
   SUBAGENTS,
+  FLEET_TELEMETRY,
+  FLEET_TELEMETRY_SINGLE,
   TELEMETRY_INSIGHTS,
   TELEMETRY_SUMMARY,
   TELEMETRY_TURNS,
@@ -687,6 +690,16 @@ const server = createServer(async (req, res) => {
           return sendJson(res, ARCHETYPE_PREVIEWS[id] ?? { id, bundle: null });
         }
       }
+      if (pathname === "/api/telemetry/fleet") {
+        // Fleet telemetry rollup (ADR 0006 fleet extension). Multi-box only when a
+        // spec opts in via the header; otherwise a single-box read (fleet:false) so
+        // the Fleet section stays hidden and the per-instance telemetry.spec is
+        // untouched.
+        return sendJson(
+          res,
+          req.headers["x-e2e-fleet-telemetry"] === "multi" ? FLEET_TELEMETRY : FLEET_TELEMETRY_SINGLE,
+        );
+      }
       const payload = handleApiGet(pathname, fleetFor(req), url.searchParams, mcpFor(req));
       if (payload !== null) return sendJson(res, payload);
       return sendJson(res, { detail: "not mocked" }, 404);
@@ -782,6 +795,9 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/config/models" && req.method === "POST") {
       // "Get models" (#1386): probe the (form) gateway for its model list. The mock returns a
       // DIFFERENT set than the saved dropdown, so the test can prove the dropdown refreshes.
+      // A native OAuth provider on the FORM routes to the subscription's list instead (#2518).
+      const body = await readBody(req);
+      if (body?.provider === "anthropic-oauth") return sendJson(res, { models: CLAUDE_MODELS, error: "" });
       return sendJson(res, { models: GATEWAY_MODELS, error: "" });
     }
     if (pathname === "/api/config/test-model" && req.method === "POST") {

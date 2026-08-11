@@ -22,7 +22,7 @@ import { fieldVisible } from "./visibility";
 
 // Drop-in full-panel wrapper (section + Suspense + ErrorBoundary) so any surface can
 // embed a category's settings as a standalone panel — Agent, Knowledge, central Settings.
-export function SettingsCategoryPanel(props: { category: string; title?: string; emptyHint?: string; footer?: ReactNode }) {
+export function SettingsCategoryPanel(props: { category: string; title?: string; emptyHint?: string; footer?: ReactNode; lead?: ReactNode }) {
   return (
     <StagePanel label="settings" className="settings-panel">
       <SettingsCategory {...props} />
@@ -45,6 +45,10 @@ export function SettingsCategory({
   title = "Settings",
   emptyHint,
   footer,
+  // Rendered ABOVE the field groups — for the section that must be seen before
+  // the knobs (the OAuth account card: it's what the signed-out banner deep-links
+  // to, and it lived at the bottom where nobody found it).
+  lead,
   // ADR 0059 — when set, render ONLY this plugin's group (its config folded into the
   // plugin's row in the Plugins surface). Pairs with category="Plugins".
   pluginId,
@@ -54,6 +58,7 @@ export function SettingsCategory({
   title?: string;
   emptyHint?: string;
   footer?: ReactNode;
+  lead?: ReactNode;
   pluginId?: string;
 }) {
   const queryClient = useQueryClient();
@@ -167,17 +172,43 @@ export function SettingsCategory({
     () => groups.flatMap((g) => g.fields).find((f) => f.key === "model.api_base"),
     [groups],
   );
+  const providerField = useMemo(
+    () => groups.flatMap((g) => g.fields).find((f) => f.key === "model.provider"),
+    [groups],
+  );
+  const modelNameField = useMemo(
+    () => groups.flatMap((g) => g.fields).find((f) => f.key === "model.name"),
+    [groups],
+  );
+  // The provider the FORM currently names — the probe must follow it (a native OAuth
+  // selection lists the subscription's models, ADR 0097; "openai"/blank = the gateway
+  // path), or switching to anthropic-oauth/openai-codex keeps offering gateway models
+  // the save validator then rejects (#2518). Same rule as the wizard's probeModels.
+  const formProvider = (asStr(dirty["model.provider"]) || asStr(providerField?.value)).trim().toLowerCase();
+  // A provider flip invalidates any previously probed list — the OTHER provider's
+  // models must not linger in the dropdown merge below.
+  useEffect(() => {
+    setGatewayModels(null);
+  }, [formProvider]);
   const getModels = useMutation({
     // api_base: the form edit, else the saved value. api_key: the form edit, else blank — the
     // server falls back to the saved (secret) key, which never leaves localStorage as plaintext.
-    mutationFn: () => api.models(asStr(dirty["model.api_base"]) || asStr(apiBaseField?.value), asStr(dirty["model.api_key"])),
+    mutationFn: () =>
+      api.models(asStr(dirty["model.api_base"]) || asStr(apiBaseField?.value), asStr(dirty["model.api_key"]), formProvider),
     onSuccess: (r) => {
       if (r.error) { toast({ tone: "error", title: "Couldn't fetch models", message: r.error }); return; }
       setGatewayModels(r.models);
+      // Wizard parity: a Primary model the probed provider doesn't offer guarantees a
+      // failed save (the rebuild validator rejects it and rolls back) — swap it for the
+      // first offered model, as an ordinary dirty edit the operator can change or discard.
+      const current = asStr(dirty["model.name"]) || asStr(modelNameField?.value);
+      if (r.models.length && !r.models.includes(current)) {
+        setDirty((d) => ({ ...d, "model.name": r.models[0] }));
+      }
       toast(
         r.models.length
           ? { tone: "success", title: `Found ${r.models.length} model${r.models.length === 1 ? "" : "s"}`, message: "Pick one in Primary model, then Test connection." }
-          : { tone: "info", title: "No models", message: "The gateway returned no models." },
+          : { tone: "info", title: "No models", message: "The provider returned no models." },
       );
     },
     onError: (e) => toast({ tone: "error", title: "Couldn't fetch models", message: errMsg(e) }),
@@ -283,9 +314,10 @@ export function SettingsCategory({
       <div className="stage-body">
         {acpAgent ? (
           <Alert status="info" className="settings-banner">
-            Running on <strong>{acpAgent}</strong> (ACP) — it drives each turn with its own tools.
-            The model settings below power protoAgent's own calls (compaction, goal checks); with no
-            gateway key configured, those run on {acpAgent} too.
+            Running on <strong>{acpAgent}</strong> (ACP) — a <strong>deprecated</strong> runtime
+            mode: ACP is supported for delegates only now. This legacy config keeps working, but
+            new selection is gone — switch to a native brain (gateway or a Claude/ChatGPT
+            subscription) below. The model settings power protoAgent's own calls either way.
           </Alert>
         ) : null}
         {pendingRestart.length ? (
@@ -296,7 +328,8 @@ export function SettingsCategory({
         {/* While a background refetch is in flight (the #1643 fresh-install hydration
             re-pulls the schema), an empty group set is "still loading", not "nothing
             here" — don't flash the misleading empty hint. */}
-        {!groups.length && !footer ? (
+        {lead}
+        {!groups.length && !footer && !lead ? (
           <p className="muted">{isFetching ? "Loading settings…" : emptyHint || "Nothing to configure here."}</p>
         ) : null}
 
