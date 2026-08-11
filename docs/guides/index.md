@@ -22,7 +22,7 @@ Shape how the agent's loop behaves — standing goals, timers, middleware hooks,
 | [Schedule future work](/guides/scheduler) | You want the agent to defer tasks to itself ("remind me tomorrow", recurring sweeps) — bundled local sqlite |
 | [Middleware](/guides/middleware) | You want pre/post hooks on the agent turn (plugin-contributed) |
 | [System lifecycle events](/guides/lifecycle-events) | You want plugins/skills to react to boot, idle-wake, or the desktop shell coming to the foreground (event-bus broadcasts) |
-| [Run on a coding agent (ACP runtime)](/guides/acp-runtime) | You want an external coding agent (proto/Codex/Claude/Copilot/OpenCode) to *be* the runtime brain, with protoAgent as the shell |
+| [Run on a coding agent (ACP runtime)](/guides/acp-runtime) | **Deprecated** — you already run an `acp:*` runtime and need its reference. For new work, hand coding jobs to an [`acp` delegate](/guides/delegates) instead |
 | [Run on Hermes (preset)](/guides/hermes) | You already run Hermes Agent and want protoAgent's console/A2A/scheduler wrapped around it — one command |
 
 ## Skills, subagents & workflows
@@ -53,9 +53,10 @@ Connect your agent to other agents and endpoints, and run many of them.
 | Guide | When to read |
 |---|---|
 | [Delegates (agents & endpoints)](/guides/delegates) | You want to manage the agents + endpoints your agent talks to via `delegate_to` (a2a / openai / acp), hot-swappable from the console |
-| [Spawn CLI coding agents (ACP)](/guides/coding-agents) | You want the agent to drive a CLI coding agent (e.g. protoCLI) over the Agent Client Protocol |
+| [CLI coding agents over ACP](/guides/coding-agents) | You want the agent to hand a coding job to protoCLI / Claude Code / Codex and get the result back — **the supported way** to use a coding agent |
 | [Run a fleet (workspaces, archetypes, supervisor)](/guides/fleet) | You want many named agents on one host — created from archetypes, run in the background, sharing a skills commons |
 | [Portfolio (one PM, many team boards)](/guides/portfolio) | You want one PM agent to dispatch work to, and track, several team-agents' project boards across repos — over A2A |
+| [Agent snapshots (export, share, duplicate)](/guides/agent-snapshots) | You want to hand someone your agent's *recipe* — persona, config, plugin pins, skills — as a small zip, or stand up a duplicate from one |
 | [Build out your agent with a coding agent](/guides/build-with-a-coding-agent) | You've forked the template and want to grow it through a project-manager agent, a board, and coder delegates instead of typing every change |
 
 ## Tools, MCP & plugins
@@ -100,6 +101,7 @@ Ship it, isolate it, fence it in, and watch it.
 | [Sandboxing & egress](/guides/sandboxing) | You want to fence the filesystem + outbound network |
 | [Expose to the world](/guides/exposing-protoagent) | You want an agent reachable from the public internet — A2A only, token-gated, console hidden |
 | [Wire Langfuse + Prometheus](/guides/observability) | You need traces and metrics in production |
+| [Operating a fleet (health, rollout, triage, recovery)](/guides/operating-a-fleet) | You're running a multi-member fleet and need health-check, upgrade, incident-triage, and recovery procedures |
 
 ## Forks & evals
 

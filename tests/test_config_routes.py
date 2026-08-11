@@ -154,7 +154,12 @@ def test_reset_settings_pops_known_keys(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "graph.settings_schema",
-        _fake_module("graph.settings_schema", is_known_key=lambda k: k == "model.name", is_hidden_setting=lambda k, hidden=None: False),
+        _fake_module(
+            "graph.settings_schema",
+            is_known_key=lambda k: k == "model.name",
+            is_hidden_setting=lambda k, hidden=None: False,
+            expand_reset_keys=lambda keys: list(keys),  # no coupling in this fake
+        ),
     )
     captured = {}
 
@@ -168,12 +173,50 @@ def test_reset_settings_pops_known_keys(monkeypatch):
     assert captured["keys"] == ["model.name"]
 
 
+def test_reset_settings_expands_the_model_group(monkeypatch):
+    """Resetting any coupled model key resets the whole group (#2528): name alone
+    validated the inherited value against a still-overridden provider, so the
+    rebuild refused it and the reset rolled back forever. The expansion happens
+    BEFORE validation so hidden/known checks cover the pulled keys too, and the
+    response says which siblings came along."""
+    import operator_api.config_routes as cr
+    from graph.settings_schema import MODEL_RESET_GROUP, expand_reset_keys, is_hidden_setting, is_known_key
+
+    monkeypatch.setitem(
+        sys.modules,
+        "graph.settings_schema",
+        _fake_module(
+            "graph.settings_schema",
+            is_known_key=is_known_key,
+            is_hidden_setting=is_hidden_setting,
+            expand_reset_keys=expand_reset_keys,
+        ),
+    )
+    captured = {}
+
+    def _reset(keys):
+        captured["keys"] = keys
+        return True, ["reset 3 key(s) to inherited", "reloaded"]
+
+    monkeypatch.setattr(cr, "_reset_settings_keys", _reset)
+    resp = _client().post("/api/settings/reset", json={"keys": ["model.name"]}).json()
+    assert resp["ok"] is True
+    assert captured["keys"] == list(MODEL_RESET_GROUP)
+    assert any("reset as one group" in m for m in resp["messages"])
+    assert any("model.provider" in m and "model.api_base" in m for m in resp["messages"])
+
+
 def test_reset_settings_rejects_unknown_key(monkeypatch):
     """An unknown key is rejected before any disk touch."""
     monkeypatch.setitem(
         sys.modules,
         "graph.settings_schema",
-        _fake_module("graph.settings_schema", is_known_key=lambda k: False, is_hidden_setting=lambda k, hidden=None: False),
+        _fake_module(
+            "graph.settings_schema",
+            is_known_key=lambda k: False,
+            is_hidden_setting=lambda k, hidden=None: False,
+            expand_reset_keys=lambda keys: list(keys),
+        ),
     )
     resp = _client().post("/api/settings/reset", json={"keys": ["bogus.key"]}).json()
     assert resp["ok"] is False
@@ -186,7 +229,12 @@ def test_reset_settings_rejects_hidden_key(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "graph.settings_schema",
-        _fake_module("graph.settings_schema", is_known_key=lambda k: True, is_hidden_setting=lambda k, hidden=None: True),
+        _fake_module(
+            "graph.settings_schema",
+            is_known_key=lambda k: True,
+            is_hidden_setting=lambda k, hidden=None: True,
+            expand_reset_keys=lambda keys: list(keys),
+        ),
     )
     resp = _client().post("/api/settings/reset", json={"keys": ["goal.eval_model"]}).json()
     assert resp["ok"] is False
@@ -349,7 +397,11 @@ def _fs_state(monkeypatch, **attrs):
 
 
 def test_fs_projects_get(monkeypatch, tmp_path):
-    _fs_state(monkeypatch, filesystem_enabled=True, filesystem_projects=[{"name": "docs", "path": str(tmp_path), "write": False}])
+    _fs_state(
+        monkeypatch,
+        filesystem_enabled=True,
+        filesystem_projects=[{"name": "docs", "path": str(tmp_path), "write": False}],
+    )
     body = _client().get("/api/settings/filesystem-projects").json()
     assert body["enabled"] is True and body["projects"][0]["name"] == "docs"
 
@@ -383,11 +435,17 @@ def test_fs_projects_set_normalizes_and_enables(monkeypatch, tmp_path):
     inbox.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expands ~ via USERPROFILE, not HOME
-    monkeypatch.setitem(sys.modules, "server.agent_init", _fake_module("server.agent_init", _apply_settings_changes=_apply))
-    body = _client().post(
-        "/api/settings/filesystem-projects",
-        json={"projects": [{"path": "~/Documents", "write": True}, {"name": "inbox", "path": str(inbox)}]},
-    ).json()
+    monkeypatch.setitem(
+        sys.modules, "server.agent_init", _fake_module("server.agent_init", _apply_settings_changes=_apply)
+    )
+    body = (
+        _client()
+        .post(
+            "/api/settings/filesystem-projects",
+            json={"projects": [{"path": "~/Documents", "write": True}, {"name": "inbox", "path": str(inbox)}]},
+        )
+        .json()
+    )
     assert body["ok"] is True
     fs = captured["config"]["filesystem"]
     assert fs["enabled"] is True
@@ -451,6 +509,74 @@ def test_fs_projects_set_rejections(monkeypatch, tmp_path):
         ).status_code
         == 400
     )
+
+
+def test_fs_projects_set_refuses_an_unacknowledged_removal(monkeypatch, tmp_path):
+    """POST is replace-all, so a caller that means "add discord-plugin" and posts a
+    one-entry list strips every other root — and `filesystem.projects` IS the ADR 0007
+    fence, so that is capability loss, silently (#2556). Removals must be asked for."""
+    monkeypatch.setitem(
+        sys.modules,
+        "server.agent_init",
+        _fake_module("server.agent_init", _apply_settings_changes=lambda config=None, soul=None: (True, [])),
+    )
+    keep, add = tmp_path / "repo", tmp_path / "plugin"
+    keep.mkdir()
+    add.mkdir()
+    _fs_state(monkeypatch, filesystem_enabled=True, filesystem_projects=[{"name": "repo", "path": str(keep)}])
+
+    r = _client().post("/api/settings/filesystem-projects", json={"projects": [{"path": str(add)}]})
+
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "repo" in detail and str(keep) in detail, detail
+    assert "replace" in detail
+
+
+def test_fs_projects_set_allows_an_acknowledged_removal_and_reports_it(monkeypatch, tmp_path):
+    """The console's editor DOES mean replace-all — removing a row is how you delete a
+    root. Acknowledged, it goes through, and says what it took away."""
+    monkeypatch.setitem(
+        sys.modules,
+        "server.agent_init",
+        _fake_module("server.agent_init", _apply_settings_changes=lambda config=None, soul=None: (True, [])),
+    )
+    keep, drop = tmp_path / "repo", tmp_path / "old"
+    keep.mkdir()
+    drop.mkdir()
+    _fs_state(
+        monkeypatch,
+        filesystem_enabled=True,
+        filesystem_projects=[{"name": "repo", "path": str(keep)}, {"name": "old", "path": str(drop)}],
+    )
+
+    r = _client().post(
+        "/api/settings/filesystem-projects",
+        json={"projects": [{"path": str(keep)}], "replace": True},
+    )
+
+    assert r.status_code == 200
+    assert [e["name"] for e in r.json()["removed"]] == ["old"]
+
+
+def test_fs_projects_set_adding_a_root_needs_no_acknowledgement(monkeypatch, tmp_path):
+    """The additive case stays a plain POST — the gate is on removal, not on writing."""
+    monkeypatch.setitem(
+        sys.modules,
+        "server.agent_init",
+        _fake_module("server.agent_init", _apply_settings_changes=lambda config=None, soul=None: (True, [])),
+    )
+    keep, add = tmp_path / "repo", tmp_path / "plugin"
+    keep.mkdir()
+    add.mkdir()
+    _fs_state(monkeypatch, filesystem_enabled=True, filesystem_projects=[{"name": "repo", "path": str(keep)}])
+
+    r = _client().post(
+        "/api/settings/filesystem-projects",
+        json={"projects": [{"name": "repo", "path": str(keep)}, {"name": "plugin", "path": str(add)}]},
+    )
+
+    assert r.status_code == 200 and r.json()["removed"] == []
 
 
 def test_fs_projects_set_refuses_unusable_folders(monkeypatch, tmp_path):

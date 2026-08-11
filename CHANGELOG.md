@@ -15,6 +15,276 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.133.0] - 2026-08-11
+
+### Added
+- **Fleet telemetry: hub-side read-only rollup across members (#2539).**
+  `GET /api/telemetry/fleet` reads the fleet roster and fans out pure GETs over each
+  member's existing `/api/telemetry/{summary,insights}` reads via the ADR 0042 slug
+  proxy (operator-tier auth reused — no new trust surface), merging one entry per
+  member: reachability/running state, turns / cost USD / success rate / cache-hit
+  ratio, and the member's advise-only flagged problems with per-flag evidence
+  (member, per-turn row, `trace_id`, resolved Langfuse trace link, timestamp). An
+  unreachable member is reported `reachable: false` — never restarted, and never
+  fails the rollup. A single-box install (no members) degrades to today's
+  single-instance telemetry unchanged.
+- **Fleet section in the Telemetry console surface (Slice 2, #2539).** Settings ▸
+  Telemetry now renders the hub-side rollup: a read-only member grid
+  (reachability/running badge + turns / cost / success / cache-hit) and a
+  "Flagged problems" list where each flag carries its evidence — member, per-turn
+  row, `trace_id`, resolved Langfuse trace link, and timestamp. Unreachable members
+  show an informational "did not respond" state with no action controls; there are
+  no controls that change/restart/mutate anything. Each flag row shows the member's
+  display **label** (resolved from the members map, never the routing slug — a host
+  keyed `host` renders `main`, a peer keyed `protoEngineer-ba4c` renders
+  `protoEngineer`). A single-box install renders no Fleet section, leaving the
+  per-instance view unchanged.
+- **"Operating a fleet" core docs guide (Slice 3, #2539).** `docs/guides/operating-a-fleet.md`
+  covers four operator procedures for a multi-member fleet: the health-check pass (fleet
+  telemetry rollup, reachability/flag states, evidence fields), upgrade + rollout/rollback
+  (every step approval → act → verify-it-worked), incident triage (locating the offending
+  member/turn/trace via `evidence.turn`, `trace_id`, `trace_url`), and recovery planning
+  (decision table + unreachable-after-restart runbook). Terminology and fetch paths verified
+  against the Slice-1 backend rollup (`operator_api/telemetry_routes.py`) and the Slice-2
+  console surface. No operator persona packaged in the template (ADR 0007).
+
+- **The agent can read its own configuration (#2540).** A new read-only `show_config`
+  tool returns the effective, merged settings — model, gateway, enabled plugins,
+  filesystem roots, and each plugin's own section — so an agent diagnosing odd
+  behaviour can tell a misconfiguration from a bug. It couldn't before: its own
+  `langgraph-config.yaml` sits outside every filesystem fence, and one agent spent two
+  sessions chasing a board bound to the wrong repo before its operator found the answer
+  in a single grep. Secrets are masked as `«redacted»` — including every value in an
+  MCP server's `env` and `headers` — so the agent learns a credential is set without
+  reading it. Drop it with `tools.disabled: [show_config]`.
+
+- **"View prompt" now tells the wire truth — and reads like a document
+  (#2527).** The prompt viewer renders as formatted markdown by default (a Raw
+  toggle keeps the byte-exact view; Copy always copies exact bytes), and it now
+  reports what each model call *actually carried*: if a provider transform
+  changed the delivered text (like the Claude Code identity line) you can see
+  it, and if nothing reached the wire at all — the failure class behind the
+  Codex no-system-prompt bug — the viewer says so in red instead of showing a
+  prompt the model never received.
+
+- **A subscription credential's remaining life is now visible to monitoring (#2549).**
+  `GET /api/config/oauth-status` reported a plain `signed_in: true` for three
+  materially different situations — a login protoAgent owns and refreshes, a vendor
+  CLI's login it merely borrows, and an env token it can neither refresh nor inspect —
+  so the first sign of an expired credential on a headless agent was a failed job. Each
+  provider now reports `expires_at`, `refreshable`, and a `durability` of
+  `managed`/`borrowed`/`static`, which is something you can alert on. The sign-in hints
+  lead with the operator-API flow that gives a headless agent an owned, self-refreshing
+  credential instead of steering toward `CLAUDE_CODE_OAUTH_TOKEN`, and the headless
+  guide now documents that flow end to end.
+
+- **An agent on a Claude or ChatGPT subscription can now fall back to the gateway
+  (#2550).** Picking a subscription provider applied it to *every* model slot, and a
+  gateway alias in one of them raised instead of routing — so a subscription-backed
+  agent had exactly one lane and no degrade path at all: a rate limit or an expired
+  credential was a hard stop, where the same agent on a gateway alias would have
+  retried elsewhere. Slot names are now read the way they already read everywhere else:
+  a namespaced one (`protolabs/coder`) routes through the gateway, a bare one
+  (`claude-sonnet-5`) stays on the subscription. That makes
+  `routing.fallback_models: [protolabs/coder]` work under `provider: anthropic-oauth`,
+  and lets cheap auxiliary calls stay off your subscription entirely.
+
+### Changed
+- **The delegate health prober stops relaunching every delegate every two minutes
+  (#2542).** Each probe of an ACP delegate is a whole subprocess — spawn, handshake,
+  teardown — and the existing backoff only slowed *failing* delegates, so a healthy
+  seven-delegate setup paid roughly 5,000 process launches a day to keep a status badge
+  warm. Delegates that keep answering now relax toward a 15-minute cadence, and snap
+  back to the tight one the moment they fail or someone opens the panel — so the badge
+  behaves exactly as before while you're looking at it.
+
+### Fixed
+- **A one-off schedule can no longer be quietly created for 09:00 (#2159).** If the New
+  Schedule dialog's Time field ended up empty — as reported on Windows, where typing
+  `23:59` left the field showing it but the preview stale, then snapped back on blur —
+  the builder silently substituted 09:00, previewed 09:00, accepted the submit, and
+  reported success. The agent got scheduled at a materially different time than the
+  operator entered. A missing time is now treated as missing: the preview says which
+  field is incomplete and submit stays disabled. The time inputs also re-commit their
+  value on blur, so a settled entry that the browser didn't report while typing is still
+  picked up.
+
+- **Escape in Settings really does close only the dropdown now (#2466).** The earlier
+  fix looked right and didn't work: it asked "is a dropdown still open?" from the
+  dialog's close handler, but the dropdown has already unmounted by then, so the answer
+  was always no and one Escape still took the whole Settings dialog with it — losing
+  your section and any unsaved edits. The check now samples the state at the start of
+  the keypress, before anything can dismiss itself, and there's a browser test walking
+  the two-step behaviour so it can't silently regress again.
+
+- **`search_files` no longer feeds compiled bytecode and cache dirs to the model
+  (#2541).** A search could return match lines from `__pycache__/*.pyc`,
+  `.pytest_cache`, and `node_modules` — kilobytes of marshalled bytecode dumped into
+  the agent's context mid-task, and matches that could quote a stale copy of source
+  that had since been edited. The tool now skips binary files (`grep -I` semantics)
+  and generated/vendored trees by default, names those exclusions in its own
+  description so the model knows what it isn't being shown, and says so instead of a
+  bare "(no matches)" when a search comes up empty. Pass `include_generated=true` to
+  search them anyway.
+
+- **Running the test suite from inside a live agent no longer pollutes that agent's
+  chats (#2543).** A board gate or coder that ran `pytest tests/` handed the suite its
+  own environment, so test fixtures resolved their stores from it and wrote into the
+  running agent's data — 17 junk sessions (`hold-2`…`hold-6` "deploy the service",
+  goal-kickoff `g1`/`g2`, `sess-BB`…) turned up in a fleet member's chat list, twice, on
+  every full-suite run spawned that way. The suite now pins every store to a per-test
+  temp root regardless of what the spawner exported, with a tripwire test that plays the
+  hostile spawner and fails if a single byte reaches the agent's roots.
+
+- **Chat code blocks keep their line breaks again (#2546).** A design-system
+  attribute rename (`code-block` → `code-block-body`) had orphaned the chat
+  stylesheet's code-block overrides, losing `white-space: pre` — multi-line
+  code rendered as one endless horizontal line. The selectors now track the
+  current markup, and an e2e guard fails if a future schema drift collapses
+  code lines again.
+
+- **The Connected-account card now sits at the top of Settings → Model.** It
+  was buried at the bottom of the panel — easy to miss for the one control
+  that reconnects a signed-out agent — and its mid-switch copy could
+  contradict the signed-in status shown right below it. Moved up, separated
+  from the model fields, and the copy now reads correctly whether you're
+  signed in or not.
+
+- **Subagents work on Claude and ChatGPT subscriptions (#2552).** On a
+  subscription-backed instance the agent could chat, but every delegation —
+  `task`, `task_batch`, `/dream`, `/distill`, the QA tier — failed, because the
+  subagent path sent its system prompt in a shape those backends reject. Both
+  the main agent and subagents now share one wire-shaping seam, so delegations
+  run on your own plan just like chat does.
+
+- **Saving work folders can no longer silently strip the ones you didn't mention
+  (#2556).** `POST /api/settings/filesystem-projects` replaces the whole list, so a
+  caller that meant "add this folder" and posted a single entry quietly removed every
+  other root — and that list *is* the filesystem fence, so the agent lost its reach
+  into its own checkout, with `{"ok": true}` either way. A request that would drop a
+  configured folder is now refused with a 409 naming exactly which ones, unless it
+  says `"replace": true`; acknowledged removals are logged and echoed back. The
+  console's work-folder editor is unaffected — it always meant replace-all.
+
+### Deprecated
+- **ACP as the agent's main runtime is deprecated (#2548).** The "Coding agent
+  (ACP)" option is gone from the Setup Wizard and the runtime selector is gone
+  from Settings — ACP remains fully supported for the delegate pattern
+  (`delegate_to` a registered coding agent). Existing `agent_runtime: acp:*`
+  configs keep working and are labeled deprecated in the console; re-running
+  setup or picking a native brain switches them off the mode.
+
+### Docs
+- **Docs: the coding-agent guides now match the product.** With the ACP runtime
+  deprecated, the guides that walked you through selecting it are marked
+  deprecated and point at coding-agent *delegates* — the supported way to hand
+  a coding job to protoCLI, Claude Code, or Codex — instead of describing a
+  setup option that no longer exists.
+
+- **Docs: the extensibility guides tell you what to do first.** Plugins, Skills,
+  Workflows, and Middleware each opened with an essay about the subsystem; they
+  now lead with the short path to actually doing the thing, with the reference
+  material after it. The two different features both called "skills" — SKILL.md
+  procedures and A2A card skills — now point at each other so you land on the
+  right page.
+
+- **Docs: run, deploy, and expose guides lead with the command.** Running
+  headless, wiring up the deploy pipeline, setting a goal, and exposing an agent
+  to the internet now open with the steps instead of the background reading —
+  and the deploy guide's setup steps were corrected to match what the workflows
+  actually gate on.
+
+- **Docs: agent snapshots are findable again.** The guide for exporting,
+  sharing, and duplicating an agent's recipe wasn't listed in the guides index
+  at all — you had to know the URL. It's now indexed alongside the other
+  fleet/portability guides.
+
+## [0.132.0] - 2026-08-11
+
+### Fixed
+- **The download page now links the newest desktop release, not the newest version number (#2514).**
+  Source-only releases (PyPI/Docker) no longer produce broken installer links: the
+  page resolves the newest GitHub release that actually carries the macOS DMG and
+  Windows setup.exe and links those assets directly. If no desktop-complete release
+  can be verified, the site build fails rather than publishing a dead link.
+
+- **Deleting a chat from the mobile session sheet now confirms and cleans up properly (#2512).**
+  The responsive sheet's ✕ used to remove the chat instantly — no "Delete this
+  chat?" dialog, no Harvest choice, and no server-side purge, which left the
+  session-summary memory behind. It now runs the same deletion lifecycle as the
+  desktop tab strip, including the Stop-vs-Detach choice for goal-driving chats.
+
+- **Switching to a Claude/ChatGPT subscription in Settings no longer dead-ends on gateway models (#2522).**
+  Settings ▸ Model's "Get models" now probes the provider selected on the form —
+  a native OAuth provider lists your subscription's models instead of the old
+  gateway's — a provider flip clears the stale list, and a Primary model the new
+  provider doesn't offer is swapped for one it does before you save. Previously
+  every save failed validation ("not a Claude model id") and rolled back.
+
+- **Windows `run_command` no longer runs approved PowerShell through a hidden
+  cmd.exe (#2518).** The tool now takes an explicit `shell` grammar — `default`
+  (cmd.exe on Windows, `/bin/sh` elsewhere), `powershell`, `cmd`, `sh` — and
+  PowerShell executes via a Unicode-safe `-EncodedCommand` contract, so paths
+  and content with spaces, brackets, accents, or Japanese text survive on the
+  first approved attempt (no more `[char]` reconstruction). The approval dialog
+  also names the real runner ("runs via: …") instead of showing only the inner
+  command, so what the operator approves is what actually executes.
+
+- **An OAuth disconnect no longer looks like a broken startup (#2513).** The
+  console now treats signed-out as a first-class state: no more ~45s
+  "Starting protoAgent… / Continue anyway" gate after disconnecting (or
+  relaunching while signed out) — the app opens immediately with a visible
+  signed-out banner, the composer swaps for a reconnect strip instead of
+  accepting sends that could only fail, and both surfaces deep-link to
+  Settings → Model where the reconnect control lives. Everything self-clears
+  the moment reconnect rebuilds the agent.
+
+- **On ChatGPT/Codex accounts, the agent's system prompt now actually reaches
+  the model (#2519).** Every tool-bearing turn on the `openai-codex` provider
+  was silently sent with no system prompt at all — persona, operating doctrine,
+  and knowledge context were dropped by a langchain re-bind after the middleware
+  moved them into the Responses `instructions` field, while "View prompt"
+  (captured upstream) still displayed the full prompt. Instructions now ride the
+  factory's supported `model_settings` channel, verified all the way down to the
+  wire payload by a new regression test. If your Codex-backed agent felt like it
+  ignored its SOUL.md — this was why.
+
+- **HITL cards format their text now.** When the agent pauses to ask you
+  something, the question renders as proper markdown — bold, code, numbered
+  lists — instead of raw `**sigils**`, and a long question scrolls inside the
+  card rather than growing it unbounded. Shell-command approval details stay
+  verbatim on purpose.
+
+- **Windows: fresh agents can export snapshots again (#2521).** Newly created
+  fleet members wrote their config in the Windows locale encoding (CP1252),
+  which crashed the strict-UTF-8 snapshot exporter with `UnicodeDecodeError`
+  before the review even built. All config and registry writes are now pinned
+  to UTF-8, and reads tolerate the legacy encoding — an agent created on an
+  affected build exports cleanly after upgrading, with a log line naming any
+  legacy-encoded file it healed around.
+
+- **Agent names show exactly as you typed them (#2520).** Renaming an agent to
+  something like `PA Windows Lifecycle Café` no longer silently renders as
+  `PA_Windows_Lifecycle_Caf` in the header, agent switcher, and Fleet page —
+  those surfaces now display the verbatim name, while the charset-restricted
+  addressing handle (and the immutable agent id/URL) keep doing their job
+  underneath.
+
+- **"Reset to inherited" actually works on fleet members now (#2528).** The
+  model name, provider, and API base reset as one group (they only validate
+  together), and the host now mirrors its own model setup into the box-level
+  inherited layer — so resetting a member's model overrides lands on what the
+  box actually runs, instead of an unusable app default that rolled every
+  reset back and left overrides looking permanent.
+
+### Docs
+- **The build-with-a-coding-agent guide is now a task-first walkthrough (#2510).**
+  It opens with prerequisites, walks standing up the PM and wiring a coder, and
+  adds the previously missing core: shipping your first feature end to end, with
+  the board state you should see at each step. Doctrine moved into callouts and
+  a closing "Grow it" section; every command and config key re-verified against
+  what ships.
+
 ## [0.131.3] - 2026-08-11
 
 ### Fixed

@@ -566,12 +566,14 @@ def load_yaml_doc(path: Path | None = None) -> Any:
     if not resolved.exists():
         return {} if not _HAS_RUAMEL else _ruamel.load("{}\n")
 
-    with open(resolved) as f:
-        if _HAS_RUAMEL:
-            return _ruamel.load(f) or _ruamel.load("{}\n")
-        import yaml
+    from infra.paths import read_text_utf8
 
-        return yaml.safe_load(f) or {}
+    text = read_text_utf8(resolved)
+    if _HAS_RUAMEL:
+        return _ruamel.load(text) or _ruamel.load("{}\n")
+    import yaml
+
+    return yaml.safe_load(text) or {}
 
 
 def save_yaml_doc(doc: Any, path: Path | None = None) -> None:
@@ -910,9 +912,10 @@ def load_secrets(path: Path | None = None) -> dict[str, Any]:
         return {}
     import yaml as _yaml
 
+    from infra.paths import read_text_utf8
+
     try:
-        with open(secrets_path) as f:
-            data = _yaml.safe_load(f) or {}
+        data = _yaml.safe_load(read_text_utf8(secrets_path)) or {}
         return data if isinstance(data, dict) else {}
     except (OSError, _yaml.YAMLError):
         return {}
@@ -945,7 +948,7 @@ def save_secrets(secret_updates: dict[str, Any], path: Path | None = None) -> No
 
     secrets_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = secrets_path.with_suffix(".yaml.tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         _yaml.safe_dump(current, f, sort_keys=False, default_flow_style=False)
     os.chmod(tmp, 0o600)
     os.replace(tmp, secrets_path)
@@ -1022,6 +1025,66 @@ def soul_revision() -> str:
     soul-history version ids, so a tagged run can be lined up with an archived version."""
     text = read_soul()
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8] if text else ""
+
+
+
+def sync_host_model_layer(config) -> bool:
+    """Mirror the host's model group into the Host layer (``host-config.yaml``, #2528).
+
+    The Host layer starts absent on a normal install, so a member's "Reset to
+    inherited" fell through to App defaults — a gateway model nothing on the box
+    backs — and the graph rebuild refused it, rolling every reset back: the member
+    was stuck on its create-time overrides forever. The HOST's model settings are
+    already the box's de-facto defaults (``create()`` copies them so a new member
+    boots ready-to-chat); this keeps the *inheritable* layer in step at the reload
+    commit, so a member reset genuinely lands on "what the box runs" — including a
+    native-OAuth provider, whose credentials members resolve on their own
+    (instance store, bootstrapped from the machine-level CLI login).
+
+    Members never write box state (their reload must not clobber the hub's layer);
+    a corrupt/non-mapping host file is left alone (the cascade already ignores it,
+    and overwriting would destroy whatever the operator had there). No-op when
+    already in step. Returns True when the file changed.
+    """
+    from graph.workspaces.manager import is_workspace_member
+    from infra.paths import atomic_write, host_config_path, read_text_utf8
+
+    if is_workspace_member():
+        return False
+    import yaml as _y
+
+    hp = host_config_path()
+    if not hp.parent.exists():
+        # Never conjure a directory tree just to mirror a config: a host-config
+        # override pointing into a non-existent location (read-only sidecar
+        # setups, test sentinels) means "no host layer here" — same contract as
+        # the read side, which treats the file as absent.
+        return False
+    doc: dict = {}
+    if hp.exists():
+        try:
+            doc = _y.safe_load(read_text_utf8(hp)) or {}
+        except (OSError, _y.YAMLError):
+            log.warning("[config] host-config.yaml unreadable — not mirroring the model group over it")
+            return False
+        if not isinstance(doc, dict):
+            log.warning("[config] host-config.yaml is not a mapping — not mirroring the model group over it")
+            return False
+    model = doc.get("model")
+    if not isinstance(model, dict):
+        model = {}
+        doc["model"] = model
+    desired = {
+        "name": getattr(config, "model_name", ""),
+        "provider": getattr(config, "model_provider", ""),
+        "api_base": getattr(config, "api_base", ""),
+    }
+    if all(model.get(k) == v for k, v in desired.items()):
+        return False
+    model.update(desired)
+    atomic_write(hp, _y.safe_dump(doc, sort_keys=False))
+    log.info("[config] host model group mirrored to the Host layer (%s)", hp)
+    return True
 
 
 def write_soul(text: str) -> list[Path]:
