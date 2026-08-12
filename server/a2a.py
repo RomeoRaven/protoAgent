@@ -887,9 +887,11 @@ def _surface_resumed_chat_turn(outcome) -> None:
 
 def _a2a_terminal(outcome) -> None:
     """A2A terminal hook (ADR 0003 / 0006). Fired by ``ProtoAgentExecutor`` with
-    a ``TurnOutcome`` when a turn reaches a terminal state. Records the per-turn
-    telemetry row and surfaces the Activity thread's answer on the event bus.
-    Best-effort — never raises into the executor."""
+    a ``TurnOutcome`` when a turn reaches a terminal state. Records per-turn
+    telemetry and surfaces either the Activity thread's answer or an ordinary
+    peer-delegation outcome (``origin=a2a``) on the Activity feed. The peer keeps
+    its real A2A context/task identity; ordinary operator chat still returns through
+    its own stream and is never duplicated here. Best-effort — never raises."""
     _record_a2a_telemetry(outcome)
     # Background subagent turns (ADR 0050) live in a dedicated ``background:<id>``
     # context, not the Activity thread — settle the job + notify the UI here, before
@@ -898,25 +900,36 @@ def _a2a_terminal(outcome) -> None:
     if getattr(outcome, "origin", "") == "background" or _ctx.startswith("background:"):
         _handle_background_terminal(outcome)
         return
-    if outcome.context_id != ACTIVITY_CONTEXT:
+    origin = getattr(outcome, "origin", "") or "operator"
+    is_peer_turn = origin == "a2a"
+    if outcome.context_id != ACTIVITY_CONTEXT and not is_peer_turn:
         _surface_resumed_chat_turn(outcome)
         return
     text = extract_output(outcome.text) or outcome.text
+    state = str(getattr(outcome, "state", "") or "completed")
+    error = str(getattr(outcome, "error", "") or "")
+    # A peer failure must read as failed even when the model emitted partial narration
+    # first. ``state``/``error`` travel on the event for machine consumers, but the
+    # Activity UI renders the text body; append the terminal cause so an operator never
+    # mistakes a trailing partial answer for a successful sister-agent handoff.
+    if is_peer_turn and state != "completed" and error.strip():
+        failure = f"**A2A turn failed:** {error}"
+        text = f"{text.rstrip()}\n\n{failure}" if text.strip() else failure
     if not text.strip():
         return
-    origin = getattr(outcome, "origin", "") or "operator"
     trigger = getattr(outcome, "trigger", "") or ""
     priority = getattr(outcome, "priority", "") or ""
     stimulus = getattr(outcome, "stimulus", "") or ""
+    feed_context = _ctx if is_peer_turn else ACTIVITY_CONTEXT
     # Provenance feed (ADR 0022): durably log the turn + what triggered it + the stimulus it
     # responds to (#1375), so the feed reads as an explicit reply.
     if STATE.activity_log is not None:
         STATE.activity_log.add(
-            context_id=ACTIVITY_CONTEXT,
+            context_id=feed_context,
             origin=origin,
             trigger=trigger,
             priority=priority,
-            state=getattr(outcome, "state", "completed"),
+            state=state,
             text=text,
             task_id=getattr(outcome, "task_id", "") or "",
             stimulus=stimulus,
@@ -926,10 +939,13 @@ def _a2a_terminal(outcome) -> None:
         {
             "role": "assistant",
             "text": text,
-            "context_id": ACTIVITY_CONTEXT,
+            "context_id": feed_context,
             "origin": origin,
             "trigger": trigger,
             "priority": priority,
             "stimulus": stimulus,
+            "state": state,
+            "task_id": getattr(outcome, "task_id", "") or "",
+            "error": error,
         },
     )
