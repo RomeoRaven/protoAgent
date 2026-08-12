@@ -111,7 +111,7 @@ def _instance_model_configured() -> bool:
 def _import_hermes_model_into_instance(hm: dict) -> None:
     """Hermes → protoAgent: write Hermes's endpoint as this instance's model config
     (same doc keys ``protoagent model use`` writes)."""
-    from graph.config_io import load_yaml_doc, save_yaml_doc
+    from graph.config_io import load_yaml_doc, save_secrets, save_yaml_doc
 
     doc = load_yaml_doc()
     model = doc.get("model")
@@ -121,7 +121,13 @@ def _import_hermes_model_into_instance(hm: dict) -> None:
     model["provider"] = "openai"
     model["api_base"] = hm["base_url"]
     model["name"] = hm["model"]
-    model["api_key"] = hm["api_key"] or _KEY_PLACEHOLDER
+    key = str(hm["api_key"] or "").strip()
+    if key and key != _KEY_PLACEHOLDER:
+        # A real Hermes credential goes to the 0600 overlay, not the tracked YAML (#2575).
+        save_secrets({"model": {"api_key": key}})
+        model.pop("api_key", None)
+    else:
+        model["api_key"] = _KEY_PLACEHOLDER
     save_yaml_doc(doc)
     print(f"model: imported from Hermes — {hm['model']} @ {hm['base_url']}")
 
@@ -298,8 +304,15 @@ def _cmd_use(args) -> int:
     target = (args.runtime or "").strip()
     if target == "hermes":  # the preset spelling — `protoagent runtime use hermes`
         target = "acp:hermes"
+    if target == "acp:hermes":
+        _warn_hermes_deprecated()
     cfg = LangGraphConfig.from_yaml(config_yaml_path())
     known = _known_runtimes(cfg)
+    # `acp:hermes` is deprecated and no longer in the catalog, so it is no longer in
+    # `known` — but selecting it must still work for anyone already on it (#2633).
+    # Deprecating an option is hiding it, not revoking it.
+    if target == "acp:hermes":
+        known = [*known, target]
     if target not in known:
         print(f"runtime use: unknown runtime {target!r} — one of: {', '.join(known)}", file=sys.stderr)
         return 2
@@ -351,7 +364,11 @@ def _cmd_list(_args) -> int:
     print("  native        (built-in LangGraph loop)")
     for a in acp_agent_catalog(getattr(cfg, "acp_agents", None)):
         command = a["command"]
-        status = ("installed" if shutil.which(command) else f"command {command!r} not found") if command else "no command configured"
+        status = (
+            ("installed" if shutil.which(command) else f"command {command!r} not found")
+            if command
+            else "no command configured"
+        )
         print(f"  acp:{a['id']:<10}{a['label']}  [{status}]")
     return 0
 
@@ -422,7 +439,9 @@ def _cmd_install_python(args) -> int:
     def _phase(name: str) -> None:
         if name == "deps":
             print(file=sys.stderr)
-            print("  installing the document baseline (python-docx, openpyxl, python-pptx, reportlab)…", file=sys.stderr)
+            print(
+                "  installing the document baseline (python-docx, openpyxl, python-pptx, reportlab)…", file=sys.stderr
+            )
 
     try:
         st = install_managed_python(force=args.force, on_progress=_progress, on_phase=_phase)
@@ -478,6 +497,29 @@ def run_runtime_cli(argv: list[str]) -> int:
     return fn(args)
 
 
+def _warn_hermes_deprecated() -> None:
+    """Announce the deprecation on both channels (#2633).
+
+    A ``DeprecationWarning`` for anything driving the CLI programmatically, and a plain
+    stderr line because that is what a human at a terminal will actually read — warnings
+    are silent by default in most Python configurations.
+    """
+    import warnings
+
+    msg = (
+        "`protoagent hermes` / `runtime use hermes` is deprecated and will be removed in a "
+        "future release. Hermes-as-the-brain was superseded by ACP delegates — an external "
+        "agent as a worker the native runtime dispatches to, which keeps goal continuations, "
+        "telemetry and the full plugin surface. See "
+        "https://docs.protolabs.ai/guides/delegates. Existing installs keep working."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=3)
+    print(f"warning: {msg}", file=sys.stderr)
+
+
 def run_hermes_cli(argv: list[str]) -> int:
-    """`protoagent hermes` — sugar for `protoagent runtime use hermes` (flags pass through)."""
+    """`protoagent hermes` — sugar for `protoagent runtime use hermes` (flags pass through).
+
+    DEPRECATED (#2633) — kept working for existing installs; ``_cmd_use`` emits the warning.
+    """
     return run_runtime_cli(["use", "hermes", *argv])

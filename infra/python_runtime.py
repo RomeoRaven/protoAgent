@@ -100,3 +100,61 @@ def managed_runtime_distributions() -> set[str]:
             stem = meta.name.rsplit(".", 1)[0]
             dists.add(normalize_dist(stem.rsplit("-", 1)[0]))
     return dists
+
+
+def managed_runtime_distribution_versions() -> dict[str, str]:
+    """``{normalized name: version}`` for the managed runtime's site-packages.
+
+    The version-carrying sibling of :func:`managed_runtime_distributions`, for callers
+    that must honour a requirement's specifier rather than only its name — a plugin's
+    ``requires_pip`` pins into this same runtime, so "a dist by that name exists" is not
+    the same question as "it satisfies ``>=8``"."""
+    versions: dict[str, str] = {}
+    install_dir = managed_python_install_dir()
+    if not install_dir.exists():
+        return versions
+    for site in (*install_dir.glob("lib/python3.*/site-packages"), install_dir / "Lib" / "site-packages"):
+        if not site.is_dir():
+            continue
+        for meta in (*site.glob("*.dist-info"), *site.glob("*.egg-info")):
+            stem = meta.name.rsplit(".", 1)[0]
+            name, _, version = stem.rpartition("-")
+            if not name:  # no version segment — nothing to compare against
+                continue
+            versions[normalize_dist(name)] = version
+    return versions
+
+
+def pytest_interpreter() -> tuple[str | None, str | None]:
+    """``(python, error)`` — the interpreter to spawn ``-m pytest`` with (ADR 0096 D3).
+
+    Source-run → ``sys.executable``. Frozen → the ADR 0094 managed runtime, and only
+    when pytest is actually installed *there*: the app bundle carries no pytest, and
+    the managed runtime's baseline is the ADR 0092 **document** stack (docx/xlsx/pptx/
+    pdf), so a provisioned runtime is not on its own enough. Never falls back to a
+    discovered system Python — see this module's docstring for why that discovery is
+    deliberately absent.
+
+    Both refusals name the remedy instead of letting the child fail with a bare
+    ``No module named pytest``: the caller is usually an agent deciding what to do
+    next, and "install X in Settings" is actionable where a traceback is not.
+
+    Shared by every in-tree pytest spawner (plugin-devkit's ``test_plugin``, the
+    ``coder`` verifier) so they cannot drift on what "no interpreter" means.
+    """
+    import sys
+
+    if not getattr(sys, "frozen", False):
+        return sys.executable, None
+    exe = managed_python_exe()
+    if exe is None:
+        return None, (
+            "no Python to run pytest in the packaged app — provision the managed runtime "
+            "(Settings ▸ Tools, ~35 MB), then try again"
+        )
+    if "pytest" not in managed_runtime_distributions():
+        return None, (
+            "the managed Python runtime has no pytest — open the Plugins panel and hit "
+            "\"Install deps\" on the plugin that needs it, then try again"
+        )
+    return str(exe), None

@@ -107,12 +107,93 @@ def test_the_two_asset_lists_agree_on_catalogs() -> None:
     )
 
 
+def _docs_seed_sources() -> set[str]:
+    """The `docs/<section>` seed paths the bundled `docs` plugin's corpus actually needs,
+    derived from `plugins/docs/corpus.py::SECTIONS` — single-sourced so a section added
+    there is covered here without anyone remembering this file exists (same reasoning as
+    the catalog glob above)."""
+    from plugins.docs.corpus import SECTIONS
+
+    return {f"docs/{section}" for section in SECTIONS}
+
+
+def test_there_is_at_least_one_docs_section() -> None:
+    """Guard the guard — an empty SECTIONS tuple would make every check below vacuous."""
+    assert _docs_seed_sources(), "plugins/docs/corpus.py::SECTIONS is empty; this test would be vacuous"
+
+
+@pytest.mark.parametrize("section", sorted(_docs_seed_sources()))
+def test_docs_section_is_bundled_into_the_wheel(section: str) -> None:
+    """`plugins/docs/corpus.py::docs_root()` resolves `docs/` beside the installed
+    `plugins/` tree — on a real wheel install that's `site-packages/docs/`, which only
+    exists if hatch_build.py actually force-includes it (#2626, the docs/ half of the
+    #2624 bug: the comment promised it, `_SEEDS` never delivered it). Missing here ⇒
+    docs_search/docs_read silently return nothing (`iter_docs` skips missing section
+    dirs rather than erroring) instead of failing loudly."""
+    assert section in _wheel_seed_sources(), (
+        f"{section} is not in hatch_build.py::_SEEDS — the wheel (and the PyPI install) "
+        f"would ship without it, and the docs corpus reader falls back to an EMPTY result "
+        f"SILENTLY instead of erroring."
+    )
+
+
+@pytest.mark.parametrize("section", sorted(_docs_seed_sources()))
+def test_docs_section_is_bundled_into_the_desktop_sidecar(section: str) -> None:
+    """Same invariant as above, for the frozen desktop build."""
+    assert section in _sidecar_bundled_sources(), (
+        f"{section} is not in build_sidecar.py::BUNDLED_DATA — the frozen desktop sidecar "
+        f"would ship without it, and the docs corpus reader falls back to an EMPTY result SILENTLY."
+    )
+
+
+def test_docs_seeds_exclude_dev_and_vitepress() -> None:
+    """The docs seeds must stay a curated subsection list, not a whole-tree mapping —
+    `docs/dev` (internal handoffs) and `docs/.vitepress` (build config/output, and the
+    gitignored `.vitepress/dist`+`.vitepress/cache` can be a full built site if a release
+    happens to be cut on a machine that's built the docs site locally) must never appear,
+    because hatch_build.py's force-include has no exclude filtering of its own — the
+    ONLY thing keeping them out is that nobody adds a broader `docs/...` entry than the
+    five sections the corpus actually reads."""
+    docs_sources = {s for s in _wheel_seed_sources() if s == "docs" or s.startswith("docs/")}
+    offenders = {s for s in docs_sources if s == "docs" or s.startswith(("docs/dev", "docs/.vitepress"))}
+    assert not offenders, (
+        f"hatch_build.py::_SEEDS bundles {sorted(offenders)} — this sweeps internal docs "
+        f"and/or the (gitignored, potentially large) built VitePress site into every wheel. "
+        f"Bundle specific docs/<section> entries instead of the whole docs/ tree."
+    )
+
+
 def test_archetype_catalog_specifically() -> None:
     """The regression that prompted this file (#2010 shipped the catalog entry and
     the cowork SOUL preset, but never added the catalog to either asset list, so
     Cowork was unselectable on desktop and on any pip install)."""
     assert "config/archetype-catalog.json" in _wheel_seed_sources()
     assert "config/archetype-catalog.json" in _sidecar_bundled_sources()
+
+
+def test_plugins_dir_is_bundled_into_the_wheel() -> None:
+    """Core code imports directly from `plugins/` (e.g. `runtime/acp_runtime.py`'s
+    `from plugins.coding_agent.acp_client import AcpClient`), so omitting the tree from
+    the wheel isn't a missing extra — it's a `ModuleNotFoundError` on the first ACP-backed
+    turn of any non-editable install (#2624). This stayed invisible because editable/source
+    installs keep the repo root on `sys.path`, masking the omission entirely — only a real
+    `pip install` from the built wheel exercises this path."""
+    assert "plugins" in _wheel_seed_sources(), (
+        "'plugins' is not in hatch_build.py::_SEEDS — a `pip install` from the built wheel "
+        "would ship without it, and core code that imports from plugins/ (e.g. the ACP "
+        "client factory) raises ModuleNotFoundError on the first real turn, not at install "
+        "time or boot."
+    )
+
+
+def test_plugins_dir_is_bundled_into_the_desktop_sidecar() -> None:
+    """Same invariant as above, for the frozen desktop build — already correct (this is
+    the pattern #2624's wheel fix mirrors), pinned here so it can't silently regress."""
+    assert "plugins" in _sidecar_bundled_sources(), (
+        "'plugins' is not in build_sidecar.py::BUNDLED_DATA — the frozen desktop sidecar "
+        "would ship without it, and PyInstaller's import-scan can't see plugins/ loaded by "
+        "file path, so this can't be caught any other way."
+    )
 
 
 def test_project_manager_archetype_row() -> None:

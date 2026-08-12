@@ -11,7 +11,7 @@ serialized to the 1.0 wire JSON the SDK serves at
   (regression guard — a misplaced url makes clients POST to / and 405).
 - the four protoLabs custom extensions are declared so consumers extract them.
 - provider is the fleet provider block.
-- auth schemes (apiKey always; bearer when a token is configured).
+- auth schemes (only the credentials the guard actually enforces — #2620).
 
 Forks should extend this with tests for their own skills + extensions.
 """
@@ -69,42 +69,63 @@ def test_agent_card_has_at_least_one_skill() -> None:
         assert "description" in skill
 
 
+def _configure_auth(bearer=None, api_key=""):
+    """Configure the guard the way boot does — auth.install() runs BEFORE the card is
+    built (server/__init__.py), and since #2620 the card is derived from the guard's
+    resolved state rather than re-reading env itself."""
+    from a2a_impl import auth
+
+    auth.configure(bearer_token=bearer, api_key=api_key, allowed_origins_raw="")
+
+
 def test_agent_card_no_bearer_when_token_unset(monkeypatch) -> None:
+    """#2620 changed what "no token" advertises. These three tests used to assert
+    'apiKey scheme must always be present' — encoding the defect as a requirement. An
+    agent with no credential configured accepts anything, so advertising X-API-Key told
+    clients to send a credential the server neither wants nor validates."""
     monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
-    import graph.config  # noqa: F401
     import server
 
-    # No configured graph → _bearer_configured() falls back to env (unset).
     monkeypatch.setattr(server.STATE, "graph_config", None, raising=False)
+    _configure_auth(bearer=None, api_key="")
+
     schemes = _card_json().get("securitySchemes", {})
-    assert "apiKey" in schemes, "apiKey scheme must always be present"
     assert "bearer" not in schemes, "bearer must not appear when no token is configured"
+    assert "apiKey" not in schemes, "nor apiKey — the server enforces neither (#2620)"
 
 
 def test_agent_card_bearer_when_token_set(monkeypatch) -> None:
+    """Was: 'the security requirement must also list bearer as an OR alternative', with
+    apiKey alongside it. Both halves were wrong — the server enforces bearer only, and a
+    client picking the advertised apiKey got 401 (#2620)."""
     monkeypatch.setenv("A2A_AUTH_TOKEN", "secret-test-token")
     import server
 
     monkeypatch.setattr(server.STATE, "graph_config", None, raising=False)
+    _configure_auth(bearer="secret-test-token", api_key="")
+
     card = _card_json()
     schemes = card.get("securitySchemes", {})
-    assert "apiKey" in schemes, "apiKey scheme must always be present"
-    assert "bearer" in schemes, "bearer must appear when A2A_AUTH_TOKEN is set"
+    assert "bearer" in schemes
     assert schemes["bearer"]["httpAuthSecurityScheme"]["scheme"] == "bearer"
-    # The security requirement must also list bearer as an OR alternative.
-    reqs = card.get("securityRequirements", [])
-    scheme_keys = [set(r.get("schemes", {}).keys()) for r in reqs]
-    assert {"apiKey"} in scheme_keys and {"bearer"} in scheme_keys
+    assert "apiKey" not in schemes, "no API key is configured — advertising it is the bug"
+    scheme_keys = [set(r.get("schemes", {}).keys()) for r in card.get("securityRequirements", [])]
+    assert scheme_keys == [{"bearer"}]
 
 
-def test_agent_card_security_requirement_apikey_only_when_token_unset(monkeypatch) -> None:
-    monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
+def test_agent_card_lists_each_configured_credential_as_an_alternative(monkeypatch) -> None:
+    """With BOTH configured, either credential authenticates (#2620 flipped the guard's
+    accidental AND to a deliberate OR), so the card lists one requirement per scheme."""
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "secret-test-token")
     import server
 
     monkeypatch.setattr(server.STATE, "graph_config", None, raising=False)
-    reqs = _card_json().get("securityRequirements", [])
-    scheme_keys = [set(r.get("schemes", {}).keys()) for r in reqs]
-    assert scheme_keys == [{"apiKey"}]
+    _configure_auth(bearer="secret-test-token", api_key="legacy-key")
+
+    card = _card_json()
+    assert set(card.get("securitySchemes", {})) == {"apiKey", "bearer"}
+    scheme_keys = sorted(set(r.get("schemes", {}).keys()) for r in card.get("securityRequirements", []))
+    assert scheme_keys == [{"apiKey"}, {"bearer"}]
 
 
 def test_agent_card_declares_exactly_the_extensions_it_emits() -> None:

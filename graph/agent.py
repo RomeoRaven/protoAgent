@@ -148,6 +148,19 @@ def _build_middleware(
             )
         )
 
+    # Runtime toolset changes (#2640), announced once to the next turn. ALWAYS on:
+    # an agent that refuses work it can now do is a worse failure than a missed
+    # injection, so this must not ride a switchable subsystem.
+    #
+    # Registered AFTER KnowledgeMiddleware deliberately — `context` has no reducer, so
+    # it composes with what knowledge just wrote rather than clobbering it. Each
+    # before_model hook is its own graph node and LangGraph applies updates in order,
+    # which is what makes reading the staged value here correct. Moving this earlier
+    # silently drops the knowledge/skills block.
+    from graph.middleware.tool_delta import ToolDeltaMiddleware
+
+    middleware.append(ToolDeltaMiddleware())
+
     # Deferred-tool disclosure (ADR 0005 #3) — trims the per-call tool set to
     # base + agent-loaded. Opt-in; the search_tools meta-tool is added to the
     # tool list in create_agent_graph when this is on.
@@ -1109,6 +1122,16 @@ def create_agent_graph(
         # switch that snaps back on. Everything else was already filtered, so only
         # search_tools can drop here.
         all_tools = drop_disabled_tools(all_tools, disabled_tools)
+
+    # Record the FINAL bound toolset so a runtime change is observable to the agent and
+    # not only to the process (#2640). Here, after every filter and append, is the only
+    # place the set is what the model will actually see. No-op on the first build and
+    # whenever nothing changed; when it did change, the next turn gets a one-shot note
+    # (KnowledgeMiddleware). Without this an agent mid-session keeps refusing work it
+    # can now do — the ADR 0096 spine ends at *use*, and nothing told it.
+    from graph.tool_delta import record_toolset
+
+    record_toolset(t.name for t in all_tools)
 
     # Composed as labeled parts (#2243 P2) so PromptCapture can persist the
     # stable prefix's section boundaries with the blob it hashes — the prompt

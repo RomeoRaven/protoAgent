@@ -406,22 +406,26 @@ def _build_file_tools(config: dict | None) -> list:
 
 
 def _test_interpreter() -> tuple[str | None, str | None]:
-    """``(python, error)`` — the interpreter to run pytest with. Source-run →
-    ``sys.executable``; frozen → the ADR 0094 managed runtime or an actionable
-    refusal (never a system-Python fallback)."""
-    if getattr(sys, "frozen", False):
-        try:
-            from infra.python_runtime import managed_python_exe
-        except Exception:  # noqa: BLE001 — ancient build without the runtime module
-            return None, "no Python available to run pytest in this packaged build"
-        exe = managed_python_exe()
-        if exe is None:
-            return None, (
-                "no Python to run pytest in the packaged app — install the managed runtime "
-                "(Settings ▸ Tools, ~35 MB), then try again"
-            )
-        return str(exe), None
-    return sys.executable, None
+    """``(python, error)`` — the interpreter to run pytest with (ADR 0096 D3).
+
+    Delegates to ``infra.python_runtime.pytest_interpreter`` so this and the
+    ``coder`` verifier share ONE definition of "no interpreter" — including the
+    frozen case where a runtime is provisioned but carries no pytest."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable, None
+    try:
+        from infra.python_runtime import pytest_interpreter
+        from runtime.python_install import ensure_test_runtime
+    except Exception:  # noqa: BLE001 — ancient build without the runtime module
+        return None, "no Python available to run pytest in this packaged build"
+    # A scaffolded suite needs pytest + the plugin's own imports (langchain-core, …) in
+    # the CHILD interpreter, and they can't ride `requires_pip` — see the note on
+    # TEST_RUNTIME_REQUIREMENTS. Install on first use so provisioning stays lean; this
+    # is a dist-info scan and a no-op once they're there.
+    err = ensure_test_runtime()
+    if err:
+        return None, err
+    return pytest_interpreter()
 
 
 def _run_pytest(pdir: Path) -> str:

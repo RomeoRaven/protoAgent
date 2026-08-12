@@ -31,7 +31,8 @@
 #         second call, after `opened` already fired with an empty label set.
 #       * `gh run rerun` replays that same payload by definition.
 #     Neither matters now: both leave a red run that the `labeled` event supersedes.
-#   - PR_HEAD_REF matches release/* (release PRs roll [Unreleased] themselves)
+#   - PR_HEAD_REF matches release/* or prepare-release/* (release PRs roll [Unreleased]
+#     themselves; prepare-release.yml creates the latter spelling)
 #   - PR_ACTOR is dependabot[bot] (bot PRs never need entries)
 #
 # Pure git + jq + shell — no dependency install, safe to run first in CI.
@@ -45,7 +46,13 @@ if [ "${PR_ACTOR:-}" = "dependabot[bot]" ]; then
 fi
 
 case "${PR_HEAD_REF:-}" in
-  release/*)
+  # prepare-release.yml creates `prepare-release/vX.Y.Z`, which `release/*` does NOT
+  # match. That went unnoticed because a release PR *deletes* every fragment, and the
+  # old check counted any changed changelog.d path — including deletions — so those PRs
+  # passed by accident. #2600 stopped counting deletions (removing someone else's entry
+  # isn't self-documentation) and the accident stopped covering for the pattern, which
+  # broke the v0.134.0 release PR. Match both spellings.
+  release/*|prepare-release/*)
     echo "skip: release branch '${PR_HEAD_REF}' rolls [Unreleased] itself"
     exit 0
     ;;
@@ -64,9 +71,27 @@ fi
 # At least one changelog.d/*.md that ISN'T the README — a PR may legitimately touch the
 # README *and* add a fragment, so this filters the README out rather than disqualifying
 # the whole PR when it appears (which is what an earlier version of this check did).
-if git diff --name-only "${base}...HEAD" \
+# --diff-filter=d excludes DELETIONS: removing someone else's fragment is not "this PR
+# documented itself", and a deleted path can't be linted below either.
+fragments=$(git diff --name-only --diff-filter=d "${base}...HEAD" \
    | grep -E '^changelog\.d/.+\.md$' \
-   | grep -qvx 'changelog.d/README.md'; then
+   | grep -vx 'changelog.d/README.md' || true)
+
+if [ -n "${fragments}" ]; then
+  # Existing is not the property that matters — SURVIVING COLLATION is (#2600). A fragment
+  # whose text isn't a top-level `- ` bullet passes an existence check, then contributes
+  # nothing to the release notes, and a release with no parsable bullets drops off
+  # /changelog entirely. That only shows up days later to whoever cuts the release, so
+  # check it here with the collator's OWN parser rather than a second guess at the rules.
+  #
+  # Resolved from this script's directory, not $PWD: the tests drive the gate against
+  # throwaway repos. python3 + stdlib only, so the gate still installs nothing.
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # shellcheck disable=SC2086 # word-splitting is intended: one arg per fragment path
+  if ! python3 "${here}/changelog.py" lint-fragments ${fragments}; then
+    echo "::error::A changelog fragment in this PR would be dropped from the release notes. Fix it as printed above (changelog.d/README.md has the format), or apply the skip-changelog label."
+    exit 1
+  fi
   echo "ok: changelog.d/ fragment added in this PR"
   exit 0
 fi

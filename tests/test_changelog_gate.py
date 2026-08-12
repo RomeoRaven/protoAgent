@@ -226,3 +226,109 @@ def test_the_fragments_readme_alone_does_not_satisfy_the_gate(tmp_path: Path) ->
     result = _run_gate(repo)
 
     assert result.returncode == 1
+
+
+# ── #2600: existing isn't enough — the fragment has to survive collation ─────
+
+
+def _add_fragment(repo: Path, name: str, body: str) -> None:
+    (repo / "changelog.d").mkdir(exist_ok=True)
+    (repo / "changelog.d" / name).write_text(body, encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", f"add {name}")
+
+
+def test_fragment_without_a_top_level_bullet_fails_the_gate(tmp_path: Path) -> None:
+    """The real PR #2597 shape: a well-written fragment missing its leading '- '. It
+    collates into [Unreleased] fine and then contributes NOTHING to the release notes,
+    because scaffold derives entries from top-level bullets only. Green CI, silent loss."""
+    repo = _pr_repo(tmp_path)
+    _add_fragment(
+        repo,
+        "2555.added.md",
+        "**Project onboarding config (#2555).** `onboarding` config section: `enabled`, `root`.\n",
+    )
+
+    result = _run_gate(repo)
+
+    assert result.returncode == 1
+    assert "top-level" in result.stdout or "top-level" in result.stderr
+    assert "2555.added.md" in result.stdout + result.stderr  # names the offending file
+
+
+def test_well_formed_fragment_still_passes(tmp_path: Path) -> None:
+    repo = _pr_repo(tmp_path)
+    _add_fragment(repo, "2600.fixed.md", "- **A real entry (#2600).** With a body that wraps\n  onto a second line.\n")
+
+    result = _run_gate(repo)
+
+    assert result.returncode == 0
+    assert "ok: changelog.d/ fragment added" in result.stdout
+
+
+def test_unknown_kind_fails_the_gate(tmp_path: Path) -> None:
+    """`collate` already rejects this loudly at release time — catching it in the PR moves
+    the error to the person who can fix it in one keystroke."""
+    repo = _pr_repo(tmp_path)
+    _add_fragment(repo, "2600.improved.md", "- **Something (#2600).** Body.\n")
+
+    result = _run_gate(repo)
+
+    assert result.returncode == 1
+    assert "unknown kind" in result.stdout + result.stderr
+
+
+def test_empty_fragment_fails_the_gate(tmp_path: Path) -> None:
+    repo = _pr_repo(tmp_path)
+    _add_fragment(repo, "2600.fixed.md", "\n\n")
+
+    result = _run_gate(repo)
+
+    assert result.returncode == 1
+
+
+def test_deleting_someone_elses_fragment_does_not_satisfy_the_gate(tmp_path: Path) -> None:
+    """A deletion isn't 'this PR documented itself' — and the path no longer exists to
+    lint. Only the release branch legitimately removes fragments, and it has its own
+    escape hatch."""
+    repo = _pr_repo(tmp_path)
+    _add_fragment(repo, "2599.fixed.md", "- **Prior entry (#2599).** Body.\n")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "feature")
+    _git(repo, "checkout", "-qb", "feature2")
+    (repo / "changelog.d" / "2599.fixed.md").unlink()
+    _git(repo, "commit", "-aqm", "remove a fragment")
+
+    result = _run_gate(repo, head_ref="feature2")
+
+    assert result.returncode == 1
+
+
+def test_prepare_release_branch_skips_the_gate(tmp_path: Path) -> None:
+    """The branch prepare-release.yml actually creates is `prepare-release/vX.Y.Z`, which
+    `release/*` does not match. It went unnoticed because a release PR DELETES every
+    fragment and the old check counted any changed changelog.d path — so those PRs passed
+    by accident, not by the escape hatch. #2600 stopped counting deletions and the accident
+    stopped covering, breaking the v0.134.0 release PR."""
+    repo = _pr_repo(tmp_path)
+    _add_fragment(repo, "2600.fixed.md", "- **An entry (#2600).** Body.\n")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "feature")
+    _git(repo, "checkout", "-qb", "prepare-release/v0.134.0")
+    (repo / "changelog.d" / "2600.fixed.md").unlink()  # what `collate` does
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\n## [0.134.0]\n- entry\n", encoding="utf-8")
+    _git(repo, "commit", "-aqm", "chore: release v0.134.0")
+
+    result = _run_gate(repo, head_ref="prepare-release/v0.134.0")
+
+    assert result.returncode == 0
+    assert "release branch" in result.stdout
+
+
+def test_plain_release_branch_still_skips(tmp_path: Path) -> None:
+    repo = _pr_repo(tmp_path)
+    _git(repo, "checkout", "-qb", "release/v1.2.3")
+    (repo / "code.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-aqm", "release prep")
+
+    assert _run_gate(repo, head_ref="release/v1.2.3").returncode == 0
