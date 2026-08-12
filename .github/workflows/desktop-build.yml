@@ -514,7 +514,7 @@ jobs:
       github.repository == 'protoLabsAI/protoAgent' &&
       needs.build.result == 'success' &&
       needs.updater-manifest.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # workspace-config: allow-hosted-runner public repo — GH-hosted is free
     timeout-minutes: 5
     permissions:
       actions: write
