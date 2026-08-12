@@ -500,3 +500,30 @@ jobs:
           # manifest exists. (The no-bundles path above exits 0 before this, so an
           # unsigned build never gets promoted — 'Latest' stays on the last good .0.)
           gh release edit "$TAG" --repo "${{ github.repository }}" --latest
+
+  # The release commit can deploy marketing before this manual workflow has
+  # attached its desktop assets. Refresh only after the tagged matrix and its
+  # fan-in succeed, so fetchLatestDesktopRelease() can see the new complete
+  # release (#2655; follows the asset-existence gate from #2514/#2515).
+  refresh-marketing:
+    name: refresh public download page
+    needs: [build, updater-manifest]
+    if: >-
+      always() &&
+      inputs.tag != '' &&
+      github.repository == 'protoLabsAI/protoAgent' &&
+      needs.build.result == 'success' &&
+      needs.updater-manifest.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Deploy marketing after desktop assets are live
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run marketing-deploy.yml
+          --repo "${{ github.repository }}"
+          --ref main
