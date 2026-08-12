@@ -14,11 +14,14 @@ def test_tagged_desktop_build_refreshes_marketing_after_assets_are_live() -> Non
 
     assert set(job["needs"]) == {"build", "updater-manifest"}
 
-    condition = job["if"]
-    assert "always()" in condition
-    assert "inputs.tag != ''" in condition
-    assert "needs.build.result == 'success'" in condition
-    assert "needs.updater-manifest.result == 'success'" in condition
+    condition = " ".join(job["if"].split())
+    assert condition == (
+        "always() && "
+        "inputs.tag != '' && "
+        "github.repository == 'protoLabsAI/protoAgent' && "
+        "needs.build.result == 'success' && "
+        "needs.updater-manifest.result == 'success'"
+    )
 
     assert job["permissions"] == {"actions": "write", "contents": "read"}
 
