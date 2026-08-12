@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -379,6 +380,95 @@ def install_requirements_into_managed_runtime(
     _pip_install(exe, ["--", *reqs], what="plugin dependency install", timeout=timeout)
     log.info("[python] installed %d plugin requirement(s) into the managed runtime", len(reqs))
     return python_status()
+
+
+#: What a scaffolded plugin's pytest suite needs in the CHILD interpreter (#2638).
+#: Deliberately NOT the managed runtime's baseline: provisioning serves execute_code
+#: and the document skills, and most desktop users never author a plugin — so these
+#: install on first use instead of riding every ``runtime install-python``.
+#:
+#: This canNOT be expressed as the plugins' ``requires_pip``. Measured on a real frozen
+#: build: PyInstaller bundles all of these transitively, so ``_deps_satisfied`` finds
+#: them importable IN THE HOST and reports the deps satisfied — the console then hides
+#: "Install deps" (it renders only when ``deps_missing`` is non-empty) and the CLI
+#: reports an install it never performed, while the child site-packages stays empty.
+#: The host's copies are unreachable to the child: PyInstaller's modules live in a
+#: frozen archive, not on any importable path.
+#:
+#: ``langchain_core`` is not optional padding — a scaffolded plugin's ``__init__.py``
+#: does ``from langchain_core.tools import tool``, so *any* real plugin needs it to be
+#: importable before its suite can even collect. ``install_host_stubs()`` stubs
+#: ``graph.*``/``knowledge.*``, never a plugin's genuine third-party imports.
+TEST_RUNTIME_REQUIREMENTS = [
+    "pytest>=8",
+    "pyyaml>=6",
+    "langchain-core>=0.2",
+    "fastapi>=0.110",
+    "httpx>=0.27",
+]
+
+
+def test_runtime_missing() -> list[str]:
+    """Which :data:`TEST_RUNTIME_REQUIREMENTS` the managed runtime doesn't satisfy.
+
+    Judged by the CHILD's site-packages only — host importability is meaningless here
+    (see the note on the constant). Empty when the runtime isn't provisioned at all,
+    so callers check ``managed_python_exe()`` first and speak the provisioning step.
+
+    The VERSION is compared, not just the name: a plugin's ``requires_pip`` installs
+    into this same runtime, so an older pin (``langchain-core<0.2``) can leave a dist
+    that satisfies the name and not the specifier. Answering "present" there would be
+    the same wrong-question failure this whole change exists to remove. Anything that
+    won't parse is reported missing — reinstalling is cheap and pip is idempotent,
+    where a wrong "satisfied" is a broken child."""
+    from infra.python_runtime import managed_runtime_distribution_versions, normalize_dist
+
+    have = managed_runtime_distribution_versions()
+    if not have:
+        return list(TEST_RUNTIME_REQUIREMENTS)
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+    except Exception:  # noqa: BLE001 — no packaging: fall back to name-only presence
+        SpecifierSet = Version = None  # type: ignore[assignment]
+    missing = []
+    for spec in TEST_RUNTIME_REQUIREMENTS:
+        name, _, constraint = re.match(r"([^<>=!~\[]+)(\[[^\]]*\])?(.*)", spec).group(1, 2, 3)
+        installed = have.get(normalize_dist(name.strip()))
+        if installed is None:
+            missing.append(spec)
+            continue
+        if not constraint or SpecifierSet is None:
+            continue
+        try:
+            if Version(installed) not in SpecifierSet(constraint):
+                missing.append(spec)
+        except Exception:  # noqa: BLE001 — unparseable version/specifier → reinstall
+            missing.append(spec)
+    return missing
+
+
+def ensure_test_runtime(*, timeout: float = 600.0) -> str | None:
+    """Make the managed runtime able to run a plugin's pytest suite. ``None`` on
+    success, else a message naming the remedy.
+
+    Installs only what's missing, so the common path is a no-op dist-info scan with no
+    pip and no network. First use pays once; later calls are instant."""
+    exe = managed_python_exe()
+    if exe is None:
+        return (
+            "the managed Python runtime isn't provisioned — install it "
+            "(Settings ▸ Tools, ~35 MB, or `protoagent runtime install-python`), then try again"
+        )
+    missing = test_runtime_missing()
+    if not missing:
+        return None
+    log.info("[python] installing %d test requirement(s) into the managed runtime", len(missing))
+    try:
+        _pip_install(exe, ["--", *missing], what="test runtime install", timeout=timeout)
+    except PythonInstallError as exc:
+        return f"couldn't install the test runtime ({', '.join(missing)}) into the managed Python: {exc}"
+    return None
 
 
 def install_managed_python(
