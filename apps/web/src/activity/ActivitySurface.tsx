@@ -49,6 +49,10 @@ export function ActivitySurface() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Persisted Activity rows use positive database IDs. Live-only rows count
+  // downward so a same-millisecond event burst cannot collide with React keys
+  // or with an entry loaded from the API.
+  const nextLiveId = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -77,7 +81,7 @@ export function ActivitySurface() {
         const text = typeof data.text === "string" ? data.text : "";
         if (!text) return;
         const entry: ActivityEntry = {
-          id: Date.now(),
+          id: --nextLiveId.current,
           created_at: new Date().toISOString(),
           origin: typeof data.origin === "string" ? data.origin : "",
           trigger: typeof data.trigger === "string" ? data.trigger : "",
@@ -115,7 +119,13 @@ export function ActivitySurface() {
             />
           ) : null}
           {chronological.map((e) => (
-            <div className="activity-entry" key={e.id} data-origin={e.origin} data-state={e.state}>
+            <div
+              className="activity-entry"
+              key={e.id}
+              data-entry-id={e.id}
+              data-origin={e.origin}
+              data-state={e.state}
+            >
               <div className="activity-entry-head">
                 <Badge entry={e} />
                 {/* Open the full entry in the shared full-screen reader (ADR 0062) —

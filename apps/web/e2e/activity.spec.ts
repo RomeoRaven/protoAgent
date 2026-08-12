@@ -5,6 +5,11 @@ import { expect, test } from "@playwright/test";
 // GET /api/activity and appends pushed `activity.message` events live while the dialog is open.
 
 test("widget badge → dialog feed with provenance + live append", async ({ page }) => {
+  // Make the historical Date.now()-based live IDs collide deterministically.
+  // The surface must still assign every pushed entry its own React key.
+  await page.addInitScript(() => {
+    Date.now = () => 2_644_000;
+  });
   await page.goto("/app/", { waitUntil: "load" });
 
   // Pushed activity messages arrive while the dialog is closed → the widget's unread badge shows.
@@ -42,6 +47,13 @@ test("widget badge → dialog feed with provenance + live append", async ({ page
   await expect(peer.getByText("sister-agent")).toBeVisible();
   await expect(peer.getByText("A2A turn failed:")).toBeVisible();
   await expect(peer.locator(".activity-stimulus-text")).toContainText("Check every deployment target");
+  const [liveId, peerId] = await Promise.all([
+    live.getAttribute("data-entry-id"),
+    peer.getAttribute("data-entry-id"),
+  ]);
+  expect(liveId).not.toBeNull();
+  expect(peerId).not.toBeNull();
+  expect(peerId).not.toBe(liveId);
 
   // The pushed task identity is retained in the reader subtitle, so a terminal
   // sister-agent entry can be correlated with the durable A2A task.
