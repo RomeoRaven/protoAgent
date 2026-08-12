@@ -661,6 +661,12 @@ class LocalScheduler:
         except Exception:  # noqa: BLE001 — the event is best-effort
             log.exception("[scheduler] %s publish failed for %s", topic, trigger)
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Credentials for a self-invocation — see ``auth.self_invocation_headers``."""
+        from a2a_impl.auth import self_invocation_headers
+
+        return self_invocation_headers(self._bearer, self._api_key)
+
     async def _fire(self, job: Job) -> bool:
         """Deliver a job by POSTing to the agent's own A2A endpoint.
 
@@ -679,10 +685,7 @@ class LocalScheduler:
         #   - `role: ROLE_USER`, `parts: [{"text": …}]`, and contextId + metadata
         #     live ON the message (not at params level).
         headers = {"Content-Type": "application/json", "A2A-Version": "1.0"}
-        if self._bearer:
-            headers["Authorization"] = f"Bearer {self._bearer}"
-        if self._api_key:
-            headers["X-API-Key"] = self._api_key
+        headers.update(self._auth_headers())
 
         # Realtime: announce the dispatch on the bus (ADR 0051) so a console shows the
         # scheduled job firing — before the POST, which blocks for the whole turn.
