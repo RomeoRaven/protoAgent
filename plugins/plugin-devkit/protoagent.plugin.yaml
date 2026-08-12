@@ -18,6 +18,7 @@ capabilities:
   network: []
   filesystem: scoped
 
+
 # Config + Settings (ADR 0019) — where scaffolded plugins are written, and which
 # ACP coding delegate develop_plugin dispatches to (ADR 0096 D5).
 config_section: plugin_devkit

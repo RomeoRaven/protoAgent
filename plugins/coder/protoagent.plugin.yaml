@@ -24,6 +24,7 @@ capabilities:
   filesystem: workspace
   subprocess: ["python"]
 
+
 # Plugin config + Settings (ADR 0019) — claims the top-level `coder` section.
 config_section: coder
 config:

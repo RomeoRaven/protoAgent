@@ -8,8 +8,8 @@ loops, the plugin host wiring, ``_reload_langgraph_agent`` (the hot-reload path)
 and the settings-callbacks the operator console drives.
 
 The builders read and mutate the shared ``runtime.state.STATE`` container; the few
-``server/__init__`` symbols they need (``agent_name``, ``AGENT_NAME_ENV``,
-``_event_bus``, ``_bundle_root``) are imported from ``server`` — all defined
+``server/__init__`` symbols they need (``agent_name``, ``_event_bus``,
+``_bundle_root``) are imported from ``server`` — all defined
 before the re-export line in ``__init__`` that triggers this import, so it is not
 a cycle. ``server/__init__.py`` re-exports every public name so ``server.<symbol>``
 keeps resolving for ``_main``'s wiring and for the test suite.
@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from infra.paths import instance_paths
 from runtime.state import STATE
-from server import AGENT_NAME_ENV, _event_bus, agent_name
+from server import _event_bus, agent_name
 from server.chat import chat
 
 if TYPE_CHECKING:
@@ -1485,10 +1485,12 @@ def _build_background_manager(config):
         "SCHEDULER_INVOKE_URL",
         f"http://127.0.0.1:{STATE.active_port}",
     )
-    bearer = (config.auth_token or os.environ.get("A2A_AUTH_TOKEN", "")).strip()
-    # Match the X-API-Key the A2A handler reads (env-derived name, NOT identity.name) —
-    # see _build_scheduler for the rationale.
-    api_key = os.environ.get(f"{AGENT_NAME_ENV.upper()}_API_KEY", "").strip()
+    # One source for "what does this agent require inbound" — the guard that enforces it.
+    # Re-deriving it per call site (this was config-or-env; the console used env-or-config)
+    # is what let the card drift from enforcement (#2620).
+    from a2a_impl.auth import inbound_credentials
+
+    bearer, api_key = inbound_credentials()
     # The event bus → a still-open spawning chat gets a live ``background.started``
     # push (completion is published by the terminal hook). Imported lazily to keep
     # this builder import-cheap; tolerate its absence.
@@ -1682,13 +1684,12 @@ def _build_scheduler(config) -> "SchedulerBackend | None":
             "SCHEDULER_INVOKE_URL",
             f"http://127.0.0.1:{STATE.active_port}",
         )
-        bearer = (config.auth_token or os.environ.get("A2A_AUTH_TOKEN", "")).strip()
-        # The A2A handler reads X-API-Key from ``<AGENT_NAME_ENV>_API_KEY``
-        # (server.py L893 — note: the env-derived name, NOT the wizard-set
-        # ``identity.name``). Match that here so a wizard rename doesn't
-        # break self-invocation auth.
-        api_key_env = f"{AGENT_NAME_ENV.upper()}_API_KEY"
-        api_key = os.environ.get(api_key_env, "").strip()
+        # Ask the guard what it enforces instead of re-deriving it here (#2620); this
+        # also drops the old "env-derived name, NOT identity.name" footgun, since the
+        # resolution now happens in exactly one place.
+        from a2a_impl.auth import inbound_credentials
+
+        bearer, api_key = inbound_credentials()
         try:
             from server import _event_bus
 

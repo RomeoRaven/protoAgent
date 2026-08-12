@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import sys
 import tarfile
 from pathlib import Path
 
@@ -265,6 +266,66 @@ def test_managed_runtime_distributions_empty_when_unprovisioned(box):
     assert pr.managed_runtime_distributions() == set()
 
 
+# ── pytest_interpreter: the self-building loop's frozen path (ADR 0096 D3) ────
+
+
+def _install_pytest_dist(version: str = "8.3.2") -> None:
+    """Make ``pytest`` visible to ``managed_runtime_distributions()``."""
+    site = pr.managed_python_install_dir() / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / f"pytest-{version}.dist-info").mkdir()
+
+
+def test_pytest_interpreter_source_run_uses_sys_executable(box, monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    exe, err = pr.pytest_interpreter()
+    assert err is None
+    assert exe == sys.executable
+
+
+def test_pytest_interpreter_frozen_refuses_without_runtime(box, monkeypatch):
+    """No managed runtime at all — refuse, and name the provisioning step."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    exe, err = pr.pytest_interpreter()
+    assert exe is None
+    assert "Settings" in err and "runtime" in err
+
+
+def test_pytest_interpreter_frozen_refuses_when_runtime_lacks_pytest(box, monkeypatch):
+    """The regression this ADR 0096 D3 gap actually was: a runtime is provisioned
+    (so ``managed_python_exe()`` is happy) but its baseline is the ADR 0092 document
+    stack, which carries no pytest. Spawning would die on ``No module named pytest``;
+    the refusal has to name the fix instead."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _make_python(pr.managed_python_install_dir())
+    site = pr.managed_python_install_dir() / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "python_docx-1.1.0.dist-info").mkdir()  # the document baseline, no pytest
+    exe, err = pr.pytest_interpreter()
+    assert exe is None
+    assert "pytest" in err and "Install deps" in err
+
+
+def test_pytest_interpreter_frozen_returns_managed_python_when_pytest_present(box, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    expected = _make_python(pr.managed_python_install_dir())
+    _install_pytest_dist()
+    exe, err = pr.pytest_interpreter()
+    assert err is None
+    assert exe == str(expected)
+
+
+def test_pytest_interpreter_never_falls_back_to_a_system_python(box, monkeypatch):
+    """The module's standing rule (see its docstring): a discovered system Python of
+    arbitrary version reproduces #2137's silently-missing-capability class. A frozen
+    build with no managed runtime must refuse, never hand back ``sys.executable`` —
+    which in a PyInstaller bundle is the server binary and would relaunch the app."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    exe, _ = pr.pytest_interpreter()
+    assert exe is None
+    assert exe != sys.executable
+
+
 def test_install_requirements_refuses_when_unprovisioned(box):
     with pytest.raises(pi.PythonInstallError, match="isn't provisioned"):
         pi.install_requirements_into_managed_runtime(["python-docx>=1.1"])
@@ -277,6 +338,100 @@ def test_install_requirements_pips_into_provisioned_runtime(box, monkeypatch):
     st = pi.install_requirements_into_managed_runtime(["python-docx>=1.1", "  ", ""])
     assert calls == [["--", "python-docx>=1.1"]]  # blanks dropped, bare specs (not -r)
     assert st["managed"] is True
+
+
+def test_test_runtime_missing_reports_all_when_unprovisioned(box):
+    assert pi.test_runtime_missing() == pi.TEST_RUNTIME_REQUIREMENTS
+
+
+def test_test_runtime_missing_ignores_host_importability(box):
+    """The #2638 trap: every one of these IS importable in this process, and that must
+    not count — the child has separate site-packages."""
+    _make_python(pr.managed_python_install_dir())
+    site = pr.managed_python_install_dir() / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "pytest-9.1.1.dist-info").mkdir()
+    missing = pi.test_runtime_missing()
+    assert "pytest>=8" not in missing  # the child has it
+    assert "langchain-core>=0.2" in missing  # importable HERE, absent THERE
+
+
+def test_ensure_test_runtime_installs_only_what_is_missing(box, monkeypatch):
+    _make_python(pr.managed_python_install_dir())
+    site = pr.managed_python_install_dir() / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    for d in ("pytest-9.1.1", "pyyaml-6.0.2", "langchain_core-0.3.0", "fastapi-0.115.0"):
+        (site / f"{d}.dist-info").mkdir()
+    calls = []
+    monkeypatch.setattr(pi, "_pip_install", lambda exe, spec, *, what, timeout=600.0: calls.append(spec))
+    assert pi.ensure_test_runtime() is None
+    assert calls == [["--", "httpx>=0.27"]]  # only the one gap, not all five
+
+
+def test_ensure_test_runtime_is_a_noop_once_satisfied(box, monkeypatch):
+    _make_python(pr.managed_python_install_dir())
+    site = pr.managed_python_install_dir() / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    # Versions that actually SATISFY each specifier — seeding "1.0" for everything would
+    # fail the version check, which is the point of it.
+    for name, version in (
+        ("pytest", "9.1.1"),
+        ("pyyaml", "6.0.2"),
+        ("langchain_core", "0.3.0"),
+        ("fastapi", "0.115.0"),
+        ("httpx", "0.28.1"),
+    ):
+        (site / f"{name}-{version}.dist-info").mkdir()
+    monkeypatch.setattr(pi, "_pip_install", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no pip")))
+    assert pi.ensure_test_runtime() is None  # second call costs a dist-info scan, nothing more
+
+
+def test_ensure_test_runtime_names_provisioning_when_absent(box):
+    err = pi.ensure_test_runtime()
+    assert err and "provisioned" in err and "Settings" in err
+
+
+def _seed_dists(**name_to_version: str) -> None:
+    site = pr.managed_python_install_dir() / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    for name, version in name_to_version.items():
+        (site / f"{name}-{version}.dist-info").mkdir(exist_ok=True)
+
+
+def test_a_dist_below_its_minimum_is_missing_not_satisfied(box):
+    """Name-presence is the wrong question: a plugin's own requires_pip pins into this
+    same runtime, so an old langchain-core can sit here satisfying the NAME while
+    failing the specifier the scaffolded suite needs."""
+    _make_python(pr.managed_python_install_dir())
+    _seed_dists(pytest="1.0", pyyaml="6.0.2", langchain_core="0.1.9", fastapi="0.115.0", httpx="0.28.1")
+    missing = pi.test_runtime_missing()
+    assert "pytest>=8" in missing  # 1.0 does not satisfy >=8
+    assert "langchain-core>=0.2" in missing  # 0.1.9 does not satisfy >=0.2
+    assert "pyyaml>=6" not in missing and "httpx>=0.27" not in missing
+
+
+def test_a_dist_below_minimum_reaches_the_pip_arguments(box, monkeypatch):
+    _make_python(pr.managed_python_install_dir())
+    _seed_dists(pytest="1.0", pyyaml="6.0.2", langchain_core="0.3.0", fastapi="0.115.0", httpx="0.28.1")
+    calls = []
+    monkeypatch.setattr(pi, "_pip_install", lambda exe, spec, *, what, timeout=600.0: calls.append(spec))
+    assert pi.ensure_test_runtime() is None
+    assert calls == [["--", "pytest>=8"]]  # the stale one, and only it
+
+
+def test_versions_are_read_off_the_dist_info_names(box):
+    _make_python(pr.managed_python_install_dir())
+    _seed_dists(pytest="9.1.1", langchain_core="0.3.0")
+    have = pr.managed_runtime_distribution_versions()
+    assert have["pytest"] == "9.1.1"
+    assert have["langchain-core"] == "0.3.0"  # dist-info underscore → PEP 503 dash
+
+
+def test_an_unparseable_installed_version_is_reinstalled_not_trusted(box):
+    """Safe direction: pip is idempotent, a wrong 'satisfied' is a broken child."""
+    _make_python(pr.managed_python_install_dir())
+    _seed_dists(pytest="not-a-version")
+    assert "pytest>=8" in pi.test_runtime_missing()
 
 
 def test_install_requirements_empty_is_noop(box, monkeypatch):

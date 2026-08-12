@@ -219,7 +219,23 @@ def _spawn_report_index(job) -> None:
 
 
 def _bearer_configured() -> bool:
-    return bool(os.environ.get("A2A_AUTH_TOKEN", "") or (STATE.graph_config and STATE.graph_config.auth_token))
+    """Whether THIS server requires a bearer — read from the guard that enforces it.
+
+    This used to re-derive the answer from ``A2A_AUTH_TOKEN`` + ``graph_config.auth_token``,
+    which is a second derivation of a fact ``a2a_impl.auth`` already owns. It drifted:
+    the guard resolves those two sources with its own precedence and can be rotated live
+    via ``set_bearer_token``, so a card built from the env could advertise a credential the
+    server did not enforce (#2620).
+
+    ``auth.bearer_configured()`` exists for precisely this reason — ADR 0087 D6 learned the
+    same lesson from the other side (a client's cached token says nothing about what the
+    server accepts). Delegating here means the card, the bind guard and the middleware all
+    answer from one place. Safe at every call site: ``auth.install()`` runs before both the
+    card build and the bind guard in ``server._main``.
+    """
+    from a2a_impl import auth
+
+    return auth.bearer_configured()
 
 
 # Skill declarations (ADR-0006 addendum / #476). A skill MAY declare an
@@ -385,6 +401,63 @@ def _emitted_extension_uris(pa) -> list[str]:
     return [pa.COST_EXT_URI, pa.WORLDSTATE_DELTA_EXT_URI, pa.TOOL_CALL_EXT_URI]
 
 
+def _apply_real_security(card, pa) -> None:
+    """Rewrite the card's security block to describe what the guard actually enforces (#2620).
+
+    ``pa.build_agent_card`` always advertises the ``apiKey`` scheme and, when a bearer is
+    configured, appends ``bearer`` as a SECOND requirement — i.e. as an OR-alternative.
+    Both halves of that were wrong against this server:
+
+    * **apiKey was advertised even when no API key exists.** ``X-API-Key`` is enforced only
+      when ``<AGENT>_API_KEY`` is set. On a bearer-only agent — the normal deployment — a
+      standards-following client is entitled to pick the advertised apiKey scheme, and gets
+      401 from an agent that is healthy and correctly configured.
+    * **The two behaved as an AND.** The guard checked them independently and sequentially,
+      so with both configured neither credential alone was accepted, while the card
+      promised either would do. That conjunction was accidental rather than chosen, and is
+      now genuinely an OR (see ``auth._classify_request``) — so the card's OR shape became
+      the truth instead of the lie.
+
+    Each configured credential is therefore its own requirement: the A2A requirements list
+    is a set of alternatives, which is exactly what the guard now implements. An agent that
+    enforces nothing advertises nothing.
+
+    Best-effort: a card that fails to rewrite is worse than one that does, but not worse
+    than no card at all, so a proto shape change degrades to the builder's output rather
+    than taking down the well-known endpoint.
+    """
+    from a2a.types import SecurityRequirement, StringList
+
+    from a2a_impl.auth import enforced_schemes
+
+    bearer, api_key = enforced_schemes()
+    try:
+        # Build EVERYTHING first, mutate the card second. Clearing the fields up front
+        # and constructing as we went meant a failure midway left the card with its
+        # security block wiped — an agent advertising no auth at all, which is a worse
+        # lie than the one this function exists to fix.
+        schemes, requirements = {}, []
+        for name, scheme in (
+            (pa.API_KEY_SCHEME_NAME, pa.api_key_scheme() if api_key else None),
+            (pa.BEARER_SCHEME_NAME, pa.bearer_scheme() if bearer else None),
+        ):
+            if scheme is None:
+                continue
+            schemes[name] = scheme
+            # One requirement PER credential — the requirements list is a set of
+            # alternatives, and any one of these authenticates. (Naming several schemes
+            # inside a single requirement would mean "present all of them".)
+            requirements.append(SecurityRequirement(schemes={name: StringList(list=[])}))
+
+        card.ClearField("security_schemes")
+        card.ClearField("security_requirements")
+        for name, scheme in schemes.items():
+            card.security_schemes[name].CopyFrom(scheme)
+        card.security_requirements.extend(requirements)
+    except Exception:  # noqa: BLE001 — never let card polish break /.well-known
+        log.warning("[a2a] could not rewrite the card security block; serving the builder's", exc_info=True)
+
+
 def _build_agent_card_proto():
     """Build the A2A 1.0 ``AgentCard`` (proto) served at
     ``/.well-known/agent-card.json``, applying the protoLabs fleet conventions
@@ -424,8 +497,12 @@ def _build_agent_card_proto():
         version=_package_version(),
         skills=_agent_skills(),
         extension_uris=_emitted_extension_uris(pa),
-        bearer=_bearer_configured(),
+        # No `bearer=` — _apply_real_security below owns the whole security block and
+        # would discard whatever the builder produced. Passing it would be dead input in
+        # the very function this change gave a single owner. (Once protolabs-a2a#7 ships
+        # `api_key=`, both flags move here and the post-processing goes away.)
     )
+    _apply_real_security(card, pa)
     # Card polish (ADR 0051 Slice 3) — build_agent_card doesn't set these, but the
     # 1.0 proto AgentCard has them: a docs link + an icon for consumers/registries.
     # Overridable via a2a.documentation_url / a2a.icon_url config; default to the

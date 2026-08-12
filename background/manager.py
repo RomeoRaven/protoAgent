@@ -344,12 +344,15 @@ class BackgroundManager:
 
     # ── self-POST mechanics (shared by _fire and resume_origin — ADR 0050/0070) ─
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Credentials for a self-invocation — see ``auth.self_invocation_headers``."""
+        from a2a_impl.auth import self_invocation_headers
+
+        return self_invocation_headers(self._bearer, self._api_key)
+
     def _a2a_headers(self) -> dict:
         headers = {"Content-Type": "application/json", "A2A-Version": "1.0"}
-        if self._bearer:
-            headers["Authorization"] = f"Bearer {self._bearer}"
-        if self._api_key:
-            headers["X-API-Key"] = self._api_key
+        headers.update(self._auth_headers())
         return headers
 
     async def _send_a2a_message(self, *, context_id: str, text: str, metadata: dict) -> None:

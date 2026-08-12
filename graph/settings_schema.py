@@ -104,8 +104,7 @@ FIELDS: list[Field] = [
         "Restrict tools for the ACP brain",
         "string_list",
         "Model & runtime",
-        "Deprecated with the ACP runtime — only meaningful for a legacy acp:<agent> brain; "
-        "ignored by native.",
+        "Deprecated with the ACP runtime — only meaningful for a legacy acp:<agent> brain; ignored by native.",
         ui_hidden=True,  # rides the agent_runtime deprecation above; YAML still honored
     ),
     Field(
@@ -131,7 +130,9 @@ FIELDS: list[Field] = [
         options_source="providers",
     ),
     Field("model.api_base", "api_base", "API base URL", "string", "Model & runtime", scope="host"),
-    Field("model.api_key", "api_key", "API key", "secret", "Model & runtime", "Stored in secrets.yaml, never echoed back."),
+    Field(
+        "model.api_key", "api_key", "API key", "secret", "Model & runtime", "Stored in secrets.yaml, never echoed back."
+    ),
     Field("model.temperature", "temperature", "Temperature", "number", "Model & runtime", minimum=0, maximum=2),
     Field("model.max_tokens", "max_tokens", "Max output tokens", "number", "Model & runtime", minimum=1),
     Field(
@@ -196,8 +197,9 @@ FIELDS: list[Field] = [
         "Favorite models",
         "Pinned go-to models for the chat `/model` quick-switch — the inline picker offers "
         "these, in this order, instead of the gateway's full list. Add, remove, and reorder "
-        "here; empty = /model shows every gateway model.",
-        options_source="models",
+        "here; empty = /model shows every gateway model. Prefix a provider to pin a model from "
+        "another lane — e.g. anthropic-oauth:claude-sonnet-5.",
+        options_source="slot_models",
     ),
     # ── Routing ──────────────────────────────────────────────────────────────
     Field(
@@ -207,8 +209,9 @@ FIELDS: list[Field] = [
         "string",
         "Routing",
         "Cheap/fast alias for summarization, goal-verification, and subagents. Blank = use the "
-        "main model.",
-        options_source="models",
+        "main model. Prefix another provider to send these calls there instead — "
+        "e.g. gateway:protolabs/fast, openai-codex:gpt-5.6-sol.",
+        options_source="slot_models",
         scope="host",
     ),
     Field(
@@ -217,8 +220,9 @@ FIELDS: list[Field] = [
         "Fallback models",
         "string_list",
         "Routing",
-        "Retried in order when the primary model errors.",
-        options_source="models",
+        "Retried in order when the primary model errors. Prefix a provider to degrade "
+        "ACROSS lanes — e.g. gateway:protolabs/coder as the fallback for a subscription model.",
+        options_source="slot_models",
         scope="host",
     ),
     # ── Context compaction ───────────────────────────────────────────────────
@@ -253,7 +257,7 @@ FIELDS: list[Field] = [
         "string",
         "Compaction",
         "Blank = routing.aux_model, then the main model.",
-        options_source="models",
+        options_source="slot_models",
     ),
     # ── Goal mode ────────────────────────────────────────────────────────────
     # Goal mode is always on (config default True). The on/off toggle is hidden from
@@ -268,7 +272,7 @@ FIELDS: list[Field] = [
         "string",
         "Goal mode",
         "Blank = routing.aux_model, then the main model.",
-        options_source="models",
+        options_source="slot_models",
     ),
     # ── Watches ──────────────────────────────────────────────────────────────
     # ADR 0067. Separate from Goal mode above: a goal is a bounded loop the agent DRIVES,
@@ -394,7 +398,7 @@ FIELDS: list[Field] = [
         "bool",
         "Knowledge",
         "When on, the agent's memory_ingest tool refuses to write always-on hot memory "
-        "(domain \"hot\") and instructs the model to ask you instead — only operator "
+        '(domain "hot") and instructs the model to ask you instead — only operator '
         "surfaces (the knowledge browser / memory inspector) can put facts in front of the "
         "model every turn. Every hot write emits a memory.hot_written event either way.",
     ),
@@ -1036,8 +1040,7 @@ FIELDS: list[Field] = [
         "Server URL",
         "string",
         "Secrets manager",
-        "Infisical Cloud (https://us.infisical.com / https://eu.infisical.com) or your "
-        "self-hosted instance URL.",
+        "Infisical Cloud (https://us.infisical.com / https://eu.infisical.com) or your self-hosted instance URL.",
         depends_on={"key": "secrets_manager.enabled"},
     ),
     Field(
@@ -1102,8 +1105,7 @@ FIELDS: list[Field] = [
         "Refresh interval (seconds)",
         "number",
         "Secrets manager",
-        "Re-pull on this interval so rotation lands without a restart. 0 = fetch only at "
-        "boot and on config reload.",
+        "Re-pull on this interval so rotation lands without a restart. 0 = fetch only at boot and on config reload.",
         minimum=0,
         depends_on={"key": "secrets_manager.enabled"},
     ),
@@ -1146,6 +1148,46 @@ FIELDS: list[Field] = [
         "Let the packaged desktop app install a plugin's declared pip deps as pure-Python "
         "wheels into a writable per-instance dir (ADR 0093), instead of refusing them. Off by "
         "default — installing packages runs code on import. No effect outside the frozen app.",
+    ),
+    # ── Project onboarding (#2555) ───────────────────────────────────────────
+    Field(
+        "onboarding.enabled",
+        "onboarding_enabled",
+        "Enable project onboarding",
+        "bool",
+        "Project onboarding",
+        "Let the agent clone and register managed projects within the pre-consented "
+        "space (root + allow globs). Off by default — the operator opts in.",
+    ),
+    Field(
+        "onboarding.root",
+        "onboarding_root",
+        "Onboarding root",
+        "path",
+        "Project onboarding",
+        "Clones land here; registrations must resolve under this directory.",
+        depends_on={"key": "onboarding.enabled"},
+    ),
+    Field(
+        "onboarding.allow",
+        "onboarding_allow",
+        "Allowed sources",
+        "string_list",
+        "Project onboarding",
+        "Clone source globs — same semantics as plugins.sources.allow "
+        "(e.g. github.com/protoLabsAI/*). Only repos matching at least one "
+        "pattern can be onboarded.",
+        depends_on={"key": "onboarding.enabled"},
+    ),
+    Field(
+        "onboarding.write_default",
+        "onboarding_write_default",
+        "Register writable by default",
+        "bool",
+        "Project onboarding",
+        "When on, onboarded projects are registered read-write; when off (default), "
+        "read-only unless the agent explicitly requests write access.",
+        depends_on={"key": "onboarding.enabled"},
     ),
 ]
 
@@ -1204,6 +1246,42 @@ def is_secret_key(key: str) -> bool:
     """True for a secret-typed FIELD (ADR 0047 D5 — secrets are agent-leaf only,
     never written to the non-secret Host file)."""
     return key in _SECRET_KEYS
+
+
+# Top-level config sections that deliberately have NO FIELDS entries, and so render
+# NOWHERE in the console Settings surface (#2598).
+#
+# FIELDS drives Settings. A section that exists in LangGraphConfig and round-trips through
+# YAML but has no Field is invisible: the feature ships and no operator can find or enable
+# it without hand-editing YAML. That is almost never what anyone intends — it has happened
+# twice, once caught by an operator noticing an empty panel (ADR 0080) and once by review.
+#
+# The exemption is real for these four: each is a nested dict or a LIST of dicts, which the
+# Field shapes (including string_list) cannot express. But it has to be GRANTED here rather
+# than self-served in a test body, which is how the last one slipped through — the golden
+# went red, a section name was appended to a set literal inside the test, and the suite went
+# green with the feature unreachable.
+#
+# Before adding to this tuple: the bar is "this shape genuinely cannot be a Field", NOT
+# "the golden test went red". Add a Field per knob instead; that is the fix in nearly every
+# case. If you do add one, say here why the shape defeats Field.
+SETTINGS_EXEMPT_SECTIONS: tuple[str, ...] = (
+    "subagents",  # subagents.researcher — nested per-subagent dicts, emitted by config_io §B
+    "plugins",  # plugins.* install/enable knobs, emitted by config_io §B
+    "lifecycle_hooks",  # ADR 0074 — a LIST of hook dicts
+    "projects",  # ADR 0095 — a LIST of managed-project dicts
+)
+
+
+def sections_without_settings_fields(emitted_sections) -> list[str]:
+    """Emitted config sections that would render nowhere in Settings (#2598).
+
+    ``emitted_sections`` is the top-level key set ``config_to_dict`` produces. Returns the
+    ones that have neither a FIELDS entry nor a granted exemption — i.e. shipped, but
+    unreachable from the console.
+    """
+    field_sections = {f.key.split(".", 1)[0] for f in FIELDS}
+    return sorted(set(emitted_sections) - field_sections - set(SETTINGS_EXEMPT_SECTIONS))
 
 
 # Reset-to-inherited treats the model contract as ONE decision (#2528): name,
@@ -1295,6 +1373,8 @@ _SECTION_CATEGORY = {
     "MCP": "Capabilities",
     "Filesystem": "Capabilities",
     "Tools": "Capabilities",
+    # Project onboarding (#2555) — operator-consented clone+register space.
+    "Project onboarding": "Capabilities",
     # Knowledge — recall / RAG config, split into sub-sections (see _KNOWLEDGE_SUBSECTION).
     "Recall": "Knowledge",
     "Ingestion": "Knowledge",
@@ -1363,6 +1443,10 @@ def build_schema(
     config,
     *,
     model_options: list[str] | None = None,
+    # Cross-provider, `<provider>:<model>`-qualified options for the SLOT fields.
+    # `model.name` keeps the bare list: the main model belongs to `model.provider`,
+    # and a qualified value there is a misconfiguration, not a choice.
+    slot_model_options: list[str] | None = None,
     agent_doc: dict | None = None,
     host_doc: dict | None = None,
 ) -> list[dict[str, Any]]:
@@ -1400,7 +1484,9 @@ def build_schema(
             "description": f.description,
             "restart": f.restart,
             "options": (
-                (model_options or [])
+                (slot_model_options or model_options or [])
+                if f.options_source == "slot_models"
+                else (model_options or [])
                 if f.options_source == "models"
                 else (model_options or []) + acp_opts
                 if f.options_source == "models+acp"
@@ -1478,7 +1564,9 @@ def build_schema(
             entry["depends_on"] = {**dep, "key": dk}
         # `plugin_id` tags the group with its owning plugin so the console can fold
         # the config into that plugin's row in the Plugins surface (ADR 0059, bd-23a.3).
-        groups.setdefault(group, {"section": group, "fields": [], "plugin_id": getattr(sch, "plugin_id", None)})["fields"].append(entry)
+        groups.setdefault(group, {"section": group, "fields": [], "plugin_id": getattr(sch, "plugin_id", None)})[
+            "fields"
+        ].append(entry)
         # A plugin that declares `test: true` (ADR 0029) gets a generic console
         # "Test connection" button posting the group's fields to its test route.
         if getattr(sch, "test", False):
@@ -1503,9 +1591,7 @@ def build_schema(
     return out
 
 
-def validate_flat(
-    updates: dict[str, Any], hidden: list[str] | None = None
-) -> tuple[bool, str | None]:
+def validate_flat(updates: dict[str, Any], hidden: list[str] | None = None) -> tuple[bool, str | None]:
     """Light per-field validation against the registry before persisting.
 
     ``hidden`` is the live ``settings.hidden`` list (#2172): a hidden key is refused
