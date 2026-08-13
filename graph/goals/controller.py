@@ -136,6 +136,11 @@ class GoalController:
                 "verifier with `contains`. (Shell/eval and absolute-path verifiers are "
                 "operator-only.)"
             )
+        if not trusted and (spec or {}).get("type") == "data":
+            # Persist the scope with the verifier: evaluation happens after the request's
+            # trust signal is gone. Direct trusted/operator specs keep the legacy CWD-relative
+            # default unless they explicitly opt in (the console forms do).
+            spec = {**spec, "workspace_relative": True}
         state = GoalState(
             session_id=session_id,
             condition=condition,
@@ -357,7 +362,14 @@ class GoalController:
                 "boundaries": _coerce_str_list(data.get("boundaries")),
                 "stop_when": data.get("stop_when") or "",
             }
-            return (verifier, condition, data.get("max_iterations"), data.get("no_progress_limit"), fresh_context, contract)
+            return (
+                verifier,
+                condition,
+                data.get("max_iterations"),
+                data.get("no_progress_limit"),
+                fresh_context,
+                contract,
+            )
         # plain text → fuzzy goal judged by the llm verifier
         return ({"type": "llm"}, rest, None, None, False, {})
 

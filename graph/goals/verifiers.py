@@ -235,27 +235,29 @@ def is_safe_workspace_relative_data_path(value: object) -> bool:
     return ".." not in posix.parts and ".." not in windows.parts
 
 
-def _resolve_data_path(value: object) -> Path:
-    """Resolve UI-friendly relative paths under the managed workspace.
+def _resolve_data_path(value: object, *, workspace_relative: bool = False) -> Path:
+    """Resolve a data path without changing the legacy operator default.
 
-    Native absolute paths retain the trusted operator contract.  Relative paths
-    use the same per-instance workspace root as the default structured filesystem
-    tools, and resolution follows symlinks before enforcing the fence.
+    Direct trusted specs remain CWD-relative unless they explicitly opt into the
+    managed workspace.  The Goal/Watch forms and accepted untrusted chat specs set
+    that opt-in; their fence delegates to the filesystem toolset's canonical
+    ``ProjectRegistry.resolve`` chokepoint.
     """
     raw = str(value or "").strip()
-    candidate = Path(raw).expanduser()
-    if candidate.is_absolute():
+    try:
+        candidate = Path(raw).expanduser()
+    except RuntimeError as exc:
+        raise ValueError(f"cannot expand user path: {exc}") from exc
+    if candidate.is_absolute() or not workspace_relative:
         return candidate
     if not is_safe_workspace_relative_data_path(raw):
         raise ValueError("path must be relative to the managed workspace and may not escape it")
 
     from infra.paths import workspace_dir
+    from tools.fs_tools import Project, ProjectRegistry
 
-    workspace = workspace_dir().resolve()
-    target = (workspace / candidate).resolve()
-    if target != workspace and workspace not in target.parents:
-        raise ValueError("path escapes the managed workspace")
-    return target
+    registry = ProjectRegistry([Project(name="workspace", root=workspace_dir().resolve())])
+    return registry.resolve("workspace", raw)
 
 
 async def _verify_data(spec: dict, ctx: VerifyContext) -> VerifyResult:
@@ -263,7 +265,7 @@ async def _verify_data(spec: dict, ctx: VerifyContext) -> VerifyResult:
     if not path:
         return VerifyResult(False, "data verifier missing 'path'", "")
     try:
-        resolved = _resolve_data_path(path)
+        resolved = _resolve_data_path(path, workspace_relative=bool(spec.get("workspace_relative")))
         with resolved.open(encoding="utf-8") as fh:
             text = fh.read()
     except ValueError as exc:

@@ -51,13 +51,38 @@ async def test_data_contains(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_data_relative_path_keeps_legacy_cwd_scope(tmp_path, monkeypatch):
+    (tmp_path / "out.txt").write_text("status: DONE\n")
+    monkeypatch.chdir(tmp_path)
+
+    res = await run_verifier({"type": "data", "path": "out.txt", "contains": "DONE"}, VerifyContext())
+
+    assert res.met is True
+
+
+@pytest.mark.asyncio
+async def test_data_expanduser_failure_is_not_met():
+    res = await run_verifier(
+        {"type": "data", "path": "~protoagent-user-that-does-not-exist/status.json", "contains": "DONE"},
+        VerifyContext(),
+    )
+
+    assert res.met is False
+    assert "cannot expand user path" in res.reason
+    assert res.evidence == ""
+
+
+@pytest.mark.asyncio
 async def test_data_contains_relative_to_managed_workspace(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "out.txt").write_text("status: DONE\n")
     monkeypatch.setattr("infra.paths.workspace_dir", lambda create=False: workspace)
 
-    res = await run_verifier({"type": "data", "path": "out.txt", "contains": "DONE"}, VerifyContext())
+    res = await run_verifier(
+        {"type": "data", "path": "out.txt", "contains": "DONE", "workspace_relative": True},
+        VerifyContext(),
+    )
 
     assert res.met is True
 
@@ -69,7 +94,10 @@ async def test_data_relative_path_cannot_escape_managed_workspace(tmp_path, monk
     (tmp_path / "outside.txt").write_text("secret marker\n")
     monkeypatch.setattr("infra.paths.workspace_dir", lambda create=False: workspace)
 
-    res = await run_verifier({"type": "data", "path": "../outside.txt", "contains": "secret marker"}, VerifyContext())
+    res = await run_verifier(
+        {"type": "data", "path": "../outside.txt", "contains": "secret marker", "workspace_relative": True},
+        VerifyContext(),
+    )
 
     assert res.met is False
     assert "may not escape" in res.reason
@@ -88,12 +116,17 @@ async def test_data_relative_symlink_cannot_escape_managed_workspace(tmp_path, m
     monkeypatch.setattr("infra.paths.workspace_dir", lambda create=False: workspace)
 
     res = await run_verifier(
-        {"type": "data", "path": "outside-link/outside.txt", "contains": "secret marker"},
+        {
+            "type": "data",
+            "path": "outside-link/outside.txt",
+            "contains": "secret marker",
+            "workspace_relative": True,
+        },
         VerifyContext(),
     )
 
     assert res.met is False
-    assert "escapes the managed workspace" in res.reason
+    assert "escapes project 'workspace'" in res.reason
     assert res.evidence == ""
 
 
