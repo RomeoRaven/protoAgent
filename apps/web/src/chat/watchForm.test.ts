@@ -87,9 +87,14 @@ describe("buildWatchCreateBody", () => {
       type: "data",
       path: "/tmp/x",
       contains: "ok",
+      workspace_relative: true,
     });
     // A blank `contains` means "just require the file" — the key is omitted, not sent empty.
-    expect(at({ verifier: "data", verify_data_path: "/tmp/x" })).toEqual({ type: "data", path: "/tmp/x" });
+    expect(at({ verifier: "data", verify_data_path: "/tmp/x" })).toEqual({
+      type: "data",
+      path: "/tmp/x",
+      workspace_relative: true,
+    });
   });
 
   it("splits a ci ref into pr vs branch, tolerating a leading #", () => {

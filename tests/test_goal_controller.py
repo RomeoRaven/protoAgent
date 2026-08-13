@@ -164,6 +164,7 @@ async def test_untrusted_chat_refuses_shell_and_eval_verifiers(tmp_path):
         '/goal {"condition": "x", "verifier": {"type": "test", "command": "pytest"}}',
         '/goal {"condition": "x", "verifier": {"type": "ci", "pr": 1}}',
         '/goal {"condition": "x", "verifier": {"type": "data", "path": "/x", "expr": "1"}}',
+        '/goal {"condition": "x", "verifier": {"type": "data", "path": "/etc/passwd", "contains": "root"}}',
     ]
     for msg in dangerous:
         reply = await c.parse_control(msg, "s", trusted=False)
@@ -177,11 +178,14 @@ async def test_untrusted_chat_allows_declarative_verifiers(tmp_path):
     ok = [
         "/goal make the build green",  # fuzzy → llm
         '/goal {"condition": "x", "verifier": {"type": "plugin", "check": "p:v"}}',
-        '/goal {"condition": "x", "verifier": {"type": "data", "path": "/x", "contains": "ok"}}',
+        '/goal {"condition": "x", "verifier": {"type": "data", "path": "status.txt", "contains": "ok"}}',
     ]
     for msg in ok:
         reply = await c.parse_control(msg, "s", trusted=False)
         assert "Goal set" in reply, msg
+        state = c.active_goal("s")
+        if state.verifier.get("type") == "data":
+            assert state.verifier["workspace_relative"] is True
         c._store.clear("s")
 
 
@@ -190,9 +194,7 @@ async def test_trusted_default_keeps_full_verifier_access(tmp_path):
     # The operator/programmatic path (trusted=True, the default) is unchanged — Phase 2
     # threads a real trust signal into the chat call sites.
     c = _ctrl(tmp_path)
-    reply = await c.parse_control(
-        '/goal {"condition": "x", "verifier": {"type": "command", "command": "exit 0"}}', "s"
-    )
+    reply = await c.parse_control('/goal {"condition": "x", "verifier": {"type": "command", "command": "exit 0"}}', "s")
     assert "Goal set" in reply
     assert c.active_goal("s").verifier["type"] == "command"
 
@@ -202,7 +204,12 @@ def test_chat_verifier_allow_list():
     assert allowed({"type": "plugin", "check": "p:v"})
     assert allowed({"type": "llm"})
     assert allowed({})  # no type → defaults to llm
-    assert allowed({"type": "data", "contains": "ok"})
+    assert allowed({"type": "data", "path": "status.json", "contains": "ok"})
+    assert not allowed({"type": "data", "contains": "ok"})  # path required
+    assert not allowed({"type": "data", "path": "/etc/passwd", "contains": "ok"})
+    assert not allowed({"type": "data", "path": r"C:\Windows\win.ini", "contains": "ok"})
+    assert not allowed({"type": "data", "path": "../outside.txt", "contains": "ok"})
+    assert not allowed({"type": "data", "path": r"..\outside.txt", "contains": "ok"})
     assert not allowed({"type": "data", "expr": "1"})
     assert not allowed({"type": "data", "contains": "ok", "expr": "1"})  # expr present → refused
     assert not allowed({"type": "command", "command": "x"})
@@ -261,8 +268,11 @@ def test_set_goal_operator_coerces_string_contract_lists(tmp_path):
     # A bare string sent for a list field is coerced to a 1-element list.
     c = _ctrl(tmp_path)
     c.set_goal_operator(
-        "s", "ship it", {"type": "command", "command": "true"},
-        constraints="do not touch the schema", boundaries="tools/",
+        "s",
+        "ship it",
+        {"type": "command", "command": "true"},
+        constraints="do not touch the schema",
+        boundaries="tools/",
     )
     state = c.active_goal("s")
     assert state.constraints == ["do not touch the schema"]
@@ -272,8 +282,12 @@ def test_set_goal_operator_coerces_string_contract_lists(tmp_path):
 def test_set_goal_safe_stores_contract(tmp_path):
     c = _ctrl(tmp_path)
     ok, _ = c.set_goal_safe(
-        "s", "reach it", {"type": "plugin", "check": "p:v"},
-        outcome="target hit", constraints=["stay under budget"], stop_when="the market halts",
+        "s",
+        "reach it",
+        {"type": "plugin", "check": "p:v"},
+        outcome="target hit",
+        constraints=["stay under budget"],
+        stop_when="the market halts",
     )
     assert ok
     state = c.active_goal("s")

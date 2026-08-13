@@ -24,7 +24,12 @@ from dataclasses import dataclass
 
 from graph.goals.store import GoalStore
 from graph.goals.types import GoalState
-from graph.goals.verifiers import VerifierInvoker, VerifyContext, run_verifier
+from graph.goals.verifiers import (
+    VerifierInvoker,
+    VerifyContext,
+    is_safe_workspace_relative_data_path,
+    run_verifier,
+)
 
 log = logging.getLogger(__name__)
 
@@ -121,14 +126,21 @@ class GoalController:
         # operator bearer today, so we can't tell them apart. Refuse the code-exec verifiers
         # from chat for EVERYONE: command/test/ci shell out on the host, and a `data` `expr`
         # is a restricted-eval sink + arbitrary file read (ADR 0028 D3). Only the declarative
-        # types pass — `plugin`, `llm` (fuzzy), and `data` with a plain `contains`.
+        # types pass — `plugin`, `llm` (fuzzy), and `data` with a plain `contains`
+        # constrained to a safe path inside the managed workspace.
         if not trusted and not self._chat_verifier_allowed(spec):
             return (
-                "For safety, a `command`, `test`, `ci`, or `data`+`expr` verifier can't be "
-                "set from a chat message. Use a fuzzy goal (`/goal <text>`), a `plugin` "
-                "verifier, or a `data` verifier with `contains`. (Shell/eval verifiers are "
+                "For safety, a `command`, `test`, `ci`, `data`+`expr`, or `data` verifier "
+                "outside the managed workspace can't be set from a chat message. Use a fuzzy "
+                "goal (`/goal <text>`), a `plugin` verifier, or a workspace-relative `data` "
+                "verifier with `contains`. (Shell/eval and absolute-path verifiers are "
                 "operator-only.)"
             )
+        if not trusted and (spec or {}).get("type") == "data":
+            # Persist the scope with the verifier: evaluation happens after the request's
+            # trust signal is gone. Direct trusted/operator specs keep the legacy CWD-relative
+            # default unless they explicitly opt in (the console forms do).
+            spec = {**spec, "workspace_relative": True}
         state = GoalState(
             session_id=session_id,
             condition=condition,
@@ -198,7 +210,11 @@ class GoalController:
         if vtype in ("plugin", "llm"):
             return True
         if vtype == "data":
-            return "expr" not in verifier and "contains" in verifier
+            return (
+                "expr" not in verifier
+                and "contains" in verifier
+                and is_safe_workspace_relative_data_path(verifier.get("path"))
+            )
         return False
 
     # Verifier types safe to set PROGRAMMATICALLY (agent / plugin / REST). Only
@@ -346,7 +362,14 @@ class GoalController:
                 "boundaries": _coerce_str_list(data.get("boundaries")),
                 "stop_when": data.get("stop_when") or "",
             }
-            return (verifier, condition, data.get("max_iterations"), data.get("no_progress_limit"), fresh_context, contract)
+            return (
+                verifier,
+                condition,
+                data.get("max_iterations"),
+                data.get("no_progress_limit"),
+                fresh_context,
+                contract,
+            )
         # plain text → fuzzy goal judged by the llm verifier
         return ({"type": "llm"}, rest, None, None, False, {})
 

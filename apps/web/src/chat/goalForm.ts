@@ -200,7 +200,10 @@ export function buildVerifier(type: unknown, detail: unknown): Record<string, un
     const sep = d.indexOf("::");
     const path = (sep >= 0 ? d.slice(0, sep) : d).trim();
     const contains = sep >= 0 ? d.slice(sep + 2).trim() : "";
-    const spec: Record<string, unknown> = { type: "data" };
+    // Form-authored relative paths intentionally share the managed workspace used by
+    // structured read_file/write_file. Direct operator API specs omit this flag and retain
+    // the legacy server-CWD-relative contract.
+    const spec: Record<string, unknown> = { type: "data", workspace_relative: true };
     if (path) spec.path = path;
     if (contains) spec.contains = contains;
     return spec;
