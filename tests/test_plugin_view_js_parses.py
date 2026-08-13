@@ -68,16 +68,70 @@ def test_sweep_found_the_docs_view():
     assert any("plugins/docs" in b[0] for b in _BLOCKS), _BLOCKS
 
 
+def _run_node_check(src: str, attrs: str, body: str) -> subprocess.CompletedProcess[bytes]:
+    """Parse one script, tolerating one transient Node process stall."""
+    input_type = "module" if "module" in attrs else "commonjs"
+    command = [NODE, "--input-type", input_type, "--check"]
+    for attempt in range(2):
+        try:
+            return subprocess.run(
+                command,
+                input=body.encode("utf-8"),
+                capture_output=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if attempt == 1:
+                raise AssertionError(f"{src}: node --check timed out twice (30 seconds per attempt)") from exc
+    raise AssertionError("unreachable")
+
+
+def test_node_check_does_not_retry_syntax_failure(monkeypatch):
+    calls = 0
+
+    def fail_syntax(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(args[0], 1, b"", b"SyntaxError")
+
+    monkeypatch.setattr(subprocess, "run", fail_syntax)
+
+    proc = _run_node_check("plugins/example.py:1#0", "", "not valid")
+
+    assert proc.returncode == 1
+    assert calls == 1
+
+
+def test_node_check_retries_one_timeout(monkeypatch):
+    calls = 0
+
+    def timeout_then_pass(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+        return subprocess.CompletedProcess(args[0], 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", timeout_then_pass)
+
+    proc = _run_node_check("plugins/example.py:1#0", "", "const ok = true;")
+
+    assert proc.returncode == 0
+    assert calls == 2
+
+
+def test_node_check_fails_after_two_timeouts(monkeypatch):
+    def always_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", always_timeout)
+
+    with pytest.raises(AssertionError, match=r"plugins/example\.py:1#0.*timed out twice"):
+        _run_node_check("plugins/example.py:1#0", "", "const stalled = true;")
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 @pytest.mark.parametrize(("src", "attrs", "body"), _BLOCKS, ids=[b[0] for b in _BLOCKS])
 def test_inline_view_js_parses(src: str, attrs: str, body: str):
-    input_type = "module" if "module" in attrs else "commonjs"
-    proc = subprocess.run(
-        [NODE, "--input-type", input_type, "--check"],
-        input=body.encode("utf-8"),
-        capture_output=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, (
-        f"{src}: the browser would refuse this script —\n{proc.stderr.decode()[:800]}"
-    )
+    proc = _run_node_check(src, attrs, body)
+    assert proc.returncode == 0, f"{src}: the browser would refuse this script —\n{proc.stderr.decode()[:800]}"
