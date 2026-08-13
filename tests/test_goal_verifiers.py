@@ -56,12 +56,21 @@ async def test_data_relative_path_keeps_legacy_cwd_scope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     res = await run_verifier({"type": "data", "path": "out.txt", "contains": "DONE"}, VerifyContext())
+    explicit_false = await run_verifier(
+        {"type": "data", "path": "out.txt", "contains": "DONE", "workspace_relative": False}, VerifyContext()
+    )
 
     assert res.met is True
+    assert explicit_false.met is True
 
 
 @pytest.mark.asyncio
-async def test_data_expanduser_failure_is_not_met():
+async def test_data_expanduser_failure_is_not_met(monkeypatch):
+    def fail_expanduser(_path):
+        raise RuntimeError("home directory is unavailable")
+
+    monkeypatch.setattr("graph.goals.verifiers.Path.expanduser", fail_expanduser)
+
     res = await run_verifier(
         {"type": "data", "path": "~protoagent-user-that-does-not-exist/status.json", "contains": "DONE"},
         VerifyContext(),
@@ -69,6 +78,24 @@ async def test_data_expanduser_failure_is_not_met():
 
     assert res.met is False
     assert "cannot expand user path" in res.reason
+    assert res.evidence == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_relative", ["false", "0", 0, 1, None])
+async def test_data_workspace_relative_requires_boolean(workspace_relative):
+    res = await run_verifier(
+        {
+            "type": "data",
+            "path": "out.txt",
+            "contains": "DONE",
+            "workspace_relative": workspace_relative,
+        },
+        VerifyContext(),
+    )
+
+    assert res.met is False
+    assert res.reason == "data verifier 'workspace_relative' must be a boolean"
     assert res.evidence == ""
 
 

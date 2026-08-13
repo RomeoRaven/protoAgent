@@ -264,8 +264,11 @@ async def _verify_data(spec: dict, ctx: VerifyContext) -> VerifyResult:
     path = spec.get("path")
     if not path:
         return VerifyResult(False, "data verifier missing 'path'", "")
+    workspace_relative = spec.get("workspace_relative", False)
+    if not isinstance(workspace_relative, bool):
+        return VerifyResult(False, "data verifier 'workspace_relative' must be a boolean", "")
     try:
-        resolved = _resolve_data_path(path, workspace_relative=bool(spec.get("workspace_relative")))
+        resolved = _resolve_data_path(path, workspace_relative=workspace_relative)
         with resolved.open(encoding="utf-8") as fh:
             text = fh.read()
     except ValueError as exc:
