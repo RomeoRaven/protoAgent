@@ -922,6 +922,44 @@ async def test_terminal_hook_fires_turn_outcome_on_completion():
 
 
 @pytest.mark.asyncio
+async def test_terminal_hook_receives_peer_provenance_from_send_message_metadata():
+    """The real SDK request path preserves the delegate adapter's provenance, not just
+    an isolated helper call: request-level metadata reaches the terminal outcome with
+    the original task/context identity and input stimulus."""
+    outcomes: list[TurnOutcome] = []
+    set_terminal_hook(outcomes.append)
+
+    async def stream(text, ctx, *, resume=False, caller_trace=None, **kwargs):
+        yield ("done", "peer answer")
+
+    app = _build_app(stream)
+    body = {
+        "jsonrpc": "2.0",
+        "id": "peer-rpc",
+        "method": "SendMessage",
+        "params": {
+            "metadata": {"origin": "a2a", "trigger": "delegate_to"},
+            "message": {
+                "messageId": "peer-message",
+                "role": "ROLE_USER",
+                "parts": [{"text": "peer request"}],
+            },
+        },
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", timeout=10) as c:
+        task = (await c.post("/a2a", headers=A2A_HEADERS, json=body)).json()["result"]["task"]
+        await _poll_terminal(c, task["id"])
+
+    assert len(outcomes) == 1
+    o = outcomes[0]
+    assert o.origin == "a2a"
+    assert o.trigger == "delegate_to"
+    assert o.stimulus == "peer request"
+    assert o.task_id == task["id"]
+    assert o.context_id == task["contextId"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_hook_fires_failed_outcome_on_error():
     outcomes: list[TurnOutcome] = []
     set_terminal_hook(outcomes.append)

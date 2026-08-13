@@ -62,6 +62,99 @@ def test_terminal_hook_ignores_non_activity_context(tmp_path, monkeypatch):
     assert log.recent() == []
 
 
+def test_terminal_hook_logs_peer_turn_in_its_real_a2a_context(tmp_path, monkeypatch):
+    log = ActivityLog(str(tmp_path / "a.db"))
+    monkeypatch.setattr(server.STATE, "activity_log", log)
+    published: list = []
+    monkeypatch.setattr(server._event_bus, "publish", lambda ev, data: published.append((ev, data)))
+
+    server._a2a_terminal(
+        TurnOutcome(
+            task_id="peer-task-1",
+            context_id="peer-context-1",
+            state="completed",
+            text="Peer work complete.",
+            origin="a2a",
+            trigger="delegate_to",
+            stimulus="Check the deployment.",
+        )
+    )
+
+    row = log.recent()[0]
+    assert row["context_id"] == "peer-context-1"
+    assert row["origin"] == "a2a"
+    assert row["trigger"] == "delegate_to"
+    assert row["state"] == "completed"
+    assert row["task_id"] == "peer-task-1"
+    assert row["stimulus"] == "Check the deployment."
+    assert row["text"] == "Peer work complete."
+    activity = next((d for ev, d in published if ev == "activity.message"), None)
+    assert activity is not None
+    assert activity["context_id"] == "peer-context-1"
+    assert activity["state"] == "completed"
+    assert activity["task_id"] == "peer-task-1"
+    assert not any(ev == "chat.resumed" for ev, _ in published)
+
+
+def test_terminal_hook_surfaces_peer_failure_without_narration(tmp_path, monkeypatch):
+    log = ActivityLog(str(tmp_path / "a.db"))
+    monkeypatch.setattr(server.STATE, "activity_log", log)
+    published: list = []
+    monkeypatch.setattr(server._event_bus, "publish", lambda ev, data: published.append((ev, data)))
+
+    server._a2a_terminal(
+        TurnOutcome(
+            task_id="peer-task-failed",
+            context_id="peer-context-failed",
+            state="failed",
+            text="",
+            origin="a2a",
+            trigger="delegate_to",
+            stimulus="Run the canary.",
+            error="model gateway unavailable",
+        )
+    )
+
+    row = log.recent()[0]
+    assert row["state"] == "failed"
+    assert row["task_id"] == "peer-task-failed"
+    assert row["text"] == "**A2A turn failed:** model gateway unavailable"
+    activity = next((d for ev, d in published if ev == "activity.message"), None)
+    assert activity is not None
+    assert activity["state"] == "failed"
+    assert activity["error"] == "model gateway unavailable"
+
+
+def test_terminal_hook_appends_peer_failure_after_partial_narration(tmp_path, monkeypatch):
+    """Partial text must not make a failed peer turn look successfully completed."""
+    log = ActivityLog(str(tmp_path / "a.db"))
+    monkeypatch.setattr(server.STATE, "activity_log", log)
+    published: list = []
+    monkeypatch.setattr(server._event_bus, "publish", lambda ev, data: published.append((ev, data)))
+
+    server._a2a_terminal(
+        TurnOutcome(
+            task_id="peer-task-partial",
+            context_id="peer-context-partial",
+            state="failed",
+            text="I checked the first deployment target.",
+            origin="a2a",
+            trigger="delegate_to",
+            stimulus="Check every deployment target.",
+            error="second target timed out",
+        )
+    )
+
+    expected = "I checked the first deployment target.\n\n**A2A turn failed:** second target timed out"
+    row = log.recent()[0]
+    assert row["state"] == "failed"
+    assert row["text"] == expected
+    activity = next((d for ev, d in published if ev == "activity.message"), None)
+    assert activity is not None
+    assert activity["text"] == expected
+    assert activity["error"] == "second target timed out"
+
+
 def test_terminal_hook_surfaces_scheduler_resume_into_chat(tmp_path, monkeypatch):
     # bd-k02: a wait/scheduled resume that lands in a CHAT session (not Activity)
     # is pushed as chat.resumed so an open chat tab can show it live.

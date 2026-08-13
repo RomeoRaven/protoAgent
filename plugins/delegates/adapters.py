@@ -474,6 +474,12 @@ class A2aAdapter(Adapter):
 
         from tools.a2a_parse import _extract_text, _is_terminal
 
+        # Mark protoAgent-originated peer delegation independently of tracing. The
+        # receiver uses this only as operator-visible provenance; authorization is
+        # still decided by the authenticated transport before the executor runs.
+        # Stamp both levels because older SDK peers may preserve only one.
+        provenance = {"origin": "a2a", "trigger": "delegate_to"}
+
         # Fleet tracing: when this dispatch runs inside a traced turn, hand the
         # peer our Langfuse trace context as ``a2a.trace`` metadata — the shape
         # a2a_impl/executor._extract_caller_trace reads on the receiving side
@@ -481,12 +487,13 @@ class A2aAdapter(Adapter):
         # caller_trace_id/caller_span_id → the peer JOINS our trace). Attached at
         # BOTH request level (preferred by the receiver's metadata merge) and
         # message level (fallback for peers whose SDK drops request metadata).
-        # Absent when tracing is off — the request is byte-identical to before.
         send_params: dict = {
+            "metadata": dict(provenance),
             "message": {
                 "role": "ROLE_USER",
                 "parts": [{"text": query}],
                 "messageId": str(uuid.uuid4()),
+                "metadata": dict(provenance),
             }
         }
         try:
@@ -499,8 +506,8 @@ class A2aAdapter(Adapter):
             wire = {"traceId": tctx["trace_id"]}
             if tctx.get("span_id"):
                 wire["spanId"] = tctx["span_id"]
-            send_params["metadata"] = {"a2a.trace": wire}
-            send_params["message"]["metadata"] = {"a2a.trace": wire}
+            send_params["metadata"]["a2a.trace"] = wire
+            send_params["message"]["metadata"]["a2a.trace"] = wire
         # A2A 1.0 (a2a-sdk >=1.0): JSON-RPC `SendMessage` / `GetTask`, the ROLE_USER
         # enum, and a `result.task` envelope. (`message/send` + lowercase `user` is
         # the v0.3 legacy dialect, which 1.0 servers reject with -32601.)
