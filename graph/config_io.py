@@ -318,6 +318,64 @@ def _migrate_legacy_stores(p) -> bool:
     return bool(moved)
 
 
+_MAX_ITERATIONS_MIGRATION_MARKER = ".max-iterations-50-migrated"
+
+
+def _migrate_dead_max_iterations_default() -> bool:
+    """One-time upgrade fix (#2679 QA review). ``model.max_iterations`` used to be
+    defined in the config schema but never consumed anywhere, so every existing
+    install's live config sat at the old placeholder default of 50 and it did
+    nothing. Now that the field drives the real LangGraph ``recursion_limit``, an
+    untouched live config would silently cut an existing install's effective
+    per-turn tool-call budget from the previously-hardcoded ~200 steps (≈25 tool
+    calls) to 50 (≈6) the moment it upgrades — the opposite of what this fix
+    intends. A fresh install never hits this (``LangGraphConfig``'s dataclass
+    default is already 2000).
+
+    Runs at most once per instance, gated by a marker file next to the live
+    config — so an operator who *later* deliberately sets ``max_iterations: 50``
+    on purpose keeps that choice; this only corrects the untouched-template-
+    leftover case, and only on the first boot after upgrading. Rewrites the live
+    YAML's ``model.max_iterations`` to the new default (2000) ONLY when it's
+    still exactly the dead field's old value; any other stored value (including
+    a hand-picked cap) is left alone. Best-effort — a failure here must never
+    block boot.
+    """
+    live = config_yaml_path()
+    if not live.exists():
+        return False
+    marker = live.parent / _MAX_ITERATIONS_MIGRATION_MARKER
+    if marker.exists():
+        return False
+    try:
+        from infra.paths import read_text_utf8
+
+        text = read_text_utf8(live)
+        if _HAS_RUAMEL:
+            doc = _ruamel.load(text) or _ruamel.load("{}\n")
+        else:
+            import yaml
+
+            doc = yaml.safe_load(text) or {}
+        model = doc.get("model") if hasattr(doc, "get") else None
+        changed = isinstance(model, dict) and model.get("max_iterations") == 50
+        if changed:
+            model["max_iterations"] = 2000
+            save_yaml_doc(doc, live)
+            log.warning(
+                "[config] migrated model.max_iterations 50 -> 2000 in %s (one-time; "
+                "the field was previously unused, so the old value was a template "
+                "leftover, not an operator choice — set it explicitly to override)",
+                live,
+            )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+        return changed
+    except Exception:  # noqa: BLE001 — never block boot over a migration
+        log.exception("[config] max_iterations migration failed for %s (non-fatal)", live)
+        return False
+
+
 def ensure_live_config() -> bool:
     """Seed the live config on first run. Returns True only when it created the file.
 
@@ -332,14 +390,19 @@ def ensure_live_config() -> bool:
       would then freeze + shadow on later image updates).
     - Otherwise copy the bundled ``.example`` template (``config_example_path()``).
 
-    Idempotent — does nothing once the live file exists, so edits are never clobbered.
-    That is the right contract for operator-owned config but leaves the seed's
-    *declarative* half stranded on an image roll; ``apply_seed_merge`` (opt-in, #2071)
-    is the boot-time companion that re-applies it without clobbering operator edits.
+    Idempotent for the SEED step — does nothing once the live file exists, so
+    operator edits are never clobbered. That is the right contract for operator-owned
+    config but leaves the seed's *declarative* half stranded on an image roll;
+    ``apply_seed_merge`` (opt-in, #2071) is the boot-time companion that re-applies it
+    without clobbering operator edits. This function also runs
+    ``_migrate_dead_max_iterations_default`` unconditionally before the seed-exists
+    check — that's a narrow, marker-gated, one-shot field correction, not a
+    reopening of the general no-clobber contract.
     """
     # Bridge an in-place upgrade first: if an old-layout config exists, copy it into the
     # new instance_root/config so the seed-from-.example branch below never strands it.
     migrate_legacy_layout()
+    _migrate_dead_max_iterations_default()
     live = config_yaml_path()
     if live.exists():
         return False
@@ -970,7 +1033,7 @@ def validate_config_dict(updates: dict[str, Any]) -> tuple[bool, str]:
         max_tokens = int(model.get("max_tokens", 4096))
         if max_tokens < 1:
             return False, f"max_tokens must be >= 1, got {max_tokens}"
-        max_iter = int(model.get("max_iterations", 50))
+        max_iter = int(model.get("max_iterations", 2000))
         if max_iter < 1:
             return False, f"max_iterations must be >= 1, got {max_iter}"
 
