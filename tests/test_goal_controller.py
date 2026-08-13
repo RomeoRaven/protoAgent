@@ -177,7 +177,7 @@ async def test_untrusted_chat_allows_declarative_verifiers(tmp_path):
     ok = [
         "/goal make the build green",  # fuzzy → llm
         '/goal {"condition": "x", "verifier": {"type": "plugin", "check": "p:v"}}',
-        '/goal {"condition": "x", "verifier": {"type": "data", "path": "/x", "contains": "ok"}}',
+        '/goal {"condition": "x", "verifier": {"type": "data", "path": "status.txt", "contains": "ok"}}',
     ]
     for msg in ok:
         reply = await c.parse_control(msg, "s", trusted=False)
@@ -202,7 +202,12 @@ def test_chat_verifier_allow_list():
     assert allowed({"type": "plugin", "check": "p:v"})
     assert allowed({"type": "llm"})
     assert allowed({})  # no type → defaults to llm
-    assert allowed({"type": "data", "contains": "ok"})
+    assert allowed({"type": "data", "path": "status.json", "contains": "ok"})
+    assert not allowed({"type": "data", "contains": "ok"})  # path required
+    assert not allowed({"type": "data", "path": "/etc/passwd", "contains": "ok"})
+    assert not allowed({"type": "data", "path": r"C:\Windows\win.ini", "contains": "ok"})
+    assert not allowed({"type": "data", "path": "../outside.txt", "contains": "ok"})
+    assert not allowed({"type": "data", "path": r"..\outside.txt", "contains": "ok"})
     assert not allowed({"type": "data", "expr": "1"})
     assert not allowed({"type": "data", "contains": "ok", "expr": "1"})  # expr present → refused
     assert not allowed({"type": "command", "command": "x"})

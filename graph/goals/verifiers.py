@@ -27,6 +27,7 @@ import ast
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from graph.goals.types import VerifyResult
@@ -217,13 +218,56 @@ async def _verify_ci(spec: dict, ctx: VerifyContext) -> VerifyResult:
     return VerifyResult(False, "ci verifier needs 'pr' or 'branch'", "")
 
 
+def is_safe_workspace_relative_data_path(value: object) -> bool:
+    """Whether *value* is a non-escaping relative path on POSIX and Windows.
+
+    Chat-created ``data+contains`` verifiers are untrusted.  Checking both path
+    flavours prevents a Windows absolute path from looking relative on POSIX (or
+    vice versa) when a verifier spec crosses an A2A boundary.
+    """
+    raw = str(value or "").strip()
+    if not raw or raw.startswith("~"):
+        return False
+    posix = PurePosixPath(raw.replace("\\", "/"))
+    windows = PureWindowsPath(raw)
+    if posix.is_absolute() or windows.is_absolute() or windows.drive:
+        return False
+    return ".." not in posix.parts and ".." not in windows.parts
+
+
+def _resolve_data_path(value: object) -> Path:
+    """Resolve UI-friendly relative paths under the managed workspace.
+
+    Native absolute paths retain the trusted operator contract.  Relative paths
+    use the same per-instance workspace root as the default structured filesystem
+    tools, and resolution follows symlinks before enforcing the fence.
+    """
+    raw = str(value or "").strip()
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    if not is_safe_workspace_relative_data_path(raw):
+        raise ValueError("path must be relative to the managed workspace and may not escape it")
+
+    from infra.paths import workspace_dir
+
+    workspace = workspace_dir().resolve()
+    target = (workspace / candidate).resolve()
+    if target != workspace and workspace not in target.parents:
+        raise ValueError("path escapes the managed workspace")
+    return target
+
+
 async def _verify_data(spec: dict, ctx: VerifyContext) -> VerifyResult:
     path = spec.get("path")
     if not path:
         return VerifyResult(False, "data verifier missing 'path'", "")
     try:
-        with open(path, encoding="utf-8") as fh:
+        resolved = _resolve_data_path(path)
+        with resolved.open(encoding="utf-8") as fh:
             text = fh.read()
+    except ValueError as exc:
+        return VerifyResult(False, f"invalid data verifier path {path}: {exc}", "")
     except OSError as exc:
         return VerifyResult(False, f"cannot read {path}: {exc}", "")
 

@@ -54,7 +54,7 @@ Send a control message through any channel (A2A, the React console chat, OpenAI-
 - **Testable goal** (JSON spec) — from a chat message you can use the *declarative*
   verifiers (`plugin`, or `data` with a `contains` substring):
   ```
-  /goal {"condition": "migration recorded", "verifier": {"type": "data", "path": "/sandbox/state.json", "contains": "migration complete"}}
+  /goal {"condition": "migration recorded", "verifier": {"type": "data", "path": "state.json", "contains": "migration complete"}}
   ```
 
   > **Shell/eval verifiers are operator-only.** `command`, `test`, `ci`, and `data`+`expr`
@@ -141,7 +141,7 @@ Set via `verifier.type` in the JSON spec:
 | `command` | `command`, `cwd?`, `timeout?` | the shell command exits `0` |
 | `test` | same as `command` | exits `0` (the runner's summary line is surfaced in the reason) |
 | `ci` | `pr` **or** `branch` | `gh pr checks <pr>` is all-green, or the latest run on `branch` concluded `success` |
-| `data` | `path` + (`contains` **or** `expr`) | the file contains the substring, or `expr` (evaluated over parsed JSON as `data`) is truthy |
+| `data` | `path` + (`contains` **or** `expr`) | the file contains the substring, or `expr` (evaluated over parsed JSON as `data`) is truthy; relative paths resolve under the managed workspace |
 | `plugin` | `check` (`<plugin-id>:<name>`) + `args?` | the plugin-registered verifier returns met — see [Plugins ▸ Goal & watch verifiers](/guides/plugins#goal-and-watch-verifiers) for `register_goal_verifier` and the `(spec, ctx)` contract (incl. `ctx.invoker`, the polling goal/watch's identity) |
 | `llm` | — (uses `condition`) | a strict evaluator judges the transcript shows the goal demonstrably done (fuzzy fallback) |
 
@@ -166,4 +166,4 @@ See the [`goal` config block](/reference/configuration#goal). Defaults: machiner
 
 `command` / `test` / `ci` verifiers execute on the server host with the agent's privileges. **Setting a goal is an operator action** — only accept goal specs from trusted callers. If you expose `/goal` to untrusted input, restrict it to `data` / `llm` verifiers or gate goal-setting behind auth.
 
-> **`data`-verifier path must sit inside the agent's writable workspace when the goal is agent-completed over untrusted `/goal`.** The agent's `read_file`/`write_file` tools are rooted at its `workspace` project (`/sandbox/workspace/`) and **cannot reach the parent** — `../x` → *"path escapes project 'workspace'"* — and the shell fallback that could write elsewhere is **declined** for an untrusted caller (no operator present to approve it). So a verifier pointed at `/sandbox/report.md` will never flip: the agent writes to `/sandbox/workspace/report.md` and the verifier reads a path it can't produce. Point the `path` at `/sandbox/workspace/…`. (This is by design — the deterministic verifier, not the agent's own "done" self-report, is the sole arbiter, so a mispathed artifact correctly leaves the goal unverified.)
+> **Use a workspace-relative `data`-verifier path when the goal is agent-completed over untrusted `/goal`.** A path such as `report.md` resolves under the same per-instance managed workspace used by the default `read_file`/`write_file` tools. Absolute paths and traversal (`../x`, including Windows-style forms) are refused on the untrusted chat channel. The authenticated operator API retains absolute-path support for intentionally checking files outside that default workspace.
