@@ -5,6 +5,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "desktop-build.yml"
+MARKETING_WORKFLOW = ROOT / ".github" / "workflows" / "marketing-deploy.yml"
 
 
 def test_tagged_desktop_build_refreshes_marketing_after_assets_are_live() -> None:
@@ -23,11 +24,12 @@ def test_tagged_desktop_build_refreshes_marketing_after_assets_are_live() -> Non
         "needs.updater-manifest.result == 'success'"
     )
 
-    assert job["permissions"] == {"actions": "write", "contents": "read"}
+    assert job["permissions"] == {"contents": "read"}
+    assert job["uses"] == "./.github/workflows/marketing-deploy.yml"
+    assert job["secrets"] == "inherit"
+    assert "runs-on" not in job
+    assert "steps" not in job
 
-    dispatch = job["steps"][0]
-    assert dispatch["env"] == {"GH_TOKEN": "${{ github.token }}"}
-    command = dispatch["run"]
-    assert "gh workflow run marketing-deploy.yml" in command
-    assert '--repo "${{ github.repository }}"' in command
-    assert "--ref main" in command
+    marketing = yaml.safe_load(MARKETING_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = marketing.get("on") or marketing.get(True)
+    assert "workflow_call" in triggers
