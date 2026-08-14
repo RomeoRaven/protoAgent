@@ -113,8 +113,13 @@ describe("buildVerifier", () => {
       type: "data",
       path: "out.json",
       contains: "ready",
+      workspace_relative: true,
     });
-    expect(buildVerifier("data", "out.json")).toEqual({ type: "data", path: "out.json" });
+    expect(buildVerifier("data", "out.json")).toEqual({
+      type: "data",
+      path: "out.json",
+      workspace_relative: true,
+    });
   });
 
   it("llm and unknown types collapse to {type:'llm'}", () => {
@@ -192,7 +197,12 @@ describe("buildGoalSetBody", () => {
       verify_data_path: "status.json",
       verify_data_contains: "ok",
     });
-    expect(body?.verifier).toEqual({ type: "data", path: "status.json", contains: "ok" });
+    expect(body?.verifier).toEqual({
+      type: "data",
+      path: "status.json",
+      contains: "ok",
+      workspace_relative: true,
+    });
   });
 
   it("omits empty contract fields (backward-compatible shape)", () => {

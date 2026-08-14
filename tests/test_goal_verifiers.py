@@ -51,6 +51,113 @@ async def test_data_contains(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_data_relative_path_keeps_legacy_cwd_scope(tmp_path, monkeypatch):
+    (tmp_path / "out.txt").write_text("status: DONE\n")
+    monkeypatch.chdir(tmp_path)
+
+    res = await run_verifier({"type": "data", "path": "out.txt", "contains": "DONE"}, VerifyContext())
+    explicit_false = await run_verifier(
+        {"type": "data", "path": "out.txt", "contains": "DONE", "workspace_relative": False}, VerifyContext()
+    )
+
+    assert res.met is True
+    assert explicit_false.met is True
+
+
+@pytest.mark.asyncio
+async def test_data_expanduser_failure_is_not_met(monkeypatch):
+    def fail_expanduser(_path):
+        raise RuntimeError("home directory is unavailable")
+
+    monkeypatch.setattr("graph.goals.verifiers.Path.expanduser", fail_expanduser)
+
+    res = await run_verifier(
+        {"type": "data", "path": "~protoagent-user-that-does-not-exist/status.json", "contains": "DONE"},
+        VerifyContext(),
+    )
+
+    assert res.met is False
+    assert "cannot expand user path" in res.reason
+    assert res.evidence == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_relative", ["false", "0", 0, 1, None])
+async def test_data_workspace_relative_requires_boolean(workspace_relative):
+    res = await run_verifier(
+        {
+            "type": "data",
+            "path": "out.txt",
+            "contains": "DONE",
+            "workspace_relative": workspace_relative,
+        },
+        VerifyContext(),
+    )
+
+    assert res.met is False
+    assert res.reason == "data verifier 'workspace_relative' must be a boolean"
+    assert res.evidence == ""
+
+
+@pytest.mark.asyncio
+async def test_data_contains_relative_to_managed_workspace(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "out.txt").write_text("status: DONE\n")
+    monkeypatch.setattr("infra.paths.workspace_dir", lambda create=False: workspace)
+
+    res = await run_verifier(
+        {"type": "data", "path": "out.txt", "contains": "DONE", "workspace_relative": True},
+        VerifyContext(),
+    )
+
+    assert res.met is True
+
+
+@pytest.mark.asyncio
+async def test_data_relative_path_cannot_escape_managed_workspace(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "outside.txt").write_text("secret marker\n")
+    monkeypatch.setattr("infra.paths.workspace_dir", lambda create=False: workspace)
+
+    res = await run_verifier(
+        {"type": "data", "path": "../outside.txt", "contains": "secret marker", "workspace_relative": True},
+        VerifyContext(),
+    )
+
+    assert res.met is False
+    assert "may not escape" in res.reason
+    assert res.evidence == ""
+
+
+@pytest.mark.asyncio
+async def test_data_relative_symlink_cannot_escape_managed_workspace(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "outside.txt").write_text("secret marker\n")
+    try:
+        (workspace / "outside-link").symlink_to(tmp_path, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    monkeypatch.setattr("infra.paths.workspace_dir", lambda create=False: workspace)
+
+    res = await run_verifier(
+        {
+            "type": "data",
+            "path": "outside-link/outside.txt",
+            "contains": "secret marker",
+            "workspace_relative": True,
+        },
+        VerifyContext(),
+    )
+
+    assert res.met is False
+    assert "escapes project 'workspace'" in res.reason
+    assert res.evidence == ""
+
+
+@pytest.mark.asyncio
 async def test_data_expr(tmp_path):
     f = tmp_path / "out.json"
     f.write_text(json.dumps({"open": 0, "items": [1, 2, 3]}))

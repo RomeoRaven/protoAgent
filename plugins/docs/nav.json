@@ -184,6 +184,10 @@
           "title": "Operator console (React/Tauri)"
         },
         {
+          "path": "guides/windows-desktop.md",
+          "title": "Windows desktop app (install & recovery)"
+        },
+        {
           "path": "guides/python-runtime.md",
           "title": "Managed Python runtime (desktop)"
         },
@@ -788,6 +792,10 @@
         {
           "path": "adr/0098-process-tree-lifecycle.md",
           "title": "0098 — One process-tree lifecycle: `infra/proc` anchors and kills every child tree"
+        },
+        {
+          "path": "adr/0099-chat-bundle-format.md",
+          "title": "0099 — Chat-bundle format v1: a structured, artifact-aware export for the P2 hosted viewer"
         },
         {
           "path": "adr/index.md",

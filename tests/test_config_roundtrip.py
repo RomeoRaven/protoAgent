@@ -174,7 +174,7 @@ FROM_YAML_EXAMPLE_FIELDS = {
     "knowledge_context_max_doc_chars": 12000,
     "knowledge_attach_inline_budget": 8000,
     "llm_max_retries": 2,
-    "max_iterations": 50,
+    "max_iterations": 2000,
     "turn_stall_timeout_seconds": 900.0,
     "max_tokens": 32768,
     "media_public": False,
@@ -311,7 +311,7 @@ def test_config_to_dict_shape_and_redaction():
     # existing sections, never a new top-level one).
     assert _FIELDS_SECTIONS <= set(d.keys())
     # secrets redacted (blank-means-unchanged).
-    assert d["model"]["api_key"] == "" and d["auth"]["token"] == ""
+    assert d["model"]["api_key"] == "" and d["auth"]["token"] == "" and d["auth"]["federation_token"] == ""
     # representative nested values round-trip from the cfg.
     assert d["model"]["name"] == cfg.model_name
     assert d["model"]["temperature"] == cfg.temperature
@@ -375,7 +375,7 @@ def test_round_trip_preserves_emitted_fields(tmp_path):
     for attr in EMITTED_ATTRS:
         original = getattr(cfg, attr)
         round_tripped = getattr(reloaded, attr)
-        if attr in ("api_key", "auth_token"):
+        if attr in ("api_key", "auth_token", "federation_token"):
             # Redacted secrets resolve to "" on both sides (no secrets.yaml).
             assert original == "" and round_tripped == "", attr
             continue

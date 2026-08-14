@@ -55,8 +55,17 @@ def test_reload_threads_surviving_stores_into_the_rebuilt_graph(tmp_path, monkey
         ai,
         "_build_plugins",
         lambda *a, **k: SimpleNamespace(
-            mcp_servers=[], tools=[], tool_plugins={}, skill_dirs=[], meta=[], surfaces=[],
-            chat_commands={}, subagents=[], middleware=[], late_tool_factories=[], routers=[],
+            mcp_servers=[],
+            tools=[],
+            tool_plugins={},
+            skill_dirs=[],
+            meta=[],
+            surfaces=[],
+            chat_commands={},
+            subagents=[],
+            middleware=[],
+            late_tool_factories=[],
+            routers=[],
         ),
     )
 
@@ -135,6 +144,7 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
         import a2a_impl.auth as _a2a_auth
 
         monkeypatch.setattr(_a2a_auth, "set_bearer_token", lambda *a, **k: None)
+        monkeypatch.setattr(_a2a_auth, "set_federation_token", lambda *a, **k: None)
         monkeypatch.setattr(_a2a_auth, "set_public_prefixes", lambda *a, **k: None)
     except ImportError:
         pass
@@ -154,11 +164,25 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
         ai,
         "_build_plugins",
         lambda *a, **k: SimpleNamespace(
-            mcp_servers=[], tools=[], tool_plugins={}, skill_dirs=[], meta=[],
-            chat_commands={}, subagents=[], middleware=[], late_tool_factories=[], routers=[],
-            public_paths=[], goal_verifiers={"demo:brand_new": _new_verifier}, goal_hooks=[],
-            watch_hooks=[], lifecycle_hooks=[], surfaces=[],
-            thread_id_resolver=_new_resolver, a2a_skills=new_a2a_skills, workflow_dirs=new_workflow_dirs,
+            mcp_servers=[],
+            tools=[],
+            tool_plugins={},
+            skill_dirs=[],
+            meta=[],
+            chat_commands={},
+            subagents=[],
+            middleware=[],
+            late_tool_factories=[],
+            routers=[],
+            public_paths=[],
+            goal_verifiers={"demo:brand_new": _new_verifier},
+            goal_hooks=[],
+            watch_hooks=[],
+            lifecycle_hooks=[],
+            surfaces=[],
+            thread_id_resolver=_new_resolver,
+            a2a_skills=new_a2a_skills,
+            workflow_dirs=new_workflow_dirs,
         ),
     )
     # Let the graph rebuild SUCCEED so the commit block (with the registry refresh) runs.
@@ -187,6 +211,134 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
         assert STATE.plugin_workflow_dirs == new_workflow_dirs
     finally:
         gv.set_plugin_verifiers({})
+
+
+def _stub_reload_for_auth_capture(tmp_path, monkeypatch):
+    """Common heavy-builder stubbing so `_reload_langgraph_agent()` reaches its commit
+    block, shared by the two auth-token-reload tests below. Writes a minimal live leaf
+    config and returns `(leaf_path, calls)` — `calls` records every `(kind, token)`
+    set_bearer_token/set_federation_token call the reload makes. Callers that need a
+    secrets.yaml sibling write it under `leaf_path.parent` before calling
+    `ai._reload_langgraph_agent()`."""
+    import graph.config_io as cio
+    import server.agent_init as ai
+    from runtime.state import STATE
+
+    leaf = tmp_path / "langgraph-config.yaml"
+    leaf.write_text("scheduler:\n  enabled: false\n")
+    monkeypatch.setattr(cio, "config_yaml_path", lambda: leaf)
+    monkeypatch.setattr(cio, "ensure_live_config", lambda: None)
+    monkeypatch.setattr(cio, "is_setup_complete", lambda: True)
+
+    monkeypatch.setattr(ai, "_build_knowledge_store", lambda cfg: None)
+    monkeypatch.setattr(ai, "_build_mcp", lambda *a, **k: ([], [], []))
+    monkeypatch.setattr(ai, "_apply_plugin_knowledge_backend", lambda cfg, store, plugins: store)
+    monkeypatch.setattr(ai, "_register_plugin_subagents", lambda subagents: None)
+    monkeypatch.setattr(ai, "_apply_config_subagents", lambda cfg: None)
+    monkeypatch.setattr(ai, "_resolve_plugin_middleware", lambda cfg, mw: [])
+    monkeypatch.setattr(ai, "_build_skills_index", lambda cfg, extra_skill_dirs=None: None)
+    monkeypatch.setattr(ai, "_build_inbox_store", lambda cfg: None)
+    monkeypatch.setattr(ai, "_mount_plugin_routers", lambda routers: None)
+    monkeypatch.setattr(ai, "_reload_plugin_surfaces", lambda cfg: None)
+    monkeypatch.setattr(
+        ai,
+        "_build_plugins",
+        lambda *a, **k: SimpleNamespace(
+            mcp_servers=[],
+            tools=[],
+            tool_plugins={},
+            skill_dirs=[],
+            meta=[],
+            chat_commands={},
+            subagents=[],
+            middleware=[],
+            late_tool_factories=[],
+            routers=[],
+            public_paths=[],
+            goal_verifiers={},
+            goal_hooks=[],
+            watch_hooks=[],
+            lifecycle_hooks=[],
+            surfaces=[],
+            thread_id_resolver=None,
+            a2a_skills=[],
+            workflow_dirs=[],
+        ),
+    )
+    import graph.agent as ga
+
+    monkeypatch.setattr(ga, "create_agent_graph", lambda config, **kwargs: object())
+
+    import security.egress as _egress
+    import security.policy as _policy
+
+    monkeypatch.setattr(_egress, "set_allowed_hosts", lambda *a, **k: None)
+    monkeypatch.setattr(_policy, "set_callback_allowlist", lambda *a, **k: None)
+
+    for name in ("checkpointer", "tasks_store", "background_mgr"):
+        monkeypatch.setattr(STATE, name, object(), raising=False)
+    for name in ("scheduler", "graph", "workflow_registry", "workflow_run"):
+        monkeypatch.setattr(STATE, name, None, raising=False)
+
+    import a2a_impl.auth as _a2a_auth
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(_a2a_auth, "set_bearer_token", lambda t: calls.append(("bearer", t)))
+    monkeypatch.setattr(_a2a_auth, "set_federation_token", lambda t: calls.append(("federation", t)))
+    monkeypatch.setattr(_a2a_auth, "set_public_prefixes", lambda *a, **k: None)
+    return leaf, calls
+
+
+def test_reload_rotates_the_federation_token_live(tmp_path, monkeypatch):
+    """A Settings-drawer save of auth.federation_token must take effect without a
+    restart, same as auth.token already does (#1504). Before this fix, the reload
+    commit block called set_bearer_token but never set_federation_token — a
+    federation-token edit would persist to secrets.yaml but silently keep using
+    whatever token (or none) was active at boot until the next full restart."""
+    import graph.config_io as cio
+    import server.agent_init as ai
+
+    leaf, calls = _stub_reload_for_auth_capture(tmp_path, monkeypatch)
+    secrets_path = leaf.parent / "secrets.yaml"
+    secrets_path.write_text("auth:\n  token: new-operator-token\n  federation_token: new-federation-token\n")
+    monkeypatch.setattr(cio, "secrets_yaml_path", lambda: secrets_path)
+
+    ok, msg = ai._reload_langgraph_agent()
+
+    assert ok is True, msg
+    assert ("bearer", "new-operator-token") in calls
+    # THE regression: federation_token must rotate live exactly like the bearer token.
+    assert ("federation", "new-federation-token") in calls
+
+
+def test_reload_does_not_wipe_an_env_only_federation_token(tmp_path, monkeypatch):
+    """A deployment configured purely via A2A_FEDERATION_TOKEN/A2A_AUTH_TOKEN (no
+    secrets.yaml/YAML value — the documented env-only path, `docs/reference/
+    configuration.md`) must not have its live credential silently cleared by the
+    FIRST Settings save of ANYTHING, auth-related or not. Before this fix, the reload
+    passed the empty config value straight to set_bearer_token/set_federation_token
+    with no env fallback at all.
+
+    auth.configure()'s OWN contract distinguishes None ("unspecified, check env") from
+    an explicit "" ("off, no fallback") — but boot's one real caller (server/__init__.py
+    _main()) always collapses an empty config value to None before calling it
+    (`(... or "") or None`), so boot's OBSERVED behavior is "falls back whenever the
+    config value is empty" even though configure() itself can express the finer
+    distinction for a caller that preserves it. The reload's new `or os.environ.get(...)`
+    fallback matches that observed boot behavior, not configure()'s full three-state
+    contract (#1504 review)."""
+    import server.agent_init as ai
+
+    _, calls = _stub_reload_for_auth_capture(tmp_path, monkeypatch)
+    # No secrets.yaml at all — the config value resolves to "" for both fields.
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "env-operator-token")
+    monkeypatch.setenv("A2A_FEDERATION_TOKEN", "env-federation-token")
+
+    ok, msg = ai._reload_langgraph_agent()
+
+    assert ok is True, msg
+    assert ("bearer", "env-operator-token") in calls
+    assert ("federation", "env-federation-token") in calls
 
 
 def test_pre_setup_reload_does_not_crash_on_the_surface_publish(tmp_path, monkeypatch):
@@ -267,10 +419,25 @@ def test_reload_restamps_a_members_fleet_display_name(tmp_path, monkeypatch):
         ai,
         "_build_plugins",
         lambda *a, **k: SimpleNamespace(
-            mcp_servers=[], tools=[], tool_plugins={}, skill_dirs=[], meta=[],
-            chat_commands={}, subagents=[], middleware=[], late_tool_factories=[], routers=[],
-            public_paths=[], goal_verifiers={}, goal_hooks=[], watch_hooks=[], lifecycle_hooks=[],
-            surfaces=[], thread_id_resolver=None, a2a_skills=[], workflow_dirs=[],
+            mcp_servers=[],
+            tools=[],
+            tool_plugins={},
+            skill_dirs=[],
+            meta=[],
+            chat_commands={},
+            subagents=[],
+            middleware=[],
+            late_tool_factories=[],
+            routers=[],
+            public_paths=[],
+            goal_verifiers={},
+            goal_hooks=[],
+            watch_hooks=[],
+            lifecycle_hooks=[],
+            surfaces=[],
+            thread_id_resolver=None,
+            a2a_skills=[],
+            workflow_dirs=[],
         ),
     )
     import security.egress as _egress
@@ -283,6 +450,17 @@ def test_reload_restamps_a_members_fleet_display_name(tmp_path, monkeypatch):
         monkeypatch.setattr(STATE, name, object(), raising=False)
     for name in ("scheduler", "graph", "workflow_registry", "workflow_run"):
         monkeypatch.setattr(STATE, name, None, raising=False)
+    try:
+        import a2a_impl.auth as _a2a_auth
+
+        # This test's reload reaches the commit block (ok is True) — without these, it runs
+        # the REAL setters and clears whatever bearer/federation token this process actually
+        # has live (module-global state), leaking into whichever test runs next (#1504 review).
+        monkeypatch.setattr(_a2a_auth, "set_bearer_token", lambda *a, **k: None)
+        monkeypatch.setattr(_a2a_auth, "set_federation_token", lambda *a, **k: None)
+        monkeypatch.setattr(_a2a_auth, "set_public_prefixes", lambda *a, **k: None)
+    except ImportError:
+        pass
 
     ok, msg = ai._reload_langgraph_agent()
     assert ok is True, msg

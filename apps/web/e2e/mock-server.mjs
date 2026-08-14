@@ -594,7 +594,21 @@ const server = createServer(async (req, res) => {
     // Push periodically so the unread badge (off-surface), live append (on-surface), and
     // the plugin notification dot (a `boardy.*` event) are all deterministically testable.
     const t = setInterval(() => {
-      frame("activity.message", { text: "live activity ping", origin: "scheduler", trigger: "heartbeat", stimulus: "Hourly heartbeat check." });
+      frame("activity.message", {
+        text: "live activity ping",
+        origin: "scheduler",
+        trigger: "heartbeat",
+        stimulus: "Hourly heartbeat check.",
+      });
+      frame("activity.message", {
+        text: "I checked the first deployment target.\n\n**A2A turn failed:** second target timed out",
+        origin: "a2a",
+        trigger: "delegate_to",
+        stimulus: "Check every deployment target.",
+        state: "failed",
+        task_id: "a2a-task-2644",
+        error: "second target timed out",
+      });
       frame("inbox.item", { id: 99, priority: "next", source: "mock", text: "live inbox ping" });
       frame("boardy.created", { id: "b1" }); // ADR 0039 — exercises the rail notification dot
     }, 500);

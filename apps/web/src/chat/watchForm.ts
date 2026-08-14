@@ -234,7 +234,11 @@ function buildVerifier(answers: Record<string, unknown>): Record<string, unknown
       return spec;
     }
     case "data": {
-      const spec: Record<string, unknown> = { type: "data", path: str(answers.verify_data_path) };
+      const spec: Record<string, unknown> = {
+        type: "data",
+        path: str(answers.verify_data_path),
+        workspace_relative: true,
+      };
       const contains = str(answers.verify_data_contains);
       if (contains) spec.contains = contains;
       return spec;
