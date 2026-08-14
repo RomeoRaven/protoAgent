@@ -94,7 +94,7 @@ function defaultState(): WizardState {
     modelName: "protolabs/reasoning",
     temperature: 0.2,
     maxTokens: 32768,
-    maxIterations: 50,
+    maxIterations: 2000,
     soul: "",
     archetype: "basic",
     middleware: {
@@ -125,7 +125,7 @@ function hydrateState(payload: ConfigPayload): WizardState {
     modelName: config.model.name || "protolabs/reasoning",
     temperature: Number(config.model.temperature ?? 0.2),
     maxTokens: Number(config.model.max_tokens ?? 32768),
-    maxIterations: Number(config.model.max_iterations ?? 50),
+    maxIterations: Number(config.model.max_iterations ?? 2000),
     // Start blank in the wizard (first-run-only flow): /api/config returns the
     // server's GENERIC default SOUL, not a user persona — the persona step seeds
     // the editor from the selected archetype instead. Leaving it blank lets that
@@ -133,14 +133,14 @@ function hydrateState(payload: ConfigPayload): WizardState {
     soul: "",
     archetype: "basic",
     middleware: {
-      knowledge: Boolean(config.middleware.knowledge),
-      audit: Boolean(config.middleware.audit),
-      memory: Boolean(config.middleware.memory),
-      scheduler: Boolean(config.middleware.scheduler),
+      knowledge: Boolean(config.middleware?.knowledge),
+      audit: Boolean(config.middleware?.audit),
+      memory: Boolean(config.middleware?.memory),
+      scheduler: Boolean(config.middleware?.scheduler),
     },
-    researcherTurns: Number(config.subagents.researcher.max_turns ?? 40),
-    knowledgePath: config.knowledge.db_path || "",
-    knowledgeTopK: Number(config.knowledge.top_k ?? 5),
+    researcherTurns: Number(config.subagents?.researcher?.max_turns ?? 40),
+    knowledgePath: config.knowledge?.db_path || "",
+    knowledgeTopK: Number(config.knowledge?.top_k ?? 5),
     allowedDirs: (config.operator?.allowed_dirs || []).join("\n"),
     initTasks: false,
   };
@@ -184,15 +184,16 @@ const OAUTH_LABEL: Record<string, string> = {
 // race it against a timeout so `busy` always clears and the step never locks (which
 // would disable Next, trapping the user on the runtime step).
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_resolve, reject) =>
-      setTimeout(
-        () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s — check the API base and key`)),
-        ms,
-      ),
-    ),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s — check the API base and key`)),
+      ms,
+    );
+  });
+  // Repeated model probes / connection tests would otherwise accumulate uncleared
+  // timers until each one's own `ms` elapsed — clear on whichever side settles first.
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 export function SetupWizard({

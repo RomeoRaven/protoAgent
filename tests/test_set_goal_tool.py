@@ -1,12 +1,14 @@
-"""The LLM-facing set_goal tool — agent owns a plugin-verified goal (ADR 0028)."""
+"""The LLM-facing set_goal and list_verifiers tools (ADR 0028)."""
 
 from __future__ import annotations
+
+import asyncio
 
 from observability import tracing
 from graph.goals.controller import GoalController
 from graph.goals.store import GoalStore
 from runtime.state import STATE
-from tools.lg_tools import _build_set_goal_tool, get_all_tools
+from tools.lg_tools import _build_list_verifiers_tool, _build_set_goal_tool, get_all_tools
 
 
 def _register_verifiers(monkeypatch, *names):
@@ -15,10 +17,17 @@ def _register_verifiers(monkeypatch, *names):
     monkeypatch.setattr("graph.goals.verifiers._PLUGIN_VERIFIERS", {n: object() for n in names})
 
 
-def test_get_all_tools_gates_set_goal_on_goal_enabled():
+def test_get_all_tools_gates_set_goal_on_goal_enabled(monkeypatch):
+    _register_verifiers(monkeypatch, "test:check")
     on = {t.name for t in get_all_tools(goal_enabled=True)}
     off = {t.name for t in get_all_tools(goal_enabled=False)}
     assert "set_goal" in on and "set_goal" not in off
+
+
+def test_get_all_tools_no_goal_tools_without_verifiers():
+    # goal_enabled=True but no plugin verifiers registered → tools absent (no-op trap).
+    names = {t.name for t in get_all_tools(goal_enabled=True)}
+    assert not ({"set_goal", "update_goal_plan", "abandon_goal"} & names)
 
 
 def _lead_graph_tool_names(goal_enabled: bool) -> set[str]:
@@ -49,11 +58,12 @@ def _lead_graph_tool_names(goal_enabled: bool) -> set[str]:
     raise AssertionError("could not locate the ToolNode tool map")
 
 
-def test_set_goal_is_actually_bound_to_the_lead_agent_when_enabled():
+def test_set_goal_is_actually_bound_to_the_lead_agent_when_enabled(monkeypatch):
     # bd-2aa regression: get_all_tools(goal_enabled=True) including set_goal is
     # NOT enough — create_agent_graph must thread goal_enabled into that call, or
     # set_goal is advertised (/api/tools) but never bound to the model. This
     # asserts the binding on the COMPILED graph, which is what was broken.
+    _register_verifiers(monkeypatch, "test:check")
     assert "set_goal" in _lead_graph_tool_names(goal_enabled=True)
     assert "set_goal" not in _lead_graph_tool_names(goal_enabled=False)
 
@@ -117,3 +127,52 @@ def test_set_goal_rejects_an_unknown_verifier(monkeypatch, tmp_path):
     assert "unknown plugin verifier" in out.lower()
     assert "spacetraders:credits" in out  # lists what IS available
     assert ctrl.active_goal("s1") is None  # no unsatisfiable goal created
+
+
+# ── list_verifiers tool (#2686) ────────────────────────────────────────────────
+
+
+def test_list_verifiers_appears_when_goal_enabled():
+    on = {t.name for t in get_all_tools(goal_enabled=True)}
+    off = {t.name for t in get_all_tools(goal_enabled=False, watches_enabled=False)}
+    assert "list_verifiers" in on
+    assert "list_verifiers" not in off
+
+
+def test_list_verifiers_appears_when_watches_enabled():
+    on = {t.name for t in get_all_tools(watches_enabled=True)}
+    off = {t.name for t in get_all_tools(goal_enabled=False, watches_enabled=False)}
+    assert "list_verifiers" in on
+    assert "list_verifiers" not in off
+
+
+def test_list_verifiers_returns_core_types():
+    tool = _build_list_verifiers_tool()
+    out = asyncio.run(tool.ainvoke({}))
+    for name in ("command", "test", "ci", "data", "llm", "plugin"):
+        assert name in out
+
+
+def test_list_verifiers_no_plugin_verifiers_message(monkeypatch):
+    monkeypatch.setattr("graph.goals.verifiers._PLUGIN_VERIFIERS", {})
+    monkeypatch.setattr("graph.goals.verifiers._PLUGIN_VERIFIER_META", {})
+    tool = _build_list_verifiers_tool()
+    out = asyncio.run(tool.ainvoke({}))
+    assert "No plugin verifiers registered." in out
+    assert "command" in out  # core types still present
+
+
+def test_list_verifiers_includes_plugin_checks(monkeypatch):
+    monkeypatch.setattr(
+        "graph.goals.verifiers._PLUGIN_VERIFIERS",
+        {"spacetraders:credits": object()},
+    )
+    monkeypatch.setattr(
+        "graph.goals.verifiers._PLUGIN_VERIFIER_META",
+        {"spacetraders:credits": {"plugin_id": "spacetraders", "description": "Credits balance check"}},
+    )
+    tool = _build_list_verifiers_tool()
+    out = asyncio.run(tool.ainvoke({}))
+    assert "spacetraders:credits" in out
+    assert "Credits balance check" in out
+    assert "No plugin verifiers registered." not in out

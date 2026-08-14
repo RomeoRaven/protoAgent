@@ -27,6 +27,7 @@ import ast
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from graph.goals.types import VerifyResult
@@ -217,13 +218,61 @@ async def _verify_ci(spec: dict, ctx: VerifyContext) -> VerifyResult:
     return VerifyResult(False, "ci verifier needs 'pr' or 'branch'", "")
 
 
+def is_safe_workspace_relative_data_path(value: object) -> bool:
+    """Whether *value* is a non-escaping relative path on POSIX and Windows.
+
+    Chat-created ``data+contains`` verifiers are untrusted.  Checking both path
+    flavours prevents a Windows absolute path from looking relative on POSIX (or
+    vice versa) when a verifier spec crosses an A2A boundary.
+    """
+    raw = str(value or "").strip()
+    if not raw or raw.startswith("~"):
+        return False
+    posix = PurePosixPath(raw.replace("\\", "/"))
+    windows = PureWindowsPath(raw)
+    if posix.is_absolute() or windows.is_absolute() or windows.drive:
+        return False
+    return ".." not in posix.parts and ".." not in windows.parts
+
+
+def _resolve_data_path(value: object, *, workspace_relative: bool = False) -> Path:
+    """Resolve a data path without changing the legacy operator default.
+
+    Direct trusted specs remain CWD-relative unless they explicitly opt into the
+    managed workspace.  The Goal/Watch forms and accepted untrusted chat specs set
+    that opt-in; their fence delegates to the filesystem toolset's canonical
+    ``ProjectRegistry.resolve`` chokepoint.
+    """
+    raw = str(value or "").strip()
+    try:
+        candidate = Path(raw).expanduser()
+    except RuntimeError as exc:
+        raise ValueError(f"cannot expand user path: {exc}") from exc
+    if candidate.is_absolute() or not workspace_relative:
+        return candidate
+    if not is_safe_workspace_relative_data_path(raw):
+        raise ValueError("path must be relative to the managed workspace and may not escape it")
+
+    from infra.paths import workspace_dir
+    from tools.fs_tools import Project, ProjectRegistry
+
+    registry = ProjectRegistry([Project(name="workspace", root=workspace_dir().resolve())])
+    return registry.resolve("workspace", raw)
+
+
 async def _verify_data(spec: dict, ctx: VerifyContext) -> VerifyResult:
     path = spec.get("path")
     if not path:
         return VerifyResult(False, "data verifier missing 'path'", "")
+    workspace_relative = spec.get("workspace_relative", False)
+    if not isinstance(workspace_relative, bool):
+        return VerifyResult(False, "data verifier 'workspace_relative' must be a boolean", "")
     try:
-        with open(path, encoding="utf-8") as fh:
+        resolved = _resolve_data_path(path, workspace_relative=workspace_relative)
+        with resolved.open(encoding="utf-8") as fh:
             text = fh.read()
+    except ValueError as exc:
+        return VerifyResult(False, f"invalid data verifier path {path}: {exc}", "")
     except OSError as exc:
         return VerifyResult(False, f"cannot read {path}: {exc}", "")
 

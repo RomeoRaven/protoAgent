@@ -126,6 +126,24 @@ Google tokens. For PR1 you can either:
 - reference an env var: `auth: { scheme: bearer, credentialsEnv: HELM_TOKEN }`
   (a2a) / `api_key_env: GATEWAY_KEY` (openai).
 
+## TLS trust
+
+Delegate calls over HTTPS verify through your OS's own certificate store (Windows
+cert store, macOS Keychain, a Linux distro bundle) as well as the public root list
+— not certifi alone. This makes a peer behind an internal CA, an enterprise
+TLS-terminating proxy, or a home-lab reverse proxy with a locally-trusted cert work
+the same way it already does in your browser: install the CA where the OS trusts
+it, and a delegate probe/dispatch to that peer trusts it too. A chain the OS itself
+doesn't trust still fails closed — there is no setting that disables verification
+(#2643).
+
+If you were previously pointing an `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE` env var at a custom CA bundle to get a private CA trusted: on
+Windows and macOS that override no longer reaches delegate calls, since the OS
+trust APIs verify independently of it. Install the CA in the OS store instead —
+it keeps working on Linux only because the OS trust path there happens to read
+the same variable, not because it's a supported override mechanism.
+
 ## Manage via the REST API
 
 The plugin mounts a CRUD surface (operator-console posture — localhost-default,

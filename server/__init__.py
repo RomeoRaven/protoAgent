@@ -115,6 +115,45 @@ def _ensure_ca_bundle_env() -> None:
         os.environ.setdefault(var, ca)
 
 
+def _ensure_os_trust_store() -> None:
+    """Let httpx (and urllib3/requests, if either is in play) trust what the OS
+    trusts, not just the bundled ``certifi`` root list.
+
+    httpx's default verification never discovers the OS trust store: it checks
+    ``SSL_CERT_FILE``, then falls back to
+    ``ssl.create_default_context(cafile=certifi.where())`` — either way, a
+    private/enterprise CA an operator installed in the OS trust store (Windows
+    cert store, macOS Keychain, a Linux distro bundle) is invisible to it even
+    though the OS's own HTTP clients (Chrome, PowerShell) trust it fine. That broke
+    A2A delegate calls to a peer behind an internal CA or TLS-terminating proxy
+    (#2643) — hit hardest on the packaged Windows desktop, since Windows has no
+    OpenSSL-readable system bundle for Python to fall back on.
+
+    ``truststore.inject_into_ssl()`` replaces ``ssl.SSLContext`` process-wide with
+    one that verifies through the native OS trust APIs (SChannel / Security.framework
+    / OpenSSL's default paths) instead of whatever ``cafile`` was passed in — so
+    every existing httpx client (delegate probe, delegate dispatch, the fleet proxy,
+    push-notification delivery) picks this up identically with no per-call-site
+    change, and a chain the OS itself doesn't trust still fails closed. Not
+    frozen-gated: the certifi-only gap is in httpx itself, present in a source
+    checkout too. Must run before the first outbound TLS request.
+
+    Side effect worth knowing: on Windows/macOS this also supersedes
+    ``_ensure_ca_bundle_env()``'s ``SSL_CERT_FILE`` for httpx/ssl clients
+    specifically — SChannel/Security.framework verify through the OS store
+    regardless of what ``cafile`` was loaded, so an operator's env-var CA override
+    stops influencing them there (install the CA in the OS store instead — see
+    ``docs/guides/delegates.md``). It keeps working on Linux, where truststore's
+    own backend reads that same variable. ``ddgs``/``primp`` (a native, non-``ssl``-
+    module client) is unaffected either way — it never goes through this patch."""
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception:  # noqa: BLE001 — a missing/broken truststore must never block boot
+        log.warning("could not enable OS trust-store TLS verification", exc_info=True)
+
+
 def _resolve_operator_project_root() -> str:
     """The operator console's default project root (+ its always-allowed dir).
 
@@ -299,6 +338,10 @@ def _main():
     # bundled certifi CA bundle before any outbound request, else DuckDuckGo search
     # fails CERTIFICATE_VERIFY_FAILED in the desktop app. No-op in a source checkout.
     _ensure_ca_bundle_env()
+    # httpx TLS: verify through the OS trust store too, not just certifi — else an
+    # operator-trusted private CA (A2A delegate behind an internal PKI, #2643) fails
+    # closed even though the OS's own clients trust it.
+    _ensure_os_trust_store()
 
     # Management + lifecycle subcommands (ADR 0075 D1) — `plugin` / `workspace` /
     # `skills` / `fleet` / `config` (act on disk/DBs and exit) plus `up`/`down`/
@@ -340,7 +383,18 @@ def _main():
     # D8 network.bind, which folds in the PROTOAGENT_HOST env fallback); an explicit
     # --host always wins.
     parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="REMOVED (#2647) — this flag was declared but never consumed by any "
+        "startup path, so passing it silently booted the DEFAULT instance's config "
+        "and credentials instead of the file given. Kept here only so a caller "
+        "gets a clear, actionable error instead of argparse's generic "
+        "'unrecognized arguments'. Use PROTOAGENT_HOME=<dir> (or "
+        "PROTOAGENT_INSTANCE=<id> under a shared PROTOAGENT_BOX_ROOT) to run "
+        "against a genuinely isolated instance instead — see ADR 0065.",
+    )
     parser.add_argument(
         "--ui",
         choices=["console", "none", "full"],
@@ -363,6 +417,15 @@ def _main():
         "complete, then exit. No wizard/UI needed.",
     )
     args = parser.parse_args()
+    if args.config is not None:
+        # #2647: fail loudly instead of silently ignoring it — see the --config
+        # help text above and ADR 0065 for why this isn't implemented instead.
+        parser.error(
+            "--config was removed: it never actually loaded the given file — every "
+            "startup silently used the default instance's config regardless. Use "
+            "PROTOAGENT_HOME=<dir> python -m server ... to run against an isolated "
+            "instance's config, secrets, and data stores instead."
+        )
     STATE.active_port = args.port
 
     # Resolve the UI tier: explicit --ui/PROTOAGENT_UI wins; else the deprecated

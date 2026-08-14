@@ -256,8 +256,9 @@ def test_dispatch_attaches_a2a_trace_when_tracing_active(patched):
 
     send = next(b for b in bodies if b.get("method") == "SendMessage")
     wire = {"traceId": _TID, "spanId": _SID}
-    assert send["params"]["metadata"] == {"a2a.trace": wire}
-    assert send["params"]["message"]["metadata"] == {"a2a.trace": wire}
+    expected = {"origin": "a2a", "trigger": "delegate_to", "a2a.trace": wire}
+    assert send["params"]["metadata"] == expected
+    assert send["params"]["message"]["metadata"] == expected
 
 
 def test_dispatch_attaches_trace_id_only_when_no_current_span(patched):
@@ -268,11 +269,13 @@ def test_dispatch_attaches_trace_id_only_when_no_current_span(patched):
     assert asyncio.run(A.dispatch(_parse(), "ping")) == "pong"
 
     send = next(b for b in bodies if b.get("method") == "SendMessage")
-    assert send["params"]["metadata"] == {"a2a.trace": {"traceId": _TID}}
+    expected = {"origin": "a2a", "trigger": "delegate_to", "a2a.trace": {"traceId": _TID}}
+    assert send["params"]["metadata"] == expected
+    assert send["params"]["message"]["metadata"] == expected
 
 
-def test_dispatch_sends_no_trace_metadata_when_tracing_inactive(patched):
-    """Tracing off ⇒ the request is unchanged — no metadata keys at all."""
+def test_dispatch_stamps_a2a_provenance_when_tracing_inactive(patched):
+    """Tracing off still identifies a protoAgent peer delegation at both levels."""
     patched.setattr(_tracing, "current_trace_context", lambda: None)
     patched.setattr("tools.a2a_parse._extract_text", lambda result, *a, **k: "pong" if result else "")
     bodies = _install_capture_client(patched, send_resp=_Resp({"jsonrpc": "2.0", "result": {"text": "pong"}}))
@@ -280,8 +283,9 @@ def test_dispatch_sends_no_trace_metadata_when_tracing_inactive(patched):
     assert asyncio.run(A.dispatch(_parse(), "ping")) == "pong"
 
     send = next(b for b in bodies if b.get("method") == "SendMessage")
-    assert "metadata" not in send["params"]
-    assert "metadata" not in send["params"]["message"]
+    expected = {"origin": "a2a", "trigger": "delegate_to"}
+    assert send["params"]["metadata"] == expected
+    assert send["params"]["message"]["metadata"] == expected
 
 
 def test_dispatch_survives_tracing_helper_blowup(patched):
