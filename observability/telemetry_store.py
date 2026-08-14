@@ -194,6 +194,7 @@ class TelemetryStore:
             ]
             out["p50_duration_ms"] = _percentile(durations, 50)
             out["p95_duration_ms"] = _percentile(durations, 95)
+            out["p99_duration_ms"] = _percentile(durations, 99)  # #2678
             by_model = db.execute(
                 f"""
                 SELECT model,
@@ -205,7 +206,30 @@ class TelemetryStore:
                 """,
                 params,
             ).fetchall()
-            out["by_model"] = [{**dict(r), "cost_usd": round(r["cost_usd"] or 0.0, 6)} for r in by_model]
+            # #2678 — durable p50/p95/p99 duration PER MODEL, not just the whole-turn
+            # figures above. Uses the SAME `duration_ms`/`model` columns the turn-level
+            # percentiles above already read — no new capture seam or schema needed,
+            # since `model` is already recorded per turn. (Per-TOOL percentiles would
+            # need one: `tool_calls` is a per-turn count today, not which tools ran —
+            # tracked separately, not attempted here.)
+            # One query for every row's (model, duration_ms), grouped in Python — avoids
+            # an N+1 query per model, and sidesteps `model = ?` never matching a NULL
+            # model group (SQL equality never matches NULL; grouping in Python does).
+            durations_by_model: dict[str | None, list[int]] = {}
+            for r in db.execute(f"SELECT model, duration_ms FROM turns {where}", params).fetchall():
+                if r["duration_ms"] is not None:
+                    durations_by_model.setdefault(r["model"], []).append(r["duration_ms"])
+            by_model_out = []
+            for row in by_model:
+                model_durations = sorted(durations_by_model.get(row["model"], []))
+                by_model_out.append({
+                    **dict(row),
+                    "cost_usd": round(row["cost_usd"] or 0.0, 6),
+                    "p50_duration_ms": _percentile(model_durations, 50),
+                    "p95_duration_ms": _percentile(model_durations, 95),
+                    "p99_duration_ms": _percentile(model_durations, 99),
+                })
+            out["by_model"] = by_model_out
             return out
         finally:
             db.close()
