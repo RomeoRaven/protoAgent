@@ -2291,7 +2291,12 @@ export const api = {
   },
   // Git-installed plugins (ADR 0027). install fetches code only (does NOT enable).
   installedPlugins() {
-    return request<{ plugins: InstalledPlugin[] }>("/api/plugins/installed");
+    // `bundles` = the lock's bundles[] registry verbatim (#2718) — the authoritative
+    // installed-bundle list (a bundle whose members were all removed individually
+    // still has a row and is still uninstallable). Optional: absent on older backends.
+    return request<{ plugins: InstalledPlugin[]; bundles?: { id: string; name?: string }[] }>(
+      "/api/plugins/installed",
+    );
   },
   // The curated official-plugin directory (Discover, ADR 0059), merged with install
   // state. One-click install posts each entry's `repo` to installPlugin().
@@ -2392,9 +2397,39 @@ export const api = {
     );
   },
   // Per-plugin freshness (ADR 0027). The backend TTL-caches the ls-remote probe,
-  // so polling is cheap; each row carries behind/pinned/error.
+  // so polling is cheap; each row carries behind/pinned/error. `bundles` (#2718,
+  // ADR 0049 D4) is the same status per installed bundle — behind there means the
+  // bundle REPO's manifest moved (member pins may move with it on update). Optional
+  // so older backends parse fine.
   pluginUpdates() {
-    return request<{ plugins: PluginUpdate[] }>("/api/plugins/updates");
+    return request<{ plugins: PluginUpdate[]; bundles?: PluginUpdate[] }>("/api/plugins/updates");
+  },
+  // Bundle-level update (#2718): re-resolves the bundle's ref (release-tag pins move
+  // to the newest semver), re-pins every member, retires members the new manifest
+  // dropped, hot-reloads. The declared enable set re-applies WITHOUT undoing an
+  // operator's explicit disable.
+  updateBundle(id: string) {
+    return request<{
+      installed: PluginInstallSummary;
+      enabled: string[];
+      reloaded: boolean;
+      restart_recommended: boolean;
+      enable_error: string | null;
+      load_errors: Record<string, string>;
+      removed_members: string[];
+      retire_error: string | null;
+    }>(`/api/plugins/bundles/${encodeURIComponent(id)}/update`, { method: "POST" });
+  },
+  // One-action bundle removal (#2718): exclusively-owned members + the lock row;
+  // members shared with another bundle (or re-installed directly) are kept.
+  uninstallBundle(id: string, purge?: boolean) {
+    return request<{
+      ok: boolean;
+      removed_members: string[];
+      kept: string[];
+      reloaded: boolean;
+      reload_error: string | null;
+    }>(`/api/plugins/bundles/${encodeURIComponent(id)}${purge ? "?purge=true" : ""}`, { method: "DELETE" });
   },
   // Re-clone every locked plugin that's missing on disk (fresh clone / restored
   // data dir). Fetches at the lock's resolved_sha; already-enabled plugins come
