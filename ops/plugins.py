@@ -151,7 +151,10 @@ async def install_and_activate(
         if bundle_secrets:
             await asyncio.to_thread(apply_bundle_secrets, cfg_path, lock, list(bundle_secrets))
 
-    ok, messages = apply_settings(config_updates)
+    # Off the event loop: the applier does a full config write + graph rebuild —
+    # inline it stalls every other request for the duration (2732/2735 reviews;
+    # same D9 rule the devkit's reload_plugins already follows).
+    ok, messages = await asyncio.to_thread(apply_settings, config_updates)
     if ok:
         # The reload "succeeding" only means the graph rebuilt — the loader SKIPS a
         # plugin whose import/registration fails and records the failure on its meta
@@ -211,9 +214,11 @@ async def update_bundle(
     (or ``ref``) — member pins re-resolve exactly as a fresh install would, the lock
     row is rewritten, and (via ``install_and_activate``) the declared enable set +
     config/mcp/secrets seeding re-apply as defaults with operator values winning.
-    A release-tag pin moves to the newest semver tag first (tags are immutable —
-    re-installing the recorded one would be a no-op forever, same rule as the
-    single-plugin update route). Members the NEW manifest no longer names are
+    When updating the RECORDED ref, a release-tag pin moves to the newest semver
+    tag first (tags are immutable — re-installing the recorded one would be a
+    no-op forever, same rule as the single-plugin update route); an explicit
+    caller ``ref`` is a pin request and is used as-is, never replaced.
+    Members the NEW manifest no longer names are
     RETIRED afterwards (uninstalled + module-purged + a pure reload) when they're
     still exclusively this bundle's — a member another bundle lists, or one the
     operator re-installed directly, is left alone."""
@@ -222,14 +227,17 @@ async def update_bundle(
 
     entry = await asyncio.to_thread(installer.bundle_entry, bundle_id)
     if entry is None:
-        raise installer.InstallError(f"bundle {bundle_id!r} is not installed.")
+        raise installer.BundleNotInstalledError(f"bundle {bundle_id!r} is not installed.")
     source_url = str(entry.get("source_url") or "")
     if not source_url:
         raise installer.InstallError(f"bundle {bundle_id!r} has no source_url — cannot update.")
     before_members = [str(p) for p in entry.get("plugins") or []]
 
     target_ref = ref or (entry.get("requested_ref") or None)
-    if target_ref and installer.is_release_tag(target_ref):
+    # Chase the newest semver tag ONLY when updating the RECORDED ref — an explicit
+    # caller-passed `ref` is a pin request and must never be silently replaced
+    # (the 2732 review's coderabbit major; the CLI already had this guard).
+    if ref is None and target_ref and installer.is_release_tag(target_ref):
         try:
             status = await asyncio.to_thread(installer.check_plugin_update, entry)
             target_ref = status.get("latest_ref") or target_ref
@@ -248,22 +256,27 @@ async def update_bundle(
         apply_settings=apply_settings,
     )
 
-    retire_error: str | None = None
+    # Accumulate retire failures — reassigning per member reported only the LAST
+    # one and hid the rest (2732 review).
+    retire_errors: list[str] = []
     dropped = await asyncio.to_thread(installer.orphaned_bundle_members, bundle_id, before_members)
     for pid in dropped:
         try:
             await asyncio.to_thread(installer.uninstall, pid)
         except installer.InstallError as exc:
-            retire_error = f"{pid}: {exc}"
+            retire_errors.append(f"{pid}: {exc}")
             continue
         purge_plugin_modules(pid)
     if dropped and apply_settings is not None:
         # The member uninstalls scrubbed the YAML's enabled refs — a pure reload
         # (config=None) picks the file state up and drops their live tools/routes.
-        ok, messages = apply_settings(None)
+        # Off the event loop: full graph rebuild (same rule as the activate apply).
+        ok, messages = await asyncio.to_thread(apply_settings, None)
         if not ok:
-            retire_error = "; ".join(str(m) for m in messages) or "retire reload failed"
-    return BundleUpdateResult(install=res, removed_members=dropped, retire_error=retire_error)
+            retire_errors.append("; ".join(str(m) for m in messages) or "retire reload failed")
+    return BundleUpdateResult(
+        install=res, removed_members=dropped, retire_error="; ".join(retire_errors) or None
+    )
 
 
 @op(
@@ -292,7 +305,8 @@ async def uninstall_bundle(
     reloaded = False
     reload_error: str | None = None
     if apply_settings is not None and report.get("removed_members"):
-        ok, messages = apply_settings(None)
+        # Off the event loop — full graph rebuild (2732/2735 reviews, D9 rule).
+        ok, messages = await asyncio.to_thread(apply_settings, None)
         reloaded = bool(ok)
         if not ok:
             reload_error = "; ".join(str(m) for m in messages) or "reload failed"

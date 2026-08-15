@@ -380,6 +380,12 @@ def register_plugin_routes(app) -> None:
                 ctx=OpContext.from_state(),
                 apply_settings=lambda updates: _apply_settings_changes(config=updates),
             )
+        # TYPED not-installed → 404 (matching DELETE + the single-plugin route) —
+        # raised by the op itself, so a bundle removed by a concurrent DELETE maps
+        # correctly too (the 2740 review's TOCTOU on the old pre-check + generic
+        # except). 400 stays for genuine install failures.
+        except installer.BundleNotInstalledError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except installer.InstallError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -421,8 +427,12 @@ def register_plugin_routes(app) -> None:
                 ctx=OpContext.from_state(),
                 apply_settings=lambda updates: _apply_settings_changes(config=updates),
             )
-        except installer.InstallError as exc:
+        # Typed not-installed → 404; any other uninstall failure is a 400, not a
+        # phantom "doesn't exist" (the old blanket-404 hid real errors).
+        except installer.BundleNotInstalledError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except installer.InstallError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, **report}
 
     @app.post("/api/plugins/sync")

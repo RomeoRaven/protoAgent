@@ -83,6 +83,13 @@ class InstallError(RuntimeError):
     """A plugin install/uninstall/sync failed (bad URL, manifest, git, collision)."""
 
 
+class BundleNotInstalledError(InstallError):
+    """The named bundle has no ``plugins.lock`` row — typed so HTTP adapters can map
+    "doesn't exist" to 404 without string-matching. Raised by the op itself, so the
+    mapping stays correct even when a concurrent DELETE removes the bundle just
+    before the op runs (there is no route-level pre-check to race)."""
+
+
 def live_plugins_dir() -> Path:
     """Where git-installed plugins land — the live dir the loader discovers
     (``instance_paths().plugins_dir``, honoring ``PROTOAGENT_PLUGINS_DIR``)."""
@@ -1362,24 +1369,37 @@ def check_bundle_updates() -> list[dict]:
     return [check_plugin_update(b) for b in _read_lock().get("bundles") or []]
 
 
+def _bundle_ownership(bundle_id: str) -> tuple[dict | None, set[str], dict[str, str]]:
+    """The shared ownership scan (extracted per the 2732 review): the bundle's lock
+    row, the member ids every OTHER bundle row lists, and each installed plugin's
+    ``by`` provenance. The rule everywhere: a member is exclusively this bundle's
+    iff it still carries ``by == bundle:<id>`` and no other row lists it."""
+    lock = _read_lock()
+    row = next((b for b in lock.get("bundles") or [] if b.get("id") == bundle_id), None)
+    listed_elsewhere: set[str] = set()
+    for b in lock.get("bundles") or []:
+        if b.get("id") != bundle_id:
+            listed_elsewhere.update(str(p) for p in b.get("plugins") or [])
+    by_of = {str(e.get("id")): e.get("by", "") for e in lock.get("plugins") or []}
+    return row, listed_elsewhere, by_of
+
+
+def _exclusively_owned(pid: str, bundle_id: str, listed_elsewhere: set[str], by_of: dict[str, str]) -> bool:
+    return pid not in listed_elsewhere and by_of.get(pid, "") == f"bundle:{bundle_id}"
+
+
 def exclusive_bundle_members(bundle_id: str) -> list[str]:
     """The bundle's members owned ONLY by it: still carrying this bundle's ``by``
     provenance in ``lock["plugins"]`` and not listed by any other bundle row. These
     are what ``uninstall_bundle`` removes — a member another bundle lists, or one the
     operator re-installed directly since (its ``by`` moved), stays."""
-    lock = _read_lock()
-    row = next((b for b in lock.get("bundles") or [] if b.get("id") == bundle_id), None)
+    row, listed_elsewhere, by_of = _bundle_ownership(bundle_id)
     if row is None:
         return []
-    listed_elsewhere: set[str] = set()
-    for b in lock.get("bundles") or []:
-        if b.get("id") != bundle_id:
-            listed_elsewhere.update(str(p) for p in b.get("plugins") or [])
-    by_of = {e.get("id"): e.get("by", "") for e in lock.get("plugins") or []}
     return [
         str(pid)
         for pid in row.get("plugins") or []
-        if pid not in listed_elsewhere and by_of.get(pid, "") == f"bundle:{bundle_id}"
+        if _exclusively_owned(str(pid), bundle_id, listed_elsewhere, by_of)
     ]
 
 
@@ -1388,18 +1408,12 @@ def orphaned_bundle_members(bundle_id: str, before_members: list[str]) -> list[s
     dropped that are still exclusively this bundle's (by-provenance, not listed by
     any other bundle). The update path uninstalls these so a manifest that removed a
     member doesn't leave it installed forever with dangling provenance."""
-    lock = _read_lock()
-    row = next((b for b in lock.get("bundles") or [] if b.get("id") == bundle_id), None)
+    row, listed_elsewhere, by_of = _bundle_ownership(bundle_id)
     current = {str(p) for p in (row.get("plugins") or [])} if row else set()
-    listed_elsewhere: set[str] = set()
-    for b in lock.get("bundles") or []:
-        if b.get("id") != bundle_id:
-            listed_elsewhere.update(str(p) for p in b.get("plugins") or [])
-    by_of = {e.get("id"): e.get("by", "") for e in lock.get("plugins") or []}
     return [
         str(pid)
         for pid in before_members
-        if pid not in current and pid not in listed_elsewhere and by_of.get(pid, "") == f"bundle:{bundle_id}"
+        if pid not in current and _exclusively_owned(str(pid), bundle_id, listed_elsewhere, by_of)
     ]
 
 
@@ -1410,23 +1424,37 @@ def uninstall_bundle(bundle_id: str, *, purge: bool = False) -> dict:
     disk+lock (uninstalled individually — the provenance row still listed it) is
     skipped, not an error. ``purge`` forwards to each member uninstall (config +
     secrets removal)."""
-    row = bundle_entry(bundle_id)
+    row, listed_elsewhere, by_of = _bundle_ownership(bundle_id)
     if row is None:
-        raise InstallError(f"bundle {bundle_id!r} is not installed.")
-    members = exclusive_bundle_members(bundle_id)
+        raise BundleNotInstalledError(f"bundle {bundle_id!r} is not installed.")
+    # Bucket every row member honestly (the 2732 review's bucketing finding: a member
+    # uninstalled individually earlier — the stale-provenance case this function
+    # exists for — landed in "kept" as if it were still installed and shared):
+    #   no lock entry at all  → already gone         → skipped_missing
+    #   exclusively ours      → uninstall            → removed_members (or failed{pid: why})
+    #   anything else         → shared / re-owned    → kept
     removed_members: list[str] = []
     skipped: list[str] = []
-    for pid in members:
-        try:
-            uninstall(pid, purge=purge)
-            removed_members.append(pid)
-        except InstallError:
-            skipped.append(pid)
+    failed: dict[str, str] = {}
+    kept: list[str] = []
+    for raw in row.get("plugins") or []:
+        pid = str(raw)
+        if pid not in by_of:
+            skipped.append(pid)  # provenance row outlived the member — nothing to remove
+        elif _exclusively_owned(pid, bundle_id, listed_elsewhere, by_of):
+            try:
+                uninstall(pid, purge=purge)
+                removed_members.append(pid)
+            except InstallError as exc:
+                # An uninstall that RAISED is not "already gone" — reporting it in
+                # skipped_missing mislabeled a real failure (2740 review nit).
+                failed[pid] = str(exc)
+        else:
+            kept.append(pid)
     # Re-read — each member uninstall rewrote the lock — then drop the row itself.
     lock = _read_lock()
     lock["bundles"] = [b for b in lock.get("bundles") or [] if b.get("id") != bundle_id]
     _write_lock(lock)
-    kept = [str(p) for p in (row.get("plugins") or []) if p not in members]
     _audit(
         "uninstall-bundle",
         {"id": bundle_id, "purge": purge},
@@ -1442,6 +1470,9 @@ def uninstall_bundle(bundle_id: str, *, purge: bool = False) -> dict:
         "id": bundle_id,
         "removed_members": removed_members,
         "skipped_missing": skipped,
+        # Members whose uninstall RAISED (a race, a refusal) — distinct from
+        # skipped_missing so callers never label a failure "already gone".
+        "failed": failed,
         "kept": kept,
         "purged": purge,
     }
