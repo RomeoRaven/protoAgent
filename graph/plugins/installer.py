@@ -120,13 +120,18 @@ def _validate_ref(ref: str) -> None:
 
 def _source_allowed(url: str, allow: list[str] | None) -> bool:
     """Optional fork lock-down (ADR 0027 D3): if an allowlist is configured, the
-    URL must match one of its host/org globs (e.g. ``github.com/protoLabsAI/*``)."""
+    URL must match one of its host/org globs (e.g. ``github.com/protoLabsAI/*``).
+
+    The predicate is ``trust.source_matches`` — ONE function shared with the trust
+    matcher (they drifted byte-for-byte twice; the 2739 panel asked for one home):
+    path-boundary widening (never bare ``pat*``), both sides normalized, with the
+    ``.git`` trim applied only to glob-free entries (a glob's ``.git`` suffix is
+    semantics, not spelling)."""
     if not allow:
         return True
-    import fnmatch
+    from graph.plugins.trust import source_matches
 
-    norm = re.sub(r"^(https?://|git://|ssh://|git@)", "", url).replace(":", "/")
-    return any(fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(norm, pat + "*") for pat in allow)
+    return source_matches(url, allow)
 
 
 def _normalize_lock(data: object) -> dict:
@@ -180,7 +185,21 @@ def _write_lock(data: dict) -> None:
     )
     lock = lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(json.dumps(data, indent=2) + "\n")
+    # Atomic + concurrency-safe: a crash mid-write must not leave a truncated lock
+    # that _read_lock treats as FRESH (silently dropping every pin), and each writer
+    # stages to its OWN temp file — a shared ".tmp" path let two concurrent writes
+    # interleave into a corrupt replace (coderabbit on the 2739 thread).
+    fd, tmp_name = tempfile.mkstemp(dir=lock.parent, prefix=lock.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp_name, lock)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _audit(action: str, args: dict, summary: str, *, success: bool = True) -> None:

@@ -27,18 +27,59 @@ import fnmatch
 import re
 
 
+def _strip_source_prefix(value: str) -> str:
+    """The shared half of both normalizers: scheme AND ``git@`` strip together
+    (``ssh://git@host/...`` carries both — the 2733 review caught the
+    single-alternation version leaving ``git@`` behind), ``:`` → ``/``, and the
+    trailing-slash trim. The ``.git`` handling deliberately stays with each caller:
+    unconditional for URLs, glob-aware for pattern entries."""
+    norm = re.sub(r"^(?:(?:https?|git|ssh)://)?(?:git@)?", "", str(value or "")).replace(":", "/").strip()
+    return norm.rstrip("/")
+
+
 def normalize_source(url: str) -> str:
-    """A git URL in host/path form — the same rule as the install allowlist's
-    ``_source_allowed`` (scheme/``git@`` strip, ``:`` → ``/``), plus a trailing-slash
-    and ``.git`` trim, so an acked/official glob matches every spelling of one source."""
-    norm = re.sub(r"^(https?://|git://|ssh://|git@)", "", str(url or "")).replace(":", "/").strip()
-    norm = norm.rstrip("/")
+    """A git URL in host/path form — prefix strip (see ``_strip_source_prefix``)
+    plus an unconditional ``.git`` trim, so an acked/official entry matches every
+    spelling of one source."""
+    norm = _strip_source_prefix(url)
     return norm[:-4] if norm.endswith(".git") else norm
 
 
-def _matches(url: str, globs: list[str] | None) -> bool:
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _normalize_pattern(pat: str) -> str:
+    """A pattern entry in the same host/path form the URL side normalizes to.
+
+    Scheme/``git@`` strip, ``:`` → ``/``, and the trailing-slash trim are safe for
+    every entry. The ``.git`` trim applies ONLY to glob-free (exact-repo) entries:
+    on a glob it CHANGES semantics fail-open — ``github.com/acme/*.git`` would
+    become ``…/acme/*`` (admitting the whole org) and a bare ``*.git`` would
+    become ``*`` (admitting everything) — the 2739 round-3 finding."""
+    norm = _strip_source_prefix(pat)
+    if norm.endswith(".git") and not _GLOB_CHARS.intersection(norm):
+        norm = norm[:-4]
+    return norm
+
+
+def source_matches(url: str, globs: list[str] | None) -> bool:
+    """THE match predicate — shared by the trust matcher and the installer
+    allowlist so the two can never drift (they did, byte-for-byte, twice).
+
+    The prefix fallback is PATH-BOUNDARY widening (``pat/*``), never bare
+    ``pat*``: an exact entry ``github.com/x/y`` must not match the
+    name-collision ``github.com/x/y-evil`` (a bare-``*`` widening is a consent
+    bypass). The boundary form still gives the org shorthand: an entry
+    ``github.com/org`` matches ``github.com/org/repo``. Both sides normalize —
+    exact entries fully (spelling-insensitive), glob entries without the
+    ``.git`` trim (see ``_normalize_pattern``)."""
     norm = normalize_source(url)
-    return any(fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(norm, pat + "*") for pat in globs or [])
+    pats = [_normalize_pattern(p) for p in globs or []]
+    return any(fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(norm, pat + "/*") for pat in pats if pat)
+
+
+def _matches(url: str, globs: list[str] | None) -> bool:
+    return source_matches(url, globs)
 
 
 def source_official(url: str, official: list[str] | None) -> bool:
