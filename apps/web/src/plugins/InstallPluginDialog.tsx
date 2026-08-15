@@ -6,6 +6,7 @@ import { Plus } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "../lib/api";
+import { useTrustAck } from "./TrustAckDialog";
 import { usePluginRefresh } from "./usePluginManage";
 
 const REGISTRY_GUIDE_URL = "https://protolabsai.github.io/protoAgent/guides/plugin-registry";
@@ -18,11 +19,21 @@ export function InstallPluginDialog({ open, onClose }: { open: boolean; onClose:
   const [url, setUrl] = useState("");
   const [ref, setRef] = useState("");
   const [status, setStatus] = useState("");
+  // Consent gate (#2721): needs_ack means nothing was fetched — the shared hook
+  // holds the target (the inputs must NOT clear), asks, acks, and retries.
+  const { requestAck, ackDialog } = useTrustAck({
+    onAckError: (m) => setStatus(m),
+    onCancel: () => setStatus("Install cancelled — the source wasn't trusted."),
+  });
   const refreshAll = usePluginRefresh();
 
   const install = useMutation({
     mutationFn: () => api.installPlugin(url.trim(), ref.trim() || undefined),
     onSuccess: (res) => {
+      if (res.needs_ack) {
+        requestAck({ url: url.trim(), source: res.source ?? url.trim(), retry: () => install.mutate() });
+        return;
+      }
       const s = res.installed;
       // Shared installed-set refresh: the runtime roster, the lock-backed inventory that
       // gates Uninstall, the freshness poll, and the settings schema — install auto-enables
@@ -88,6 +99,7 @@ export function InstallPluginDialog({ open, onClose }: { open: boolean; onClose:
         </Button>
       </div>
       {status ? <p className="plugin-install-status" role="status">{status}</p> : null}
+      {ackDialog}
     </Dialog>
   );
 }

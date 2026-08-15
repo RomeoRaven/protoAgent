@@ -16,6 +16,7 @@ import { errMsg } from "../lib/format";
 import { StatusPill } from "../app/StatusPill";
 import { InstallPluginDialog } from "./InstallPluginDialog";
 import { PluginSettingsDialog } from "./PluginSettingsDialog";
+import { useTrustAck } from "./TrustAckDialog";
 import { PluginFreshness } from "./PluginFreshness";
 import { usePluginManage, usePluginRefresh } from "./usePluginManage";
 import { catalogCategories, filterCatalog } from "./catalog";
@@ -561,9 +562,19 @@ function DiscoverTab() {
   const toast = useToast();
   const refreshAll = usePluginRefresh();
 
+  // Consent gate (#2721): one-click install of an untrusted source answers needs_ack
+  // (nothing fetched) — this path previously had NO confirm at all. The shared hook
+  // asks, acks, and retries.
+  const { requestAck, ackDialog } = useTrustAck({
+    onAckError: (m) => toast({ tone: "error", title: "Couldn't record the trust confirmation", message: m }),
+  });
   const install = useMutation({
     mutationFn: (p: CatalogPlugin) => api.installPlugin(p.repo),
     onSuccess: (res, p) => {
+      if (res.needs_ack) {
+        requestAck({ url: p.repo, source: res.source ?? p.repo, retry: () => install.mutate(p) });
+        return;
+      }
       qc.invalidateQueries({ queryKey: ["plugin-catalog"] });
       // Full installed-set refresh — this path used to invalidate only the catalog +
       // runtime, so the (5-min-stale) settings schema kept no group for the new plugin
@@ -593,6 +604,7 @@ function DiscoverTab() {
 
   return (
     <>
+      {ackDialog}
       <PanelHeader title="Discover" kicker={`${plugins.length} official plugins`} />
       <div className="stage-body">
         <div className="plugin-discover-controls">

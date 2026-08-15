@@ -2,10 +2,12 @@
 
 Backs the console Plugins panel: list installed plugins (with their manifest +
 declared capabilities for review), install from a git URL, uninstall, and
-enable/disable. **Installing AUTO-ENABLES + runs the plugin** (trust-by-default — the
-install dialog carries a static "this enables and runs it" warning only; there is NO
-per-install confirm until the ADR 0071 D3 consent layer lands. Opt out with
-``PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE=1`` for strict install ≠ enable).
+enable/disable. **Installing AUTO-ENABLES + runs the plugin** (trust-by-default,
+ADR 0071 D3): a source that is neither official nor previously acked answers
+``needs_ack`` and the console asks with the one-time "this runs code" confirm;
+``POST /api/plugins/ack`` persists the answer. Opt out with
+``PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE=1`` for strict install ≠ enable (fetch-only —
+no code runs, so the gate is skipped).
 Enable/disable edits ``plugins.enabled`` and hot-reloads.
 
 ENABLE is fully live: tools/middleware/MCP rebuild with the graph, and a plugin's
@@ -38,6 +40,11 @@ from runtime.state import STATE
 
 log = logging.getLogger(__name__)
 
+# Serializes the ack route's read-modify-write of plugins.sources.acked (ADR 0071
+# D3): _CONFIG_WRITE_LOCK guards only the inside of _apply_settings_changes, so two
+# concurrent acks reading the same list would drop one entry without this.
+_ACK_RMW_LOCK = asyncio.Lock()
+
 
 def _sources_allowlist() -> list[str] | None:
     """`plugins.sources.allow` from config, if a fork locked installs down (PR3
@@ -49,9 +56,9 @@ def _sources_allowlist() -> list[str] | None:
 
 def _install_no_enable() -> bool:
     """Opt out of auto-enable-on-install — back to ADR 0027's strict install ≠ enable.
-    Default off: installing a plugin enables + runs it (trust-by-default; the only
-    console-side friction is the install dialog's static warning — the per-install
-    consent ack is ADR 0071 D3, not yet built)."""
+    Default off: installing a plugin enables + runs it (trust-by-default, behind the
+    ADR 0071 D3 consent gate — untrusted sources get the one-time "runs code" ack
+    first). Fetch-only mode also skips that gate: no code runs at install."""
     import os
 
     return os.environ.get("PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE", "").strip().lower() in ("1", "true", "yes")
@@ -234,17 +241,40 @@ def register_plugin_routes(app) -> None:
         # re-registered router is dropped for the mounted one — FastAPI can't swap in place,
         # #942), so the OLD code keeps serving → restart. Install (git clone) doesn't touch
         # the live registry/meta — only the reload does — so this pre-op snapshot is exact.
+        # Consent gate (ADR 0071 D3 S4, #2721): an untrusted source needs the one-time
+        # "this runs code" ack BEFORE anything is fetched. 200-with-needs_ack, not a
+        # 4xx — the client turns it into the confirm dialog and retries after
+        # POST /api/plugins/ack; an error status would render as a failure toast.
+        # Fetch-only installs (PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE=1) skip the gate:
+        # no code runs, so there is nothing to consent to yet — the ENABLE that
+        # follows is the operator's explicit act.
+        if not _install_no_enable():
+            from graph.plugins.trust import normalize_source, source_trusted
+
+            cfg = STATE.graph_config
+            if not source_trusted(
+                url,
+                official=getattr(cfg, "plugins_sources_official", None) if cfg else None,
+                acked=getattr(cfg, "plugins_sources_acked", None) if cfg else None,
+                # Literal-True only: from_dict already parses string forms via
+                # _falsey (#2739), so the attribute is a real bool — but this flag
+                # WIDENS trust, so the gate is belt-and-braces fail-closed against
+                # any exotic value that could ever land on the config object.
+                trust_unverified=(getattr(cfg, "plugins_trust_unverified", False) is True) if cfg else False,
+            ):
+                return {"needs_ack": True, "source": normalize_source(url)}
+
         mounted_before = _mounted_router_ids()
         prev_meta = {p.get("id"): p for p in (STATE.plugin_meta or [])}
 
         from ops import OpContext
         from ops.plugins import install_and_activate
 
-        # Install AUTO-ENABLES + runs the code (ADR 0027, trust-by-default): installing IS
-        # the consent — the dialog's static warning is the only friction; the per-install
-        # "this runs code" ack is ADR 0071 D3, not yet built (the Discover one-click path
-        # has no confirm at all). The op adds it to plugins.enabled + hot-reloads via
-        # _apply_settings_changes — the live-agent rebuild this REST adapter injects. Opt out with
+        # Install AUTO-ENABLES + runs the code (ADR 0027, trust-by-default) — for a
+        # trusted source; an untrusted one was already turned back with needs_ack
+        # above (ADR 0071 D3, both the dialog and the Discover one-click ask). The
+        # op adds it to plugins.enabled + hot-reloads via _apply_settings_changes —
+        # the live-agent rebuild this REST adapter injects. Opt out with
         # PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE=1 (strict install ≠ enable).
         from server.agent_init import _apply_settings_changes
 
@@ -339,6 +369,50 @@ def register_plugin_routes(app) -> None:
         # on the reload reconcile (ADR 0018) — so a surface-ONLY plugin turns off cleanly.
         restart = bool(not want and _lingers_on_disable(prev_meta))
         return {"ok": True, "enabled": want, "reloaded": True, "restart_recommended": restart}
+
+    @app.post("/api/plugins/ack")
+    async def _ack(body: dict | None = None):
+        """Persist a one-time source ack (ADR 0071 D3 S4, #2721). A bare Confirm
+        writes the EXACT normalized source into ``plugins.sources.acked`` (narrowest
+        grant — acking one repo trusts that repo, not its org; org-wide trust is
+        ``sources.official``, fork-overridable). ``trust_all: true`` (the dialog's
+        "don't ask again") flips ``plugins.trust_unverified`` too. Persists through
+        the same write path settings use — an ack that doesn't survive a restart
+        re-asks forever."""
+        body = body or {}
+        url = str(body.get("url", "") or body.get("source", "")).strip()
+        # Never bool(): a string "false" is truthy, and this flag WIDENS trust — the
+        # exact fail-open shape the 2733 review caught on trust_unverified itself.
+        raw_trust = body.get("trust_all")
+        trust_all = raw_trust is True or str(raw_trust or "").strip().lower() in ("1", "true", "yes", "on")
+        # A url is REQUIRED: an ack is consent for a NAMED source the dialog just
+        # showed. A bare {"trust_all": true} would pre-approve every future source
+        # with nothing on screen naming that stake (2734 review) — the global switch
+        # only rides alongside a concrete ack, exactly like the dialog's checkbox.
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+        from graph.plugins.trust import ack_pattern
+
+        from server.agent_init import _apply_settings_changes
+
+        # Serialize the read-modify-write: two concurrent acks both reading the same
+        # acked list would drop one entry (_CONFIG_WRITE_LOCK guards only the inside
+        # of the apply, not this route-level RMW — 2734 review). One process-wide
+        # async lock held across read → merge → apply.
+        async with _ACK_RMW_LOCK:
+            cfg = STATE.graph_config
+            acked = list(getattr(cfg, "plugins_sources_acked", []) or []) if cfg else []
+            pattern = ack_pattern(url)
+            if pattern and pattern not in acked:
+                acked.append(pattern)
+            updates: dict = {"plugins": {"sources": {"acked": acked}}}
+            if trust_all:
+                updates["plugins"]["trust_unverified"] = True
+            # Off the event loop — config write + full graph rebuild (D9 rule).
+            ok, messages = await asyncio.to_thread(_apply_settings_changes, config=updates)
+        if not ok:
+            raise HTTPException(status_code=500, detail="; ".join(messages) or "persisting the ack failed")
+        return {"ok": True, "acked": pattern or None, "trust_all": trust_all}
 
     @app.get("/api/plugins/updates")
     async def _updates():
@@ -455,7 +529,10 @@ def register_plugin_routes(app) -> None:
         if fetched & enabled_now:
             from server.agent_init import _apply_settings_changes
 
-            ok, messages = _apply_settings_changes(
+            # Off the event loop — config write + full graph rebuild (2734 review;
+            # the D9 rule every reload call site follows).
+            ok, messages = await asyncio.to_thread(
+                _apply_settings_changes,
                 config={
                     "plugins": {
                         "enabled": sorted(enabled_now),
@@ -526,7 +603,9 @@ def register_plugin_routes(app) -> None:
 
             enabled = list(getattr(cfg, "plugins_enabled", []) or [])
             disabled = list(getattr(cfg, "plugins_disabled", []) or [])
-            ok, messages = _apply_settings_changes(
+            # Off the event loop — full graph rebuild (2734 review, D9 rule).
+            ok, messages = await asyncio.to_thread(
+                _apply_settings_changes,
                 config={"plugins": {"enabled": enabled, "disabled": disabled}},
             )
             if not ok:
@@ -570,7 +649,9 @@ def register_plugin_routes(app) -> None:
 
             enabled = [p for p in (getattr(cfg, "plugins_enabled", []) or []) if p != plugin_id]
             disabled = [p for p in (getattr(cfg, "plugins_disabled", []) or []) if p != plugin_id]
-            ok, messages = _apply_settings_changes(
+            # Off the event loop — full graph rebuild (2734 review, D9 rule).
+            ok, messages = await asyncio.to_thread(
+                _apply_settings_changes,
                 config={"plugins": {"enabled": enabled, "disabled": disabled}},
             )
             if not ok:
