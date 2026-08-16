@@ -198,7 +198,7 @@ class BundleUpdateResult:
 
 @op(
     name="plugins.update_bundle",
-    mutates=True,
+    risk="disruptive",
     summary="Re-resolve a bundle's ref, reinstall members at the new pins, retire dropped ones, hot-reload.",
 )
 async def update_bundle(
@@ -281,7 +281,7 @@ async def update_bundle(
 
 @op(
     name="plugins.uninstall_bundle",
-    mutates=True,
+    risk="disruptive",
     summary="Uninstall a bundle: its exclusively-owned members + the lock row, then hot-reload.",
 )
 async def uninstall_bundle(
