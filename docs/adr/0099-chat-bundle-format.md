@@ -88,12 +88,93 @@ today, since inline text content already lives in `manifest.json` — the zip co
 stable shape a future binary-attachment slice would add `artifacts/<id>-v<n>.<ext>` members
 to, without another format break.
 
+**D7 — The wire contract: POST the zip, honest `not_configured` when unset, never a
+crash.** `infra/publish/client.py` mirrors `infra/secrets/infisical.py`'s shape (ADR 0080)
+— a typed, never-raise `PublishResult` with a `PublishErrorKind` taxonomy
+(`NOT_CONFIGURED`/`REJECTED`/`NETWORK`/`TIMEOUT`/`BAD_RESPONSE`/`INTERNAL`) instead of
+exceptions, `httpx` with an explicit timeout and a `transport` test seam. The contract
+itself: `POST <publish.endpoint_url>` with the bundle zip as the raw body
+(`Content-Type: application/zip`); success is JSON `{public_url, revoke_token,
+expires_at}`; `429`/`413` are read as `REJECTED` (a real, informative rejection — quota or
+size — surfacing the response's `detail`) rather than a generic failure. `#2685` (the
+hosted service) doesn't exist yet and is a separate, not-yet-started repo — an empty
+`publish.endpoint_url` is the expected default, reported as `not_configured` without
+attempting a network call at all, the same "capability exists, isn't provisioned" shape
+ADR 0094's managed-runtime status uses. `server/chat.py::publish_session` builds the
+bundle **fresh, server-side** for every publish call — never trusts a client-supplied one,
+the same trust boundary `export_session` already draws.
+
+**D8 — Preview and publish are separate routes, not a confirm flag on one.**
+`GET .../publish/preview` (read-only, builds the bundle, sends nothing) and
+`POST .../publish` (builds again, fresh, then attempts the network hop) are two distinct
+endpoints rather than one endpoint with a `confirm: bool` body. Two consequences: the
+preview an operator reviews can never itself trigger a publish by construction (no shared
+mutable "confirmed" state to get wrong), and `publish_session` always publishes the
+thread's *current* state rather than a possibly-stale snapshot from whenever the operator
+first opened the dialog. Both routes sit behind the `chat.publish` developer flag (ADR
+0068, tier `off`) — not because either is destructive (`preview` is as read-only as
+`export`), but because the feature is genuinely incomplete until `#2685` exists: every
+publish attempt is `not_configured` for the foreseeable future, and a permanently-inert
+button in the default UI is worse than an absent one. The console's own gating (the
+`/publish` slash command's `flag:` tag, the tab context-menu item rendering only when
+`useFlag("chat.publish")` is true) is redundant with the server-side 403 by design —
+defense in depth, not the only gate.
+
+**D9 — The pre-publish review reuses real rendering primitives, not a second renderer, but
+doesn't force-fit the live chat components either.** `PublishDialog.tsx` composes the DS
+`Message` bubble, the real `Markdown` renderer, and the real `ToolCalls` card component —
+the same three primitives the live chat uses — rather than building parallel rendering
+for a static bundle preview. It deliberately does **not** reuse the full
+`ChatMessageView`: that component's surface (actions, cost labels, background-report
+cards, reasoning folding, live-streaming state) targets a running turn, none of which
+applies to a read-only preview of already-redacted content, and forcing the fit would
+drag in more risk than it removes. No dedicated artifact-preview component exists
+anywhere in the console (checked before deciding this), so artifacts get a small
+purpose-built summary card — kind/title/version/availability + a trimmed content
+snippet — deliberately **not** a full sandboxed render (that's the hosted viewer's job,
+`#2685`, not this confirm step's).
+
+**D10 — Revocation is a separate configured endpoint, and the local record never leaves
+the server with its token intact.** `#2684` adds `infra/publish/store.py`
+(`published_links.json` at `instance_root`, mirroring `security/devices.py`'s ADR-0087
+shape: atomic write, 0600 permissions — both hold a live credential). The one deliberate
+divergence from that precedent: devices.py never stores a token, only its hash, because a
+device token only ever needs to be *verified* locally; a revoke token has the opposite
+requirement — this instance must *present* it to the hosted service later, and a hash
+can't be reversed back into the original value. So it's stored in plaintext (like any
+other locally-held API credential) but `list_published_links()` — the shape a route can
+hand to the browser — never includes it; only the server-internal `get_link()` does.
+Revocation itself targets `publish.revoke_endpoint_url`, a field **separate** from
+`publish.endpoint_url` rather than a path convention off it (`/revoke` suffix, say) —
+presuming a URL shape on a service that doesn't exist yet would be a guess dressed up as
+a contract, the same reasoning as D7's original wire contract.
+
+**D11 — A link is marked revoked locally only after the hosted service confirms, never
+before.** `revoke_published_link` (`server/chat.py`) is idempotent (revoking an
+already-revoked link is a no-op success, no second network call) and ORDERED: look up the
+stored token → present it to `publish.revoke_endpoint_url` → mark `revoked_at` locally
+**only on a confirmed 2xx**. A local-first mark would tell the operator a link is dead
+while it might still be serving — worse than the honest "still live, revocation isn't
+configured" state `NOT_CONFIGURED` produces when no revoke endpoint is set.
+
+**D12 — Found and fixed a real gap from #2682/#2683 while building this: the
+`publish.*` config fields were unreachable in the Settings UI.** They were mapped to the
+`"Capabilities"` category, but nothing renders that category generically — Skills/MCP/
+Filesystem/Tools are bespoke console panels whose Capabilities-mapped fields surface as a
+sharing/tier chip *inside* them, not through a standalone `SettingsCategoryPanel`. Fixed
+by giving `"Publish"` its **own** dedicated category (`_SECTION_CATEGORY["Publish"] =
+"Publish"`, added to `_CATEGORY_ORDER`), the same pattern `"Secrets manager"` → `"Secrets"`
+already established, with a new Settings ▸ Publish section
+(`SettingsCategoryPanel category="Publish" footer={<PublishedLinksSection />}`) — the
+schema fields and the published-links list/revoke card share one panel, exactly like
+Secrets' fields + status card.
+
 ## Consequences
 
-- `graph/chat_bundle.py` (`build_bundle`, `export_bundle`, `build_bundle_zip`) is a
-  complete, tested unit with **no caller yet** — by design. #2682 (pre-publish review UI)
-  and #2683 (publish client + wire contract) are separate issues that consume this; wiring
-  a REST route was deliberately left to them rather than built prematurely here.
+- `graph/chat_bundle.py` (`build_bundle`, `export_bundle`, `build_bundle_zip`) now has
+  real callers: `server/chat.py::publish_preview`/`publish_session`, behind the two new
+  routes (D7/D8). #2680/#2681 shipped first with no caller (PR #2688); #2682/#2683 wire it
+  in.
 - `plugins/artifact/__init__.py` gained a public consumption seam
   (`resolve_for_bundle`) and a new stored field (`version_count`) — additive, safe for
   existing `history.json` files (old artifacts fall back to `len(versions)` until their next
@@ -103,9 +184,27 @@ to, without another format break.
   (degrades gracefully — never crashes the export). A wording change in
   `plugins/artifact`'s result strings is a silent regression here worth a grep before
   shipping.
+- New config: `publish.endpoint_url` / `publish.timeout_seconds` / `publish.revoke_endpoint_url`
+  (empty/15s/empty defaults) — Settings ▸ Publish, its own category (D12), schema-driven.
+  New developer flag: `chat.publish` (tier `off`, `runtime/flags.py`), removable once
+  `#2685` exists and this graduates out of pre-release.
+- `publish_session` now records every successful publish locally (best-effort — a disk
+  write failure logs a warning and returns `link_id: null` rather than making a REAL
+  success on the hosted side read back as a failure) and returns `link_id` in its
+  response. The console's success note no longer carries the raw revoke token (D10 made
+  that unnecessary) — it points at Settings ▸ Publish instead.
+- The e2e test suite's mock `/api/settings/schema` fixture
+  (`apps/web/e2e/fixtures.mjs`) needed its own "Publish" section added — it's a static
+  fixture, not derived from the real Python schema, so a new core config section is
+  invisible to e2e tests until someone adds it there by hand. Caught by a real e2e run
+  (the schema fields silently rendered empty), not by `tsc`/unit tests.
 
 ## Refs
 
-#2179 (P2 parent) · #2680 (format) · #2681 (builder) · #2682 (pre-publish review UI) ·
-#2683 (publish client + wire contract) · #2684 (revocation) · #2685 (hosted infra, separate
-repo) · #2158/#2181 (P1) · ADR 0091 (agent-snapshot zip/manifest/REVIEW.md precedent).
+#2179 (P2 parent) · #2680/#2681 (format + builder, PR #2688) · #2682/#2683 (pre-publish
+review + publish client, PR #2694) · #2684 (revocation + published-links, this slice) ·
+#2685 (hosted infra, separate repo) · #2158/#2181 (P1) · ADR 0091 (agent-snapshot
+zip/manifest/REVIEW.md precedent, and the `infra/secrets` error-taxonomy pattern D7/D10
+mirror) · ADR 0068 (developer flags) · ADR 0080 (external secrets manager, source of the
+`infra/publish` client shape) · ADR 0087 (device pairing, source of the
+`infra/publish/store.py` registry shape).

@@ -64,9 +64,14 @@ log = logging.getLogger("protoagent.server")
 # Agent setup
 # ---------------------------------------------------------------------------
 
-_event_bus = EventBus()  # Server→client SSE push channel (ADR 0003). Process-
-# lifetime singleton; producers publish, /api/events
-# streams to connected consoles.
+_event_bus = EventBus(ring=512)  # Server→client SSE push channel (ADR 0003). Process-
+# lifetime singleton; producers publish, /api/events streams to connected consoles.
+# ring=512 (was the 128 default, #2692): one shared replay ring across every retained
+# topic on the instance — turn.usage, background.*, activity.*, goal.*, etc. — so a busy
+# instance running several sessions concurrently can evict a background.completed a
+# reconnecting client still needs before it gets replayed. A larger ring buys more
+# headroom without touching the ring's shape; retain=False on the chattiest live-only
+# topics (chat.progress, background.progress) is the other half of that fix.
 
 
 def _bundle_root() -> Path:
@@ -286,6 +291,7 @@ from server.a2a import (  # noqa: E402,F401 — re-export of the extracted A2A s
     _build_agent_card_proto,
     agent_card_routes,
     assert_routable_card_url,
+    register_card_consumer,
     _package_version,
     _record_a2a_telemetry,
     structured_skill_schema,
@@ -969,10 +975,10 @@ def _main():
     # card but does not enforce them). Bearer = YAML auth.token / A2A_AUTH_TOKEN;
     # X-API-Key = <AGENT>_API_KEY; origin = A2A_ALLOWED_ORIGINS.
     #
-    # ``auth_token`` defaults to "" when no YAML/secret token is set — collapse
-    # that to ``None`` so configure() applies the documented A2A_AUTH_TOKEN env
-    # fallback. (configure() treats an explicit "" as "bearer off, no fallback";
-    # protoAgent has no separate apiKey-only flag, so unset ⇒ env, not off.)
+    # Pass auth_token / federation_token raw: None (field absent) tells configure()
+    # to fall back to the env var; "" (explicitly set to empty) means bearer off
+    # with no env fallback (#2691). Collapsing either to None before the call would
+    # silently re-enable auth via the env var when the operator intended it off.
     # Plugin-declared auth-exempt prefixes (namespace-scoped in the manifest parser)
     # — registered before the gate is installed so an inbound webhook / public view
     # page passes under a token-gated deployment.
@@ -990,10 +996,10 @@ def _main():
         fleet_token = None
     auth.install(
         fastapi_app,
-        bearer_token=((STATE.graph_config.auth_token if STATE.graph_config else "") or None),
+        bearer_token=(STATE.graph_config.auth_token if STATE.graph_config else None),
         api_key=os.environ.get(f"{AGENT_NAME_ENV.upper()}_API_KEY", ""),
         allowed_origins_raw=os.environ.get("A2A_ALLOWED_ORIGINS", ""),
-        federation_token=((STATE.graph_config.federation_token if STATE.graph_config else "") or None),
+        federation_token=(STATE.graph_config.federation_token if STATE.graph_config else None),
         fleet_token=fleet_token,
     )
 
@@ -1109,6 +1115,10 @@ def _main():
     # flush) or cancelled+awaited before the last reference drops. Remove once the
     # SDK ships the fix and the pin moves past 1.1.0 (see a2a_impl/registry.py).
     harden_active_task_registry(a2a_request_handler)
+    # The handler captured the card at construction; register it so a hot reload
+    # that changes the skill set (server.a2a.refresh_served_card) updates its
+    # copy in lockstep with the served route (#2754).
+    register_card_consumer(a2a_request_handler)
     add_a2a_routes_to_fastapi(
         fastapi_app,
         # ``agent_card_routes`` (server.a2a) serves the same well-known card as

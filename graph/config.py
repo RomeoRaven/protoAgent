@@ -252,6 +252,11 @@ def _env_default(name: str, default, cast=str):
 
 _FALSE_STRINGS = {"false", "no", "off", "0", ""}
 
+# The one home for the auto-trusted-sources default (ADR 0071 D3) — the field's
+# default_factory and from_dict's absent-key branch both read it, so a fork
+# override or a default change can't drift between the two.
+_OFFICIAL_SOURCES_DEFAULT = ("github.com/protoLabsAI/*",)
+
 
 def _falsey(value, *, default: bool) -> bool:
     """Is this config value a NO? ``default`` is the answer when the key is absent.
@@ -267,6 +272,25 @@ def _falsey(value, *, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in _FALSE_STRINGS
     return not bool(value)
+
+
+def _valid_a2a_skills(entries) -> list[dict]:
+    """Keep only well-formed A2A card skill specs from ``a2a.skills`` (#2754):
+    a dict with truthy ``id``/``name``/``description``, unique by id. The card
+    build hard-indexes all three, so a malformed YAML entry must be dropped HERE
+    with an attributed warning, not surface as a ``KeyError`` inside the
+    boot-time card build. Mirrors ``register_a2a_skill``'s contract for the
+    plugin path — the two ingestion routes enforce one rule."""
+    kept: list[dict] = []
+    for e in entries or []:
+        if not isinstance(e, dict) or not e.get("id") or not e.get("name") or not e.get("description"):
+            log.warning("a2a.skills: skipping malformed entry (needs id+name+description): %r", e)
+            continue
+        if any(k["id"] == e["id"] for k in kept):
+            log.warning("a2a.skills: duplicate skill id %r — keeping the first", e["id"])
+            continue
+        kept.append(e)
+    return kept
 
 
 def _default_filesystem_allow_run() -> bool:
@@ -541,6 +565,17 @@ class LangGraphConfig:
     # base: keyless core + delegation/workflow tools + search_tools).
     tools_deferred_enabled: bool = False
     tools_deferred_keep: list[str] = field(default_factory=list)
+
+    # Skip re-executing an allowlisted read call when this turn's history already
+    # has an up-to-date result for the identical (tool, project, path). Found via a
+    # live-session audit: `read_file` on the same file, called twice non-
+    # consecutively (so stall_guard's stuck-loop detector never saw it), returning
+    # byte-identical truncated content both times. Scoped to explicitly idempotent
+    # read tools only (never state-reading tools like a board/issue listing, which
+    # can legitimately change within a turn as the agent's own actions alter it),
+    # and invalidated the moment a write tool touches the same (project, path) this
+    # turn. OFF by default — new, unproven in production.
+    tools_memoize_reads_enabled: bool = False
 
     # Tool denylist — drop named core tools from the agent without editing
     # ``tools/lg_tools.py::get_all_tools``. A fork keeps what it wants by listing
@@ -933,6 +968,16 @@ class LangGraphConfig:
     # Optional source allowlist for git-URL installs (ADR 0027 D3) — host/org globs
     # (e.g. ``github.com/protoLabsAI/*``); empty = any URL allowed (gated install).
     plugins_sources_allow: list[str] = field(default_factory=list)
+    # Trust & consent (ADR 0071 D3, #2721) — decides only whether the console asks
+    # for a one-time "this runs code" confirm before an install; install ≠ enable ≠
+    # trust semantics are untouched. ``official``: auto-trusted source globs —
+    # default the protoLabsAI org, FORK-OVERRIDABLE (an explicit empty list means
+    # "no official sources", distinct from the key being absent). ``acked``:
+    # sources the operator confirmed once (the ack API appends here).
+    plugins_sources_official: list[str] = field(default_factory=lambda: list(_OFFICIAL_SOURCES_DEFAULT))
+    plugins_sources_acked: list[str] = field(default_factory=list)
+    # The consent dialog's "don't show again" — every source treated as acked.
+    plugins_trust_unverified: bool = False
     # Opt-in auto-update policy (#1720), keyed by plugin id. Each value is a policy
     # dict ``{"track": "main", "when": "idle"}`` — ``track`` opts the plugin in (a
     # non-empty value; the actual ref comes from the lock), ``when`` gates the
@@ -982,19 +1027,18 @@ class LangGraphConfig:
     # env-reading stores (knowledge/scheduler/memory) honor it too.
     instance_id: str = ""
 
-    # A2A bearer token — blank = open mode (local dev). Writing a token
-    # here makes the A2A handler require ``Authorization: Bearer <token>``
-    # on every request and advertises the bearer scheme on the agent card.
-    # Kept in YAML rather than env so the drawer can manage it.
-    auth_token: str = ""
+    # A2A bearer token — None = unset (falls back to A2A_AUTH_TOKEN env),
+    # "" = explicitly off (no env fallback, even if A2A_AUTH_TOKEN is set),
+    # non-empty string = use this token. Kept in YAML / secrets.yaml so the
+    # drawer can manage it; configure() in a2a_impl/auth.py owns the contract.
+    auth_token: str | None = None
 
     # Optional federation token (ADR 0066) — a SECOND credential handed to
     # semi-trusted A2A peers. It reaches only the /a2a + /v1 consumer surfaces;
     # the /api operator surface (plugin install, config rewrite, subagent runs,
-    # the operator goal set-path) is denied it. Blank = no federation tier
-    # (single-token mode; every bearer holder is the operator). Env fallback:
-    # A2A_FEDERATION_TOKEN.
-    federation_token: str = ""
+    # the operator goal set-path) is denied it. None = unset (env fallback);
+    # "" = explicitly off. Env fallback: A2A_FEDERATION_TOKEN.
+    federation_token: str | None = None
 
     # OS-level autostart — ``True`` means the server launches on user
     # login (macOS LaunchAgent today; Linux/Windows TBD). Managed by
@@ -1156,6 +1200,18 @@ class LangGraphConfig:
     secrets_manager_required: bool = False
     secrets_manager_override_env: bool = False
     secrets_manager_timeout_seconds: float = 10.0
+
+    # Hosted chat-thread publishing (#2179 P2, #2683) — POST a redacted bundle
+    # (graph.chat_bundle) to a hosted viewer service and get back a public link. Empty
+    # host is the expected default until the hosted service (#2685, a separate,
+    # not-yet-started repo) exists: publish then reports "not configured" rather than
+    # erroring or silently no-opping. Behind the chat.publish developer flag (ADR 0068).
+    publish_endpoint_url: str = ""
+    publish_timeout_seconds: float = 15.0
+    # Revocation (#2684) — a SEPARATE configured endpoint, not a path convention off
+    # endpoint_url: presuming a URL shape on a service that doesn't exist yet would be a
+    # guess dressed up as a contract. See infra/publish/client.py's revoke_bundle.
+    publish_revoke_endpoint_url: str = ""
 
     def __post_init__(self):
         # PROTOAGENT_MODEL wins over the YAML/default model so an eval sweep can
@@ -1357,6 +1413,7 @@ class LangGraphConfig:
         secrets_manager = data.get("secrets_manager", {})
         secret_sm_client_id = secrets.get("secrets_manager", {}).get("client_id")
         secret_sm_client_secret = secrets.get("secrets_manager", {}).get("client_secret")
+        publish = data.get("publish", {}) or {}
 
         config = cls(
             model_provider=model.get("provider", cls.model_provider),
@@ -1402,6 +1459,9 @@ class LangGraphConfig:
             compaction_model=data.get("compaction", {}).get("model", cls.compaction_model),
             tools_deferred_enabled=data.get("tools", {}).get("deferred", {}).get("enabled", cls.tools_deferred_enabled),
             tools_deferred_keep=list(data.get("tools", {}).get("deferred", {}).get("keep", []) or []),
+            tools_memoize_reads_enabled=data.get("tools", {})
+            .get("memoize_reads", {})
+            .get("enabled", cls.tools_memoize_reads_enabled),
             tools_disabled=list(data.get("tools", {}).get("disabled", []) or []),
             tools_hidden=list(data.get("tools", {}).get("hidden", []) or []),
             settings_hidden=list(data.get("settings", {}).get("hidden", []) or []),
@@ -1518,6 +1578,25 @@ class LangGraphConfig:
             plugins_dir=plugins.get("dir", cls.plugins_dir),
             plugins_allow_unbundled_deps=bool(plugins.get("allow_unbundled_deps", cls.plugins_allow_unbundled_deps)),
             plugins_sources_allow=list((plugins.get("sources", {}) or {}).get("allow", []) or []),
+            # ``official``'s absent-vs-explicit-empty distinction is load-bearing
+            # (#2691's lesson): absent → the protoLabsAI default; an explicit empty
+            # list → "no official sources" (a fork's hardening choice).
+            plugins_sources_official=(
+                list((plugins.get("sources", {}) or {})["official"] or [])
+                if "official" in (plugins.get("sources", {}) or {})
+                else list(_OFFICIAL_SOURCES_DEFAULT)
+            ),
+            plugins_sources_acked=list((plugins.get("sources", {}) or {}).get("acked", []) or []),
+            # `not _falsey(...)`, never bool(): a string "false" (JSON overlay, env,
+            # hand-edit) is truthy, and bool() would silently DISABLE the consent
+            # gate — the 2733 review's fail-open finding. Ambiguity resolves toward
+            # asking, matching _falsey's less-access design. The absent-key default
+            # DERIVES from the field (a fork changing the class default stays
+            # coherent): _falsey answers "is this a NO?", so absent must read as
+            # the negation of the field's default.
+            plugins_trust_unverified=not _falsey(
+                plugins.get("trust_unverified"), default=not cls.plugins_trust_unverified
+            ),
             plugins_update_policy=dict(plugins.get("update_policy", {}) or {}),
             plugins_autoupdate_interval_hours=int(
                 plugins.get("autoupdate_interval_hours", cls.plugins_autoupdate_interval_hours) or 0
@@ -1525,7 +1604,7 @@ class LangGraphConfig:
             identity_name=identity.get("name", cls.identity_name),
             identity_operator=identity.get("operator", cls.identity_operator),
             identity_org=identity.get("org", cls.identity_org),
-            a2a_skills=list(a2a.get("skills", []) or []),
+            a2a_skills=_valid_a2a_skills(a2a.get("skills", []) or []),
             a2a_description=a2a.get("description", "") or "",
             a2a_require_routable_url=bool(a2a.get("require_routable_url", False)),
             instance_id=data.get("instance", {}).get("id", "") or data.get("instance_id", cls.instance_id),
@@ -1555,6 +1634,11 @@ class LangGraphConfig:
             ),
             secrets_manager_timeout_seconds=float(
                 secrets_manager.get("timeout_seconds", cls.secrets_manager_timeout_seconds) or 10.0
+            ),
+            publish_endpoint_url=str(publish.get("endpoint_url", cls.publish_endpoint_url) or ""),
+            publish_timeout_seconds=float(publish.get("timeout_seconds", cls.publish_timeout_seconds) or 15.0),
+            publish_revoke_endpoint_url=str(
+                publish.get("revoke_endpoint_url", cls.publish_revoke_endpoint_url) or ""
             ),
             autostart_on_boot=runtime.get("autostart_on_boot", cls.autostart_on_boot),
             # Box runtime (Host layer, ADR 0047 D8) — file > env > default. The env

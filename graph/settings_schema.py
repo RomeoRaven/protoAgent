@@ -1154,6 +1154,36 @@ FIELDS: list[Field] = [
         minimum=1,
         depends_on={"key": "secrets_manager.enabled"},
     ),
+    # ── Publish (#2179 P2, #2683) — hosted chat-thread viewer ────────────────
+    Field(
+        "publish.endpoint_url",
+        "publish_endpoint_url",
+        "Hosted publish endpoint URL",
+        "string",
+        "Publish",
+        "Where a redacted chat-bundle zip is POSTed when publishing a thread to a "
+        "shareable link (behind the chat.publish developer flag). Empty = publishing "
+        "isn't configured yet — the hosted viewer service doesn't exist as of this "
+        "writing, so leave this unset until you're pointing at a real one.",
+    ),
+    Field(
+        "publish.timeout_seconds",
+        "publish_timeout_seconds",
+        "Publish timeout (seconds)",
+        "number",
+        "Publish",
+        minimum=1,
+    ),
+    Field(
+        "publish.revoke_endpoint_url",
+        "publish_revoke_endpoint_url",
+        "Revoke endpoint URL",
+        "string",
+        "Publish",
+        "Where a revoke token is POSTed to un-share a previously published thread (#2684). "
+        "A separate URL from the publish endpoint above — empty = revocation isn't "
+        "configured, same honest 'not yet' default.",
+    ),
     # ── Plugins ──────────────────────────────────────────────────────────────
     Field(
         "plugins.allow_unbundled_deps",
@@ -1362,7 +1392,7 @@ def _plugin_group(sch, spec) -> str:
 # (host vs agent) is a per-field badge (ADR 0047), NOT a category. Order here is the
 # domain order the console renders. Unknown sections (notably plugin-contributed ones,
 # ADR 0019) default to "Plugins" (the Integrations surface).
-_CATEGORY_ORDER = ["Identity", "Model", "Behavior", "Capabilities", "Knowledge", "Secrets", "Plugins", "Box"]
+_CATEGORY_ORDER = ["Identity", "Model", "Behavior", "Capabilities", "Knowledge", "Secrets", "Publish", "Plugins", "Box"]
 _SECTION_CATEGORY = {
     # Identity — who the agent is (name + persona live in the dedicated Identity panel;
     # these are the operator/org/access fields rendered beneath it).
@@ -1398,6 +1428,13 @@ _SECTION_CATEGORY = {
     # Secrets — the external secrets manager (ADR 0080); the console renders this
     # category as its own sidenav section with a status/test/sync card.
     "Secrets manager": "Secrets",
+    # Publish (#2179 P2, #2683/#2684) — its own dedicated category, same pattern as
+    # Secrets manager above: NOT folded into "Capabilities" (nothing renders that
+    # category generically — Skills/MCP/Filesystem/Tools are bespoke panels whose
+    # Capabilities-mapped fields surface as a sharing/tier chip inside them, not a
+    # standalone SettingsCategoryPanel). The console renders this as its own sidenav
+    # section with a Published Links list+revoke card (mirroring Secrets' status card).
+    "Publish": "Publish",
     # Plugins — the one core FIELD under the Plugins surface (ADR 0093 opt-in). Mapped
     # explicitly (not via the default) so the core-section guard stays honest.
     "Plugins": "Plugins",

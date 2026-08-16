@@ -1,0 +1,51 @@
+---
+// Renders one contiguous run of changelog releases as a timeline (spine + dot per
+// entry). Shared by the current month (always visible) and each collapsed prior
+// month in changelog.astro, so the two never drift.
+//
+// Markup is the design system's .pl-changelog — the same DOM @protolabsai/ui's
+// React <Changelog>/<ChangelogEntry>/<ChangelogChange> emit, so this timeline
+// tracks the brand instead of re-deriving it.
+interface Entry {
+  version: string;
+  date: string;
+  changes: string[];
+}
+
+interface Props {
+  entries: Entry[];
+  // Global position of entries[0] in the full changelog — only the very first
+  // release overall gets the accent "latest" treatment, not the first of
+  // each month.
+  startIndex: number;
+}
+
+const { entries, startIndex } = Astro.props;
+const releases = 'https://github.com/protoLabsAI/protoAgent/releases';
+---
+
+<ol class="pl-changelog">
+  {entries.map(({ version, date, changes }, i) => {
+    const isLatest = startIndex + i === 0;
+    return (
+      <li class={`pl-changelog__entry${isLatest ? ' pl-changelog__entry--latest' : ''}`}>
+        <span class="pl-changelog__dot" aria-hidden="true"></span>
+        <div class="pl-changelog__body">
+          <div class="pl-changelog__meta">
+            <a class="pl-changelog__version" href={`${releases}/tag/${version}`}>{version}</a>
+            <span class="pl-changelog__date">{date}</span>
+            {isLatest && <span class="pl-changelog__latest">latest</span>}
+          </div>
+          <div class="pl-changelog__changes">
+            {changes.map((change) => (
+              <div class="pl-changelog__change">
+                <span class="pl-changelog__bullet" aria-hidden="true">—</span>
+                <span>{change}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </li>
+    );
+  })}
+</ol>

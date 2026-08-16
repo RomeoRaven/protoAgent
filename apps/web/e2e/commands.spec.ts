@@ -10,7 +10,7 @@ import { SLASH_COMMANDS } from "./fixtures.mjs";
 // everything else falls through to the SERVER `/goal`. The menu DEDUPS by token, so a command
 // that's both a client command and a server skill (`/goal`, `/clear`) appears ONCE, client-first
 // — the server duplicate is dropped.
-const CLIENT_SLASH = ["/new", "/clear", "/export", "/btw", "/prompt", "/compact", "/effort", "/model", "/incognito", "/help", "/bypass", "/goal", "/watch"];
+const CLIENT_SLASH = ["/new", "/clear", "/export", "/btw", "/prompt", "/perf", "/compact", "/effort", "/model", "/incognito", "/help", "/bypass", "/goal", "/watch"];
 // The server rows the menu shows, with client-token duplicates deduped away.
 const serverRows = () => SLASH_COMMANDS.map((c) => `/${c.name}`).filter((n) => !CLIENT_SLASH.includes(n));
 
@@ -47,6 +47,23 @@ test("a flag-gated command (/compact, ADR 0068) vanishes when its flag is forced
   await expect(menu).toBeVisible();
   const names = await menu.locator(".slash-name").allInnerTexts();
   expect(names).toEqual([...CLIENT_SLASH.filter((n) => n !== "/compact"), ...serverRows()]);
+});
+
+test("a chat.publish=off command (#2179 P2, #2683) is absent by default and appears when forced on", async ({ page }) => {
+  // Default channel: chat.publish is tier "off" (the hosted service, #2685, doesn't exist
+  // yet), so /publish must NOT be in the base list already asserted above — this test only
+  // needs to confirm the reveal path (a shareable ?flag: link) actually works.
+  await page.goto("/app/?flag:chat.publish=on", { waitUntil: "load" });
+  const composer = page.getByPlaceholder(/Message protoAgent/i);
+  await composer.fill("/");
+
+  const menu = page.locator(".slash-menu");
+  await expect(menu).toBeVisible();
+  const names = await menu.locator(".slash-name").allInnerTexts();
+  expect(names).toContain("/publish");
+  // Registered right after /export in coreSlashCommands.ts — pin the position too, not
+  // just presence, so a future reorder is caught.
+  expect(names.indexOf("/publish")).toBe(names.indexOf("/export") + 1);
 });
 
 test("filtering narrows the menu and selecting completes the command", async ({ page }) => {

@@ -135,6 +135,12 @@ class TurnOutcome:
     llm_calls: int = 0
     tool_calls: int = 0
     models: list[str] = field(default_factory=list)
+    # Per-tool execution durations, tool name → list of durations in ms across this
+    # turn's calls (#2697) — one turn can call the same tool more than once, and
+    # distinct tools too. Empty when the stream's tool_end frames carried no
+    # duration_ms (an older/alternate producer, e.g. a workflow yield) — those calls
+    # still count toward `tool_calls` above, just not toward this durable breakdown.
+    tool_durations: dict[str, list[int]] = field(default_factory=dict)
     # Provenance (ADR 0022) — what triggered this turn, from the inbound A2A
     # message metadata. ``origin`` ∈ scheduler|inbox|webhook|a2a|"" (empty = a
     # live/operator turn); ``trigger`` is a human label (job id / inbox source);
@@ -200,6 +206,39 @@ def _notify_progress(context_id: str, task_id: str, frame: dict) -> None:
         cb(context_id or "", task_id or "", frame)
     except Exception:  # noqa: BLE001 — best-effort, never breaks the turn
         logger.exception("[a2a] progress hook failed for context %s", context_id)
+
+
+def _begin_knowledge_ops():
+    """Arm per-turn knowledge-op accumulation (#2676): hybrid-store query /
+    ingest / embed timings recorded anywhere inside this turn's async context
+    fold into the turn. Returns the disarm token (None if metrics is broken)."""
+    try:
+        from observability import metrics
+
+        return metrics.begin_knowledge_turn()
+    except Exception:  # noqa: BLE001 — telemetry must never break a turn
+        return None
+
+
+def _current_knowledge_ops() -> dict:
+    """The armed turn's knowledge-op durations (op → [ms, ...]), or {}."""
+    try:
+        from observability import metrics
+
+        return metrics.current_knowledge_ops() or {}
+    except Exception:  # noqa: BLE001 — telemetry must never break a turn
+        return {}
+
+
+def _end_knowledge_ops(token) -> None:
+    if token is None:
+        return
+    try:
+        from observability import metrics
+
+        metrics.end_knowledge_turn(token)
+    except Exception:  # noqa: BLE001 — telemetry must never break a turn
+        pass
 
 
 def _text_part(text: str) -> Part:
@@ -369,7 +408,14 @@ class ProtoAgentExecutor(AgentExecutor):
         context_tokens = 0
         llm_calls = 0
         tool_calls = 0
+        _counted_tool_call_ids: set[str] = set()  # dedupe key for tool_calls below
         models: list[str] = []
+        tool_durations: dict[str, list[int]] = {}  # tool name → durations this turn, ms (#2697)
+        # Knowledge-op accumulation (#2676): the stream (and the graph inside it)
+        # runs in THIS call's async context, so hybrid-store query/ingest/embed
+        # timings recorded mid-turn land in the armed contextvar and merge into
+        # `_outcome` below. Disarmed in the `finally` — after every outcome read.
+        knowledge_token = _begin_knowledge_ops()
 
         # Live answer streaming: forward each text delta as an incremental
         # artifact-update (append) frame so the console fills the bubble as the
@@ -521,6 +567,12 @@ class ProtoAgentExecutor(AgentExecutor):
                 pass
 
         def _outcome(state: str, final_text: str, error: str = "") -> TurnOutcome:
+            durations = {k: list(v) for k, v in tool_durations.items()}
+            # Knowledge ops attribute to the SAME per-turn durations blob as tool
+            # calls (#2676), under `knowledge:{op}` pseudo-tool keys — so the
+            # telemetry row (and its by-tool percentiles) needs no new column.
+            for op, samples in _current_knowledge_ops().items():
+                durations.setdefault(f"knowledge:{op}", []).extend(samples)
             return TurnOutcome(
                 task_id=context.task_id,
                 context_id=context.context_id,
@@ -532,6 +584,7 @@ class ProtoAgentExecutor(AgentExecutor):
                 llm_calls=llm_calls,
                 tool_calls=tool_calls,
                 models=list(models),
+                tool_durations=durations,
                 origin=_origin,
                 trigger=_trigger,
                 priority=_priority,
@@ -577,13 +630,37 @@ class ProtoAgentExecutor(AgentExecutor):
                     # in frame-arrival order, so text must reach it before the tool.
                     await _flush_text()
                     if event_type == "tool_start":
-                        tool_calls += 1
+                        # server/chat.py announces a tool_start TWICE per real call — once
+                        # early (streamed tool-call name, empty args, so the card shows
+                        # "running" immediately) and once more at on_chat_model_end (same
+                        # id, full args, to fill the card in) — both intentional, by design.
+                        # A naive increment here double-counted every call; dedupe by the
+                        # tool_call id so a call with no id (a legacy plain-string producer)
+                        # still counts once, and a call announced twice counts once too.
+                        tc_id = payload.get("id") if isinstance(payload, dict) else None
+                        if tc_id is None or tc_id not in _counted_tool_call_ids:
+                            tool_calls += 1
+                            if tc_id is not None:
+                                _counted_tool_call_ids.add(tc_id)
                         # The overwhelmingly likely thing to wedge a turn is a tool
                         # that never returns, so name it for the stall message.
                         name = payload.get("name") if isinstance(payload, dict) else None
                         last_activity[0] = f"running the `{name}` tool" if name else "running a tool"
                     else:
                         last_activity[0] = "waiting for the model"
+                        # #2697: only tool_end carries a finished duration, and only from
+                        # the main turn-loop's on_tool_start/on_tool_end pair — other
+                        # tool_end producers (a workflow-step yield, a subagent-result
+                        # summary) don't stamp one. Those calls still counted above, they
+                        # just contribute no durable duration sample. `duration_ms == 0`
+                        # is the on_tool_start-had-no-run_id fallback, not a real
+                        # sub-millisecond call (there's always at least async/model-loop
+                        # overhead) — treated the same as "unmeasured", not "instant".
+                        if isinstance(payload, dict):
+                            end_name = payload.get("name")
+                            duration_ms = payload.get("duration_ms")
+                            if end_name and isinstance(duration_ms, int) and duration_ms > 0:
+                                tool_durations.setdefault(end_name, []).append(duration_ms)
                     part, tc_meta = _tool_call_frame(event_type, payload)
                     if part is not None or tc_meta is not None:
                         await updater.update_status(
@@ -707,6 +784,12 @@ class ProtoAgentExecutor(AgentExecutor):
             logger.exception("[a2a] execute crashed for task %s", context.task_id)
             await updater.failed(message=updater.new_agent_message([_text_part(str(exc))]))
             _notify_terminal(_outcome("failed", accumulated, error=str(exc)))
+
+        finally:
+            # Every `_outcome` read happens in the except/return paths above, so
+            # disarming here can never lose a turn's samples. Also covers the
+            # input_required park — the resumed execute() re-arms fresh.
+            _end_knowledge_ops(knowledge_token)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)

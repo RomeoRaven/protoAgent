@@ -1609,7 +1609,7 @@ wheels = [
 
 [[package]]
 name = "protolabs-agent"
-version = "0.136.0"
+version = "0.137.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["fastapi", "http-server", "sqlite"] },
@@ -1636,6 +1636,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "qrcode" },
+    { name = "regex" },
     { name = "ruamel-yaml" },
     { name = "truststore" },
     { name = "tzdata" },
@@ -1671,6 +1672,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qrcode", specifier = ">=8" },
+    { name = "regex", specifier = ">=2024.11.6" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "truststore", specifier = ">=0.10" },
     { name = "tzdata" },

@@ -149,6 +149,9 @@ FROM_YAML_EXAMPLE_FIELDS = {
     "secrets_manager_required": False,
     "secrets_manager_override_env": False,
     "secrets_manager_timeout_seconds": 10.0,
+    "publish_endpoint_url": "",
+    "publish_timeout_seconds": 15.0,
+    "publish_revoke_endpoint_url": "",
     "knowledge_backend": "",
     "knowledge_db_path": "/sandbox/knowledge/agent.db",
     "knowledge_scope": "",
@@ -202,6 +205,9 @@ FROM_YAML_EXAMPLE_FIELDS = {
     "plugins_disabled": [],
     "plugins_enabled": [],
     "plugins_sources_allow": [],
+    "plugins_sources_official": ["github.com/protoLabsAI/*"],  # ADR 0071 D3 (#2721)
+    "plugins_sources_acked": [],
+    "plugins_trust_unverified": False,
     "plugins_update_policy": {},
     "presence_penalty": None,
     "prompt_cache_enabled": True,
@@ -243,6 +249,7 @@ FROM_YAML_EXAMPLE_FIELDS = {
     "thinking": "",
     "tools_deferred_enabled": False,
     "tools_deferred_keep": [],
+    "tools_memoize_reads_enabled": False,
     "tools_disabled": [],
     "tools_hidden": [],
     "settings_hidden": [],
@@ -275,8 +282,9 @@ def test_from_yaml_example_golden():
 
     # Redacted / unpinned fields get dedicated assertions.
     assert cfg.api_key == ""
-    assert cfg.auth_token == ""
-    assert cfg.federation_token == ""  # ADR 0066 secret — redacted, no example value
+    # auth_token/federation_token default to None (absent = check env, not "explicitly off")
+    assert cfg.auth_token is None
+    assert cfg.federation_token is None  # ADR 0066 secret — no example value
     assert isinstance(cfg.plugin_config, dict)
 
     # Every other dataclass field must match the captured golden exactly.
@@ -355,7 +363,8 @@ _LEGACY_EMITTED_ATTRS = {
     "plugins_update_policy",
     "plugins_autoupdate_interval_hours",
 }
-# Redacted secrets (api_key / auth_token / federation_token) resolve to "" on both sides.
+# Redacted secrets: api_key defaults to ""; auth_token/federation_token default to None.
+# config_to_dict writes "" for all secrets; a raw YAML round-trip reads "" back.
 EMITTED_ATTRS = _FIELDS_ATTRS | _LEGACY_EMITTED_ATTRS
 
 
@@ -376,8 +385,11 @@ def test_round_trip_preserves_emitted_fields(tmp_path):
         original = getattr(cfg, attr)
         round_tripped = getattr(reloaded, attr)
         if attr in ("api_key", "auth_token", "federation_token"):
-            # Redacted secrets resolve to "" on both sides (no secrets.yaml).
-            assert original == "" and round_tripped == "", attr
+            # Secrets are redacted to "" by config_to_dict; a raw YAML round-trip
+            # reads "" back. api_key defaults to "", auth_token/federation_token
+            # default to None (absent) — so original may be "" or None.
+            assert original in ("", None), attr
+            assert round_tripped == "", attr
             continue
         assert round_tripped == original, f"{attr}: {round_tripped!r} != {original!r}"
 
@@ -729,7 +741,14 @@ def test_plugins_disabled_and_sources_allow_survive_config_to_dict():
         "disabled": ["beta"],
         "dir": "/custom/plugins",
         "allow_unbundled_deps": False,
-        "sources": {"allow": ["github.com/protolabsai/*"]},
+        # official/acked/trust_unverified joined the section with ADR 0071 D3 (#2721) —
+        # the ack store rides the same write path N6 fixed for disabled/sources.allow.
+        "sources": {
+            "allow": ["github.com/protolabsai/*"],
+            "official": ["github.com/protoLabsAI/*"],
+            "acked": [],
+        },
+        "trust_unverified": False,
         "update_policy": {},
         "autoupdate_interval_hours": 6,
     }

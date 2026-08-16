@@ -9,6 +9,7 @@ import type {
   ArchetypePreview,
   BackgroundJobDTO,
   BrowseListing,
+  ChatBundleManifest,
   FsProject,
   ManagedProjects,
   Task,
@@ -38,6 +39,7 @@ import type {
   MemorySessionDigest,
   PromptCall,
   PromptTaskResponse,
+  PublishedLink,
   NodeRuntimePayload,
   PythonRuntimePayload,
   RuntimeStatus,
@@ -1622,6 +1624,9 @@ export const api = {
     // `secrets` carry values for the bundle's declared secrets. Omitted → env-only.
     inputs?: Record<string, string>;
     secrets?: { key: string; value: string }[];
+    // The picked archetype's capability contract (#2277), persisted to the member's
+    // workspace.yaml so it can warn at boot when its toolset doesn't cover the persona.
+    requires_tools?: string[];
   }) {
     return request<{ ok: boolean; agent: FleetAgent; installed: string[] }>("/api/fleet", {
       method: "POST",
@@ -1783,6 +1788,53 @@ export const api = {
       reason: string;
       message: string;
     }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/export${q}`, { method: "GET" });
+  },
+
+  // Build the structured chat-bundle for the pre-publish review (#2179 P2, #2682) —
+  // read-only, sends nothing anywhere. Behind the `chat.publish` developer flag.
+  fetchPublishPreview(sessionId: string, title?: string) {
+    const q = title ? `?title=${encodeURIComponent(title)}` : "";
+    return request<{
+      found: boolean;
+      manifest: ChatBundleManifest | null;
+      message_count: number;
+      redactions: string[];
+      reason: string;
+      message: string;
+    }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/publish/preview${q}`, { method: "GET" });
+  },
+
+  // Publish a chat thread to the hosted viewer (#2179 P2, #2683). Rebuilds the bundle
+  // server-side fresh — never sends the client-side preview back up — so `published:
+  // false` with `reason: "not_configured"` is the expected state until the hosted
+  // service (#2685) exists and an operator points `publish.endpoint_url` at it.
+  publishChatSession(sessionId: string, title?: string) {
+    return request<{
+      published: boolean;
+      link_id?: string | null;
+      public_url?: string;
+      revoke_token?: string;
+      expires_at?: string | null;
+      redactions?: string[];
+      artifact_notes?: string[];
+      reason?: string;
+      message: string;
+    }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/publish`, { method: "POST", body: { title } });
+  },
+
+  // Everything this instance has published (#2684) — never includes the revoke token,
+  // which stays server-internal (presented to the hosted service by the revoke call
+  // below, never sent back to the browser after the initial publish).
+  publishedLinks() {
+    return request<{ links: PublishedLink[] }>("/api/chat/publish/links");
+  },
+  // `ok: false` with `reason: "not_configured"` when no revoke endpoint is set — same
+  // honest-state shape as publishing itself, not an error status.
+  revokePublishedLink(id: string) {
+    return request<{ ok: boolean; reason?: string; error?: string }>(
+      `/api/chat/publish/links/${encodeURIComponent(id)}/revoke`,
+      { method: "POST" },
+    );
   },
 
   // `/btw` (#2180): ask a side question about this session's context WITHOUT changing
@@ -2239,7 +2291,12 @@ export const api = {
   },
   // Git-installed plugins (ADR 0027). install fetches code only (does NOT enable).
   installedPlugins() {
-    return request<{ plugins: InstalledPlugin[] }>("/api/plugins/installed");
+    // `bundles` = the lock's bundles[] registry verbatim (#2718) — the authoritative
+    // installed-bundle list (a bundle whose members were all removed individually
+    // still has a row and is still uninstallable). Optional: absent on older backends.
+    return request<{ plugins: InstalledPlugin[]; bundles?: { id: string; name?: string }[] }>(
+      "/api/plugins/installed",
+    );
   },
   // The curated official-plugin directory (Discover, ADR 0059), merged with install
   // state. One-click install posts each entry's `repo` to installPlugin().
@@ -2247,19 +2304,53 @@ export const api = {
     return request<{ plugins: CatalogPlugin[] }>("/api/plugins/catalog");
   },
   // Install AUTO-ENABLES + runs the plugin (trust-by-default): `enabled` lists the
-  // ids now live; `reloaded` whether the hot-reload landed; `enable_error` is set if
-  // the install succeeded but the enable-reload failed (enable it manually then).
-  installPlugin(url: string, ref?: string, force?: boolean) {
+  // ids now in plugins.enabled; `reloaded` whether the hot-reload landed; `enable_error`
+  // is set if the install succeeded but the enable-reload failed (enable it manually
+  // then). `load_errors` (#2716) maps enabled ids that FAILED to import on that reload —
+  // in plugins.enabled but not running — optional so older backends parse fine.
+  installPlugin(
+    url: string,
+    ref?: string,
+    force?: boolean,
+    // Bundle create-time seed values (#2041/#2118): `inputs` fill the bundle's MCP
+    // `${input}` placeholders, `secrets` its declared secrets — same body shapes as
+    // POST /api/fleet. Omitted → env-only seeding.
+    seed?: { inputs?: Record<string, string>; secrets?: { key: string; value: string }[] },
+  ) {
     return request<{
       installed: PluginInstallSummary;
       enabled: string[];
       reloaded: boolean;
       restart_recommended: boolean;
       enable_error: string | null;
+      load_errors?: Record<string, string>;
+      // Consent gate (ADR 0071 D3, #2721): set INSTEAD of the fields above when the
+      // source needs a one-time "this runs code" confirm — nothing was fetched.
+      // Ack via ackPluginSource, then retry the install.
+      needs_ack?: boolean;
+      source?: string;
     }>(
       "/api/plugins/install",
-      { method: "POST", body: { url, ref: ref || undefined, force: force || undefined } },
+      {
+        method: "POST",
+        body: {
+          url,
+          ref: ref || undefined,
+          force: force || undefined,
+          inputs: seed?.inputs,
+          secrets: seed?.secrets,
+        },
+      },
     );
+  },
+  // One-time source consent (ADR 0071 D3, #2721): persists the exact normalized repo
+  // into plugins.sources.acked (trustAll also flips plugins.trust_unverified — the
+  // dialog's "don't ask again"). The caller retries its install afterwards.
+  ackPluginSource(url: string, trustAll?: boolean) {
+    return request<{ ok: boolean; acked: string | null; trust_all: boolean }>("/api/plugins/ack", {
+      method: "POST",
+      body: { url, trust_all: trustAll || undefined },
+    });
   },
   // Server-side directory listing behind the path pickers. Deliberately the SERVER's
   // filesystem: the console may be configuring a different machine, and the browser's
@@ -2306,9 +2397,39 @@ export const api = {
     );
   },
   // Per-plugin freshness (ADR 0027). The backend TTL-caches the ls-remote probe,
-  // so polling is cheap; each row carries behind/pinned/error.
+  // so polling is cheap; each row carries behind/pinned/error. `bundles` (#2718,
+  // ADR 0049 D4) is the same status per installed bundle — behind there means the
+  // bundle REPO's manifest moved (member pins may move with it on update). Optional
+  // so older backends parse fine.
   pluginUpdates() {
-    return request<{ plugins: PluginUpdate[] }>("/api/plugins/updates");
+    return request<{ plugins: PluginUpdate[]; bundles?: PluginUpdate[] }>("/api/plugins/updates");
+  },
+  // Bundle-level update (#2718): re-resolves the bundle's ref (release-tag pins move
+  // to the newest semver), re-pins every member, retires members the new manifest
+  // dropped, hot-reloads. The declared enable set re-applies WITHOUT undoing an
+  // operator's explicit disable.
+  updateBundle(id: string) {
+    return request<{
+      installed: PluginInstallSummary;
+      enabled: string[];
+      reloaded: boolean;
+      restart_recommended: boolean;
+      enable_error: string | null;
+      load_errors: Record<string, string>;
+      removed_members: string[];
+      retire_error: string | null;
+    }>(`/api/plugins/bundles/${encodeURIComponent(id)}/update`, { method: "POST" });
+  },
+  // One-action bundle removal (#2718): exclusively-owned members + the lock row;
+  // members shared with another bundle (or re-installed directly) are kept.
+  uninstallBundle(id: string, purge?: boolean) {
+    return request<{
+      ok: boolean;
+      removed_members: string[];
+      kept: string[];
+      reloaded: boolean;
+      reload_error: string | null;
+    }>(`/api/plugins/bundles/${encodeURIComponent(id)}${purge ? "?purge=true" : ""}`, { method: "DELETE" });
   },
   // Re-clone every locked plugin that's missing on disk (fresh clone / restored
   // data dir). Fetches at the lock's resolved_sha; already-enabled plugins come
