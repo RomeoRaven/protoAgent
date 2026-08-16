@@ -15,6 +15,35 @@ import sys
 from graph.plugins import installer, scaffold
 
 
+def _enabled_in_live_config(plugin_id: str) -> bool:
+    """Was the plugin in ``plugins.enabled`` before this uninstall? Read from the live
+    YAML (the CLI runs without a loaded LangGraphConfig — same pattern as
+    ``installer.configured_allowlist``). Best-effort: unreadable config → False."""
+    try:
+        import yaml
+
+        from graph.config_io import config_yaml_path
+
+        cfg_path = config_yaml_path()
+        if not cfg_path.exists():
+            return False
+        data = yaml.safe_load(cfg_path.read_text()) or {}
+        return plugin_id in ((data.get("plugins") or {}).get("enabled") or [])
+    except Exception:  # noqa: BLE001 — advisory only, never block the uninstall
+        return False
+
+
+def _live_servers() -> list[dict]:
+    """Live protoAgent servers sharing this data root (#818 heartbeats, stale-pruned).
+    From this non-server process every running server on the instance shows up."""
+    try:
+        from infra.paths import colocated_instances
+
+        return colocated_instances()
+    except Exception:  # noqa: BLE001 — advisory only
+        return []
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m server plugin",
@@ -73,6 +102,19 @@ def _build_parser() -> argparse.ArgumentParser:
     pu = sub.add_parser("uninstall", help="remove a git-installed plugin (code + lock + enabled ref)")
     pu.add_argument("id")
     pu.add_argument("--purge", action="store_true", help="also remove the plugin's config section + secrets")
+    pub = sub.add_parser(
+        "update-bundle",
+        help="re-resolve a bundle's ref + reinstall members at the new pins (#2718; code+lock only — "
+        "a running server picks the new code up on restart/reload)",
+    )
+    pub.add_argument("id", help="the bundle id (see plugins.lock bundles[])")
+    pub.add_argument("--ref", default=None, help="override the recorded ref (tag/branch/SHA)")
+    pux = sub.add_parser(
+        "uninstall-bundle",
+        help="remove a bundle: its exclusively-owned members + the lock row (shared members stay)",
+    )
+    pux.add_argument("id", help="the bundle id")
+    pux.add_argument("--purge", action="store_true", help="also remove each member's config + secrets")
     sub.add_parser("sync", help="re-clone locked plugins at their pinned SHA (reproducible set)")
     pd = sub.add_parser("install-deps", help="pip-install a plugin's declared requires_pip (explicit code-exec)")
     pd.add_argument("id")
@@ -133,7 +175,8 @@ def run_plugin_cli(argv: list[str]) -> int:
             print(f"  wrote: {', '.join(res.made)}")
             if not members:
                 print("  fill in the REPLACE_ME member(s), then:")
-            print("  commit/push it, then `plugin install <repo-url>` to install + enable the stack (ADR 0040).")
+            # NB: CLI install is fetch-only (never enables) — don't promise otherwise here.
+            print("  commit/push it, then `plugin install <repo-url>` to install the bundle (ADR 0040).")
             return 0
         if args.cmd == "install":
             s = installer.install(args.url, args.ref, force=args.force, allow=installer.configured_allowlist())
@@ -152,7 +195,7 @@ def run_plugin_cli(argv: list[str]) -> int:
                     )
                 if s["enabled"]:
                     print(
-                        f"  NOT enabled. To turn on the stack, set plugins.enabled to include: "
+                        f"  NOT enabled. To turn on the bundle's plugins, set plugins.enabled to include: "
                         f"[{', '.join(s['enabled'])}], then restart."
                     )
                 if s["config"]:
@@ -190,6 +233,7 @@ def run_plugin_cli(argv: list[str]) -> int:
                     print(f"  {e['id']:20} {e['resolved_sha'][:10]}  {e['source_url']}")
             return 0
         if args.cmd == "uninstall":
+            was_enabled = _enabled_in_live_config(args.id)
             rep = installer.uninstall(args.id, purge=args.purge)
             print(f"✓ uninstalled {args.id} — removed: {', '.join(rep['removed'])}")
             if rep["deps_left"]:
@@ -198,6 +242,64 @@ def run_plugin_cli(argv: list[str]) -> int:
                 )
             if not args.purge:
                 print("  config + secrets kept (reinstall restores them). Use --purge to remove them too.")
+            # This CLI runs OUT-OF-PROCESS: it scrubs disk + config, but a running server
+            # keeps the plugin's tools/routers live until its next restart or config
+            # reload (#2717 — the console uninstall route does the live teardown; a
+            # separate process can't). Detect a live server on this data root via the
+            # #818 heartbeats and say so, instead of silently diverging.
+            if was_enabled:
+                for inst in _live_servers():
+                    where = f"pid {inst['pid']}" + (f", port {inst['port']}" if inst.get("port") else "")
+                    print(
+                        f"  ⚠ a protoAgent server is RUNNING ({where}) — {args.id} stays loaded in it "
+                        f"until a restart or config reload. For a live teardown, uninstall from the "
+                        f"console (Settings ▸ Plugins) instead."
+                    )
+            return 0
+        if args.cmd == "update-bundle":
+            entry = installer.bundle_entry(args.id)
+            if entry is None:
+                print(f"✗ bundle {args.id!r} is not installed (see plugins.lock bundles[])", file=sys.stderr)
+                return 1
+            before = [str(p) for p in entry.get("plugins") or []]
+            ref = args.ref or (entry.get("requested_ref") or None)
+            if ref and installer.is_release_tag(ref) and not args.ref:
+                # A release-tag pin is immutable — target the newest semver tag, like
+                # the console update path. An explicit --ref always wins.
+                status = installer.check_plugin_update(entry)
+                ref = status.get("latest_ref") or ref
+            s = installer.install(
+                str(entry.get("source_url") or ""), ref, force=True, by=f"cli-update-bundle:{args.id}",
+                allow=installer.configured_allowlist(),
+            )
+            print(f"✓ updated bundle {s.get('bundle', args.id)} @ {s.get('resolved_sha', '')[:10]}")
+            for p in s.get("installed") or []:
+                print(f"  ✓ {p['id']} v{p['version']} @ {p['resolved_sha'][:10]}")
+            for pid in installer.orphaned_bundle_members(args.id, before):
+                installer.uninstall(pid)
+                print(f"  − retired {pid} (dropped from the bundle manifest)")
+            for inst in _live_servers():
+                where = f"pid {inst['pid']}" + (f", port {inst['port']}" if inst.get("port") else "")
+                print(f"  ⚠ a protoAgent server is RUNNING ({where}) — new code goes live on its next restart/reload.")
+            return 0
+        if args.cmd == "uninstall-bundle":
+            rep = installer.uninstall_bundle(args.id, purge=args.purge)
+            print(
+                f"✓ uninstalled bundle {args.id} — members removed: {', '.join(rep['removed_members']) or 'none'}"
+            )
+            if rep["kept"]:
+                print(f"  kept (shared with another bundle / re-installed directly): {', '.join(rep['kept'])}")
+            if rep["skipped_missing"]:
+                print(f"  already gone (uninstalled individually earlier): {', '.join(rep['skipped_missing'])}")
+            for pid, why in (rep.get("failed") or {}).items():
+                print(f"  ✗ {pid} could not be removed: {why}")
+            if rep["removed_members"]:
+                for inst in _live_servers():
+                    where = f"pid {inst['pid']}" + (f", port {inst['port']}" if inst.get("port") else "")
+                    print(
+                        f"  ⚠ a protoAgent server is RUNNING ({where}) — removed members stay loaded in it "
+                        f"until a restart or config reload."
+                    )
             return 0
         if args.cmd == "sync":
             for r in installer.sync(allow=installer.configured_allowlist()):

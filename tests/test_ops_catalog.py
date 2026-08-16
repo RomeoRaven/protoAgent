@@ -17,6 +17,8 @@ def test_load_all_registers_every_op_family():
         "knowledge.ingest",
         "knowledge.ingest_preview",
         "plugins.install_and_activate",
+        "plugins.update_bundle",
+        "plugins.uninstall_bundle",
         "config.set",
         "config.get",
         "fleet.up",
@@ -35,6 +37,8 @@ def test_load_all_registers_every_op_family():
         "knowledge.ingest": "reversible",
         "knowledge.ingest_preview": "read",
         "plugins.install_and_activate": "disruptive",
+        "plugins.update_bundle": "disruptive",
+        "plugins.uninstall_bundle": "destructive",
     }
     assert {name: specs[name].risk for name in expected_risks} == expected_risks
     assert all(spec.mutates is (spec.risk != "read") for spec in specs.values())
@@ -64,7 +68,7 @@ def test_operations_cli_prints_catalog(capsys):
     assert run_operations_cli([]) == 0
     out = capsys.readouterr().out
     assert "config.set" in out and "fleet.status" in out
-    assert "[disruptive]" in out and "[read" in out
+    assert "[disruptive" in out and "[destructive]" in out and "[read" in out
 
     assert run_operations_cli(["--json"]) == 0
     data = json.loads(capsys.readouterr().out)

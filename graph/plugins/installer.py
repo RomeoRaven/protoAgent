@@ -83,6 +83,13 @@ class InstallError(RuntimeError):
     """A plugin install/uninstall/sync failed (bad URL, manifest, git, collision)."""
 
 
+class BundleNotInstalledError(InstallError):
+    """The named bundle has no ``plugins.lock`` row — typed so HTTP adapters can map
+    "doesn't exist" to 404 without string-matching. Raised by the op itself, so the
+    mapping stays correct even when a concurrent DELETE removes the bundle just
+    before the op runs (there is no route-level pre-check to race)."""
+
+
 def live_plugins_dir() -> Path:
     """Where git-installed plugins land — the live dir the loader discovers
     (``instance_paths().plugins_dir``, honoring ``PROTOAGENT_PLUGINS_DIR``)."""
@@ -120,13 +127,18 @@ def _validate_ref(ref: str) -> None:
 
 def _source_allowed(url: str, allow: list[str] | None) -> bool:
     """Optional fork lock-down (ADR 0027 D3): if an allowlist is configured, the
-    URL must match one of its host/org globs (e.g. ``github.com/protoLabsAI/*``)."""
+    URL must match one of its host/org globs (e.g. ``github.com/protoLabsAI/*``).
+
+    The predicate is ``trust.source_matches`` — ONE function shared with the trust
+    matcher (they drifted byte-for-byte twice; the 2739 panel asked for one home):
+    path-boundary widening (never bare ``pat*``), both sides normalized, with the
+    ``.git`` trim applied only to glob-free entries (a glob's ``.git`` suffix is
+    semantics, not spelling)."""
     if not allow:
         return True
-    import fnmatch
+    from graph.plugins.trust import source_matches
 
-    norm = re.sub(r"^(https?://|git://|ssh://|git@)", "", url).replace(":", "/")
-    return any(fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(norm, pat + "*") for pat in allow)
+    return source_matches(url, allow)
 
 
 def _normalize_lock(data: object) -> dict:
@@ -202,7 +214,21 @@ def _write_lock(data: dict) -> None:
     )
     lock = lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(json.dumps(data, indent=2) + "\n")
+    # Atomic + concurrency-safe: a crash mid-write must not leave a truncated lock
+    # that _read_lock treats as FRESH (silently dropping every pin), and each writer
+    # stages to its OWN temp file — a shared ".tmp" path let two concurrent writes
+    # interleave into a corrupt replace (coderabbit on the 2739 thread).
+    fd, tmp_name = tempfile.mkstemp(dir=lock.parent, prefix=lock.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp_name, lock)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _audit(action: str, args: dict, summary: str, *, success: bool = True) -> None:
@@ -754,6 +780,26 @@ def bundle_config_overlay(bundle_config: dict | None, current: dict | None) -> d
     return overlay
 
 
+# Every archetype: key the reader (`fleet_routes._archetypes`) consumes. The block is
+# otherwise cached verbatim into plugins.lock, so anything outside this set is dead
+# weight the author almost certainly misspelled.
+_ARCHETYPE_KEYS = {"label", "icon", "blurb", "soul", "soul_preset", "tier", "requires", "requires_tools"}
+
+
+def _checked_archetype_block(bundle_id: str, arch: dict | None) -> dict:
+    """The bundle's ``archetype:`` block, warning on keys no reader consumes (#2715)."""
+    arch = dict(arch or {})
+    unknown = sorted(set(arch) - _ARCHETYPE_KEYS)
+    if unknown:
+        log.warning(
+            "[plugins] bundle %s archetype: block has unknown key(s) %s — known keys: %s",
+            bundle_id,
+            ", ".join(unknown),
+            ", ".join(sorted(_ARCHETYPE_KEYS)),
+        )
+    return arch
+
+
 def _install_bundle(
     bundle: dict, bundle_url: str, bundle_sha: str, ref: str | None, *, force: bool, by: str, allow: list[str] | None
 ) -> dict:
@@ -809,8 +855,10 @@ def _install_bundle(
             # manifest (#2041, slice 1).
             "secrets": list(bundle.get("secrets") or []),
             # Archetype metadata (ADR 0042) cached here so the new-agent picker can offer
-            # this bundle as a starter type without re-reading its manifest.
-            "archetype": bundle.get("archetype") or {},
+            # this bundle as a starter type without re-reading its manifest. Unknown keys
+            # are cached but never read — warn (not fail) so a typo'd field (`souls:`,
+            # `require_tools:`) surfaces at install instead of vanishing silently (#2715).
+            "archetype": _checked_archetype_block(bid, bundle.get("archetype")),
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "by": by,
         }
@@ -1320,6 +1368,136 @@ def check_updates() -> list[dict]:
     Pinned-to-SHA plugins skip the network; the rest ls-remote their ref (TTL-cached,
     timeout-bounded) and report ``behind``. Network errors are non-fatal per entry."""
     return [check_plugin_update(e) for e in _read_lock()["plugins"]]
+
+
+# ── Bundle-level lifecycle (ADR 0049 D4, #2718) ────────────────────────────────
+# A bundle was first-class at install and never again: `check_updates`/`sync` read
+# lock["plugins"] only, and uninstall had no bundle notion — so a published stack's
+# pin never moved on an installed host, and removing one meant hand-uninstalling
+# members against a provenance row that slowly went stale.
+
+
+def bundle_entry(bundle_id: str) -> dict | None:
+    """The ``lock["bundles"]`` row for ``bundle_id`` (None when not installed)."""
+    return next((b for b in _read_lock().get("bundles") or [] if b.get("id") == bundle_id), None)
+
+
+def check_bundle_updates() -> list[dict]:
+    """Bundle-level update status. A bundle lock row carries the same
+    ``{id, source_url, requested_ref, resolved_sha}`` shape as a plugin row, so each
+    rides ``check_plugin_update`` unchanged — ``behind`` means the bundle REPO moved
+    (its member pins may have moved with it; ``ops.plugins.update_bundle``
+    re-resolves them). Same pinned/release-tag/TTL semantics as plugins."""
+    return [check_plugin_update(b) for b in _read_lock().get("bundles") or []]
+
+
+def _bundle_ownership(bundle_id: str) -> tuple[dict | None, set[str], dict[str, str]]:
+    """The shared ownership scan (extracted per the 2732 review): the bundle's lock
+    row, the member ids every OTHER bundle row lists, and each installed plugin's
+    ``by`` provenance. The rule everywhere: a member is exclusively this bundle's
+    iff it still carries ``by == bundle:<id>`` and no other row lists it."""
+    lock = _read_lock()
+    row = next((b for b in lock.get("bundles") or [] if b.get("id") == bundle_id), None)
+    listed_elsewhere: set[str] = set()
+    for b in lock.get("bundles") or []:
+        if b.get("id") != bundle_id:
+            listed_elsewhere.update(str(p) for p in b.get("plugins") or [])
+    by_of = {str(e.get("id")): e.get("by", "") for e in lock.get("plugins") or []}
+    return row, listed_elsewhere, by_of
+
+
+def _exclusively_owned(pid: str, bundle_id: str, listed_elsewhere: set[str], by_of: dict[str, str]) -> bool:
+    return pid not in listed_elsewhere and by_of.get(pid, "") == f"bundle:{bundle_id}"
+
+
+def exclusive_bundle_members(bundle_id: str) -> list[str]:
+    """The bundle's members owned ONLY by it: still carrying this bundle's ``by``
+    provenance in ``lock["plugins"]`` and not listed by any other bundle row. These
+    are what ``uninstall_bundle`` removes — a member another bundle lists, or one the
+    operator re-installed directly since (its ``by`` moved), stays."""
+    row, listed_elsewhere, by_of = _bundle_ownership(bundle_id)
+    if row is None:
+        return []
+    return [
+        str(pid)
+        for pid in row.get("plugins") or []
+        if _exclusively_owned(str(pid), bundle_id, listed_elsewhere, by_of)
+    ]
+
+
+def orphaned_bundle_members(bundle_id: str, before_members: list[str]) -> list[str]:
+    """After a bundle update rewrote its lock row: the members the NEW manifest
+    dropped that are still exclusively this bundle's (by-provenance, not listed by
+    any other bundle). The update path uninstalls these so a manifest that removed a
+    member doesn't leave it installed forever with dangling provenance."""
+    row, listed_elsewhere, by_of = _bundle_ownership(bundle_id)
+    current = {str(p) for p in (row.get("plugins") or [])} if row else set()
+    return [
+        str(pid)
+        for pid in before_members
+        if pid not in current and _exclusively_owned(str(pid), bundle_id, listed_elsewhere, by_of)
+    ]
+
+
+def uninstall_bundle(bundle_id: str, *, purge: bool = False) -> dict:
+    """Remove a bundle: uninstall its exclusively-owned members and drop the lock
+    row. Shared members (listed by another bundle) and members whose ``by``
+    provenance moved (re-installed directly) are kept; a member already gone from
+    disk+lock (uninstalled individually — the provenance row still listed it) is
+    skipped, not an error. ``purge`` forwards to each member uninstall (config +
+    secrets removal)."""
+    row, listed_elsewhere, by_of = _bundle_ownership(bundle_id)
+    if row is None:
+        raise BundleNotInstalledError(f"bundle {bundle_id!r} is not installed.")
+    # Bucket every row member honestly (the 2732 review's bucketing finding: a member
+    # uninstalled individually earlier — the stale-provenance case this function
+    # exists for — landed in "kept" as if it were still installed and shared):
+    #   no lock entry at all  → already gone         → skipped_missing
+    #   exclusively ours      → uninstall            → removed_members (or failed{pid: why})
+    #   anything else         → shared / re-owned    → kept
+    removed_members: list[str] = []
+    skipped: list[str] = []
+    failed: dict[str, str] = {}
+    kept: list[str] = []
+    for raw in row.get("plugins") or []:
+        pid = str(raw)
+        if pid not in by_of:
+            skipped.append(pid)  # provenance row outlived the member — nothing to remove
+        elif _exclusively_owned(pid, bundle_id, listed_elsewhere, by_of):
+            try:
+                uninstall(pid, purge=purge)
+                removed_members.append(pid)
+            except InstallError as exc:
+                # An uninstall that RAISED is not "already gone" — reporting it in
+                # skipped_missing mislabeled a real failure (2740 review nit).
+                failed[pid] = str(exc)
+        else:
+            kept.append(pid)
+    # Re-read — each member uninstall rewrote the lock — then drop the row itself.
+    lock = _read_lock()
+    lock["bundles"] = [b for b in lock.get("bundles") or [] if b.get("id") != bundle_id]
+    _write_lock(lock)
+    _audit(
+        "uninstall-bundle",
+        {"id": bundle_id, "purge": purge},
+        f"uninstalled bundle {bundle_id} ({len(removed_members)} member(s), {len(kept)} kept)",
+    )
+    log.info(
+        "[plugins] uninstalled bundle %s — removed: %s; kept (shared/re-owned): %s",
+        bundle_id,
+        ", ".join(removed_members) or "none",
+        ", ".join(kept) or "none",
+    )
+    return {
+        "id": bundle_id,
+        "removed_members": removed_members,
+        "skipped_missing": skipped,
+        # Members whose uninstall RAISED (a race, a refusal) — distinct from
+        # skipped_missing so callers never label a failure "already gone".
+        "failed": failed,
+        "kept": kept,
+        "purged": purge,
+    }
 
 
 def sync(*, allow: list[str] | None = None) -> list[dict]:

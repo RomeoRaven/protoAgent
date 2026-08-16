@@ -73,6 +73,207 @@ async def test_no_applier_installs_only(monkeypatch):
     assert res.enabled == [] and res.reloaded is False and res.installed_ids == ["demo"]
 
 
+async def test_respect_disabled_keeps_operator_disable(monkeypatch):
+    """UPDATE semantics (#2718): re-installing a bundle must not undo an operator's
+    explicit disable — a declared-enable member sitting in plugins.disabled stays
+    there; members with no recorded state still get fresh-install enablement."""
+    monkeypatch.setattr(
+        installer,
+        "install",
+        lambda url, ref=None, **k: {"bundle": "s", "installed": [{"id": "a"}, {"id": "b"}], "enabled": ["a", "b"]},
+    )
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+    captured, apply = _capture_apply()
+
+    res = await install_and_activate(
+        "https://x", force=True, respect_disabled=True, ctx=_ctx(disabled=["a"]), apply_settings=apply
+    )
+    assert res.enabled == ["b"]  # a stays off
+    assert captured["updates"]["plugins"]["enabled"] == ["b"]
+    assert captured["updates"]["plugins"]["disabled"] == ["a"]  # untouched
+
+
+async def test_update_bundle_repins_and_retires_dropped(monkeypatch):
+    from ops.plugins import update_bundle
+
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "", "plugins": ["a", "dead"]},
+    )
+    monkeypatch.setattr(
+        installer,
+        "install",
+        lambda url, ref=None, **k: {"bundle": "s", "installed": [{"id": "a"}], "enabled": ["a"]},
+    )
+    monkeypatch.setattr(installer, "orphaned_bundle_members", lambda bid, before: ["dead"])
+    uninstalled: list[str] = []
+    monkeypatch.setattr(installer, "uninstall", lambda pid, **k: uninstalled.append(pid))
+    purged: list[str] = []
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: purged.append(pid))
+
+    calls: list = []
+
+    def apply(updates):
+        calls.append(updates)
+        return True, ["ok"]
+
+    res = await update_bundle("s", ctx=_ctx(), apply_settings=apply)
+    assert res.install.enabled == ["a"] and res.install.reloaded is True
+    assert res.removed_members == ["dead"] and uninstalled == ["dead"] and "dead" in purged
+    assert res.retire_error is None
+    # two applies: the activate reload (with a config patch) + the retire pure reload (None)
+    assert len(calls) == 2 and calls[1] is None
+
+
+async def test_update_bundle_release_tag_moves_to_newest(monkeypatch):
+    """The headline 'release-tag pin moves to the newest semver tag' was untested
+    (the 2732 review: every prior test fed requested_ref='')."""
+    from ops.plugins import update_bundle
+
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "v1.0.0", "plugins": ["a"]},
+    )
+    monkeypatch.setattr(installer, "check_plugin_update", lambda entry: {"latest_ref": "v2.0.0"})
+    seen: dict = {}
+
+    def fake_install(url, ref=None, **k):
+        seen["ref"] = ref
+        return {"bundle": "s", "installed": [{"id": "a"}], "enabled": ["a"]}
+
+    monkeypatch.setattr(installer, "install", fake_install)
+    monkeypatch.setattr(installer, "orphaned_bundle_members", lambda bid, before: [])
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+
+    await update_bundle("s", ctx=_ctx(), apply_settings=lambda u: (True, ["ok"]))
+    assert seen["ref"] == "v2.0.0"  # tags are immutable — the recorded one would no-op forever
+
+
+async def test_update_bundle_explicit_ref_is_never_replaced(monkeypatch):
+    """An explicit caller `ref` is a pin request — the newest-tag chase must not
+    silently override it (the 2732 review's coderabbit major)."""
+    from ops.plugins import update_bundle
+
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "v1.0.0", "plugins": ["a"]},
+    )
+
+    def boom(entry):
+        raise AssertionError("check_plugin_update must not run for an explicit ref")
+
+    monkeypatch.setattr(installer, "check_plugin_update", boom)
+    seen: dict = {}
+
+    def fake_install(url, ref=None, **k):
+        seen["ref"] = ref
+        return {"bundle": "s", "installed": [{"id": "a"}], "enabled": ["a"]}
+
+    monkeypatch.setattr(installer, "install", fake_install)
+    monkeypatch.setattr(installer, "orphaned_bundle_members", lambda bid, before: [])
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+
+    await update_bundle("s", ref="v1.5.0", ctx=_ctx(), apply_settings=lambda u: (True, ["ok"]))
+    assert seen["ref"] == "v1.5.0"
+
+
+async def test_update_bundle_accumulates_retire_errors(monkeypatch):
+    """Retire failures reassigned per member reported only the LAST one (2732 review)."""
+    from ops.plugins import update_bundle
+
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "", "plugins": ["a", "d1", "d2"]},
+    )
+    monkeypatch.setattr(
+        installer,
+        "install",
+        lambda url, ref=None, **k: {"bundle": "s", "installed": [{"id": "a"}], "enabled": ["a"]},
+    )
+    monkeypatch.setattr(installer, "orphaned_bundle_members", lambda bid, before: ["d1", "d2"])
+
+    def failing_uninstall(pid, **k):
+        raise installer.InstallError(f"{pid} is stuck")
+
+    monkeypatch.setattr(installer, "uninstall", failing_uninstall)
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+
+    res = await update_bundle("s", ctx=_ctx(), apply_settings=lambda u: (True, ["ok"]))
+    assert "d1: d1 is stuck" in res.retire_error and "d2: d2 is stuck" in res.retire_error
+
+
+async def test_update_bundle_unknown_id_raises(monkeypatch):
+    from ops.plugins import update_bundle
+
+    monkeypatch.setattr(installer, "bundle_entry", lambda bid: None)
+    with pytest.raises(installer.InstallError):
+        await update_bundle("ghost", ctx=_ctx(), apply_settings=None)
+
+
+async def test_uninstall_bundle_op_purges_and_reloads(monkeypatch):
+    from ops.plugins import uninstall_bundle
+
+    monkeypatch.setattr(
+        installer,
+        "uninstall_bundle",
+        lambda bid, purge=False: {
+            "id": bid,
+            "removed_members": ["a"],
+            "skipped_missing": [],
+            "kept": ["b"],
+            "purged": purge,
+        },
+    )
+    purged: list[str] = []
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: purged.append(pid))
+    calls: list = []
+
+    def apply(updates):
+        calls.append(updates)
+        return True, ["ok"]
+
+    rep = await uninstall_bundle("s", ctx=_ctx(), apply_settings=apply)
+    assert rep["removed_members"] == ["a"] and rep["kept"] == ["b"]
+    assert purged == ["a"] and rep["reloaded"] is True and calls == [None]
+
+
+async def test_load_failure_lands_in_load_errors(monkeypatch):
+    """A plugin that fails to IMPORT is skipped by the loader — the reload still returns
+    ok — so the op must read the post-reload roster and carry the failure (#2716).
+    Before this, the route toasted "enabled and live" for code that never loaded."""
+    from runtime.state import STATE
+
+    monkeypatch.setattr(installer, "install", lambda url, ref=None, **k: {"id": "demo"})
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+    monkeypatch.setattr(
+        STATE,
+        "plugin_meta",
+        [
+            {"id": "demo", "enabled": True, "error": "No module named 'leftpad'"},
+            {"id": "other", "enabled": True, "error": "unrelated"},  # not part of this install
+        ],
+    )
+
+    res = await install_and_activate("https://x", ctx=_ctx(), apply_settings=lambda u: (True, ["ok"]))
+    assert res.reloaded is True and res.enabled == ["demo"]
+    assert res.load_errors == {"demo": "No module named 'leftpad'"}
+
+
+async def test_clean_load_reports_no_load_errors(monkeypatch):
+    from runtime.state import STATE
+
+    monkeypatch.setattr(installer, "install", lambda url, ref=None, **k: {"id": "demo"})
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+    monkeypatch.setattr(STATE, "plugin_meta", [{"id": "demo", "enabled": True}])
+
+    res = await install_and_activate("https://x", ctx=_ctx(), apply_settings=lambda u: (True, ["ok"]))
+    assert res.load_errors == {}
+
+
 async def test_reload_failure_surfaces_enable_error(monkeypatch):
     monkeypatch.setattr(installer, "install", lambda url, ref=None, **k: {"id": "demo"})
     monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
@@ -167,6 +368,43 @@ async def test_peek_bundle_enumerates_members(tmp_path, monkeypatch):
     m1 = by_id["m1"]
     assert m1["version"] == "1.2.3" and m1["requires_pip"] == ["somelib"]
     assert m1["skills"] == [{"name": "demo", "description": "Demo skill."}]
+
+
+async def test_peek_bundle_refuses_traversal_member_id(tmp_path, monkeypatch):
+    """The 2735 review's major: a fetched manifest's member id is untrusted data used
+    in a path — `x/../../dir` escaped the TemporaryDirectory before _fetch wrote.
+    An unsafe id now yields an error row and NEVER reaches the filesystem/fetch."""
+    import shutil
+    from pathlib import Path
+
+    import ops.plugins as plugin_ops
+    from graph.plugins import installer
+
+    plugin_ops._peek_cache.clear()
+    bundle = tmp_path / "bundle-evil"
+    bundle.mkdir()
+    (bundle / "protoagent.bundle.yaml").write_text(
+        "id: stack\nname: Stack\ndescription: D\n"
+        "plugins:\n"
+        "  - { id: ../../escape, url: https://example.test/evil }\n"
+        "  - { id: fine, url: https://example.test/fine }\n"
+    )
+    member = tmp_path / "member-fine"
+    member.mkdir()
+    (member / "protoagent.plugin.yaml").write_text("id: fine\nname: Fine\nversion: 1.0.0\ndescription: ok.\n")
+    fetched: list[str] = []
+
+    def fake_fetch(url, ref, dest):
+        fetched.append(url)
+        shutil.copytree(bundle if url.endswith("/stack-evil") else member, Path(dest))
+        return "deadbeef"
+
+    monkeypatch.setattr(installer, "_fetch", fake_fetch)
+    result = await plugin_ops.peek_bundle("https://example.test/stack-evil")
+    by_id = {m["id"]: m for m in result["members"]}
+    assert by_id["../../escape"]["error"] == "invalid member id in manifest"
+    assert not any(u.endswith("/evil") for u in fetched)  # the unsafe member never fetched
+    assert "error" not in by_id["fine"]  # safe members still peek normally
 
 
 async def test_peek_bundle_survives_unreachable_member(tmp_path, monkeypatch):
@@ -375,3 +613,26 @@ async def test_activate_false_skips_bundle_service_seeding(tmp_path, monkeypatch
     res = await install_and_activate("https://x/stack", ctx=_ctx(), activate=False, apply_settings=None)
     assert res.mcp_seeded == [] and res.reloaded is False
     assert cfg.read_text() == before  # not even opened for write
+
+
+async def test_peek_cache_is_keyed_by_url_and_ref(tmp_path, monkeypatch):
+    """A url-only cache key served one ref's preview for every ref of the same bundle
+    within the TTL (2735 review) — two refs must peek independently."""
+    import ops.plugins as plugin_ops
+    from graph.plugins import installer
+
+    plugin_ops._peek_cache.clear()
+    fixture = _write_bundle_fixture(tmp_path)
+    calls: list = []
+
+    def counting_fetch(url, ref, dest):
+        calls.append((url, ref))
+        return fixture(url, ref, dest)
+
+    monkeypatch.setattr(installer, "_fetch", counting_fetch)
+    await plugin_ops.peek_bundle("https://example.test/stack")
+    n_first = len(calls)
+    await plugin_ops.peek_bundle("https://example.test/stack")  # same (url, ref) → cached
+    assert len(calls) == n_first
+    await plugin_ops.peek_bundle("https://example.test/stack", ref="v2")  # new ref → fresh peek
+    assert len(calls) > n_first

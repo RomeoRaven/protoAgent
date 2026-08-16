@@ -15,12 +15,16 @@ def _client():
     return TestClient(app)
 
 
-def _wire(monkeypatch, *, enabled, disabled, meta, router_keys=()):
+def _wire(monkeypatch, *, enabled, disabled, meta, router_keys=(), official=(), acked=(), trust_unverified=True):
     """Fake the hot-reload apply + STATE; return a dict that captures the config patch.
 
     ``router_keys`` seeds the live-mount registry (``STATE.plugin_router_keys``,
     ``{(plugin_id, prefix), …}``) — the ground truth for "this plugin's router is
-    already mounted" that the force re-install restart check reads (#942)."""
+    already mounted" that the force re-install restart check reads (#942).
+
+    ``trust_unverified`` defaults True so the consent gate (ADR 0071 D3, #2721) stays
+    OUT of every unrelated install test's way; the gate's own tests pass the real
+    posture (``trust_unverified=False`` + explicit ``official``/``acked``)."""
     captured: dict = {}
     fake = types.ModuleType("server.agent_init")
 
@@ -33,7 +37,13 @@ def _wire(monkeypatch, *, enabled, disabled, meta, router_keys=()):
 
     import runtime.state as rs
 
-    cfg = types.SimpleNamespace(plugins_enabled=list(enabled), plugins_disabled=list(disabled))
+    cfg = types.SimpleNamespace(
+        plugins_enabled=list(enabled),
+        plugins_disabled=list(disabled),
+        plugins_sources_official=list(official),
+        plugins_sources_acked=list(acked),
+        plugins_trust_unverified=trust_unverified,
+    )
     monkeypatch.setattr(rs.STATE, "graph_config", cfg, raising=False)
     monkeypatch.setattr(rs.STATE, "plugin_meta", meta, raising=False)
     monkeypatch.setattr(rs.STATE, "plugin_router_keys", set(router_keys), raising=False)
@@ -115,6 +125,103 @@ def test_disabling_a_surface_only_plugin_does_not_recommend_restart(monkeypatch)
 
 
 # ── auto-enable on install (trust-by-default; install = enabled + running) ────────
+# ── consent gate + ack (ADR 0071 D3 S4, #2721) ─────────────────────────────────
+
+
+def _real_posture(monkeypatch, *, acked=(), trust_unverified=False, installed=None):
+    """The shipped trust posture: protoLabsAI official, nothing acked unless said."""
+    from graph.plugins import installer
+
+    captured = _wire(
+        monkeypatch,
+        enabled=[],
+        disabled=[],
+        meta=[],
+        official=["github.com/protoLabsAI/*"],
+        acked=acked,
+        trust_unverified=trust_unverified,
+    )
+    calls: list[str] = []
+
+    def _install_fake(url, ref=None, **k):
+        calls.append(url)
+        return installed or {"id": "demo"}
+
+    monkeypatch.setattr(installer, "install", _install_fake)
+    return captured, calls
+
+
+def test_install_untrusted_source_returns_needs_ack_and_fetches_nothing(monkeypatch):
+    _captured, calls = _real_posture(monkeypatch)
+    body = _client().post("/api/plugins/install", json={"url": "https://github.com/rando/thing.git"}).json()
+    assert body == {"needs_ack": True, "source": "github.com/rando/thing"}
+    assert calls == []  # the gate fires BEFORE any fetch — nothing ran
+
+
+def test_install_official_source_skips_the_ack(monkeypatch):
+    _captured, calls = _real_posture(monkeypatch)
+    body = _client().post("/api/plugins/install", json={"url": "https://github.com/protoLabsAI/thing"}).json()
+    assert "needs_ack" not in body and body["enabled"] == ["demo"]
+    assert calls  # install ran
+
+
+def test_install_acked_source_skips_the_ack(monkeypatch):
+    _captured, calls = _real_posture(monkeypatch, acked=["github.com/rando/thing"])
+    body = _client().post("/api/plugins/install", json={"url": "git@github.com:rando/thing.git"}).json()
+    assert "needs_ack" not in body and calls  # every spelling of the acked repo passes
+
+
+def test_install_trust_unverified_skips_the_ack(monkeypatch):
+    _captured, calls = _real_posture(monkeypatch, trust_unverified=True)
+    body = _client().post("/api/plugins/install", json={"url": "https://github.com/rando/thing"}).json()
+    assert "needs_ack" not in body and calls
+
+
+def test_install_fetch_only_mode_skips_the_gate(monkeypatch):
+    """PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE=1 installs run no code — nothing to consent
+    to yet; the explicit ENABLE that follows is the operator's act."""
+    _captured, calls = _real_posture(monkeypatch)
+    monkeypatch.setenv("PROTOAGENT_PLUGIN_INSTALL_NO_ENABLE", "1")
+    body = _client().post("/api/plugins/install", json={"url": "https://github.com/rando/thing"}).json()
+    assert "needs_ack" not in body and calls
+
+
+def test_ack_route_persists_exact_source(monkeypatch):
+    captured = _wire(
+        monkeypatch, enabled=[], disabled=[], meta=[], official=["github.com/protoLabsAI/*"], trust_unverified=False
+    )
+    body = _client().post("/api/plugins/ack", json={"url": "git@github.com:rando/thing.git"}).json()
+    assert body["ok"] is True and body["acked"] == "github.com/rando/thing"
+    # narrowest grant, persisted through the settings write path
+    assert captured["config"]["plugins"]["sources"]["acked"] == ["github.com/rando/thing"]
+    assert "trust_unverified" not in captured["config"]["plugins"]
+
+
+def test_ack_route_trust_all_flips_the_switch(monkeypatch):
+    captured = _wire(monkeypatch, enabled=[], disabled=[], meta=[], trust_unverified=False)
+    body = _client().post("/api/plugins/ack", json={"url": "https://x/y", "trust_all": True}).json()
+    assert body["ok"] is True and body["trust_all"] is True
+    assert captured["config"]["plugins"]["trust_unverified"] is True
+
+
+def test_ack_route_trust_all_string_false_stays_off(monkeypatch):
+    """bool("false") is truthy and this flag WIDENS trust — a stringly client value
+    must never flip the global don't-ask switch (the 2734 review's finding)."""
+    captured = _wire(monkeypatch, enabled=[], disabled=[], meta=[], trust_unverified=False)
+    body = _client().post("/api/plugins/ack", json={"url": "https://x/y", "trust_all": "false"}).json()
+    assert body["trust_all"] is False
+    assert "trust_unverified" not in captured["config"]["plugins"]
+
+
+def test_ack_route_requires_a_url(monkeypatch):
+    """An ack is consent for a NAMED source — a bare {"trust_all": true} must not
+    pre-approve every future source with nothing on screen naming that stake
+    (2734 review); the global switch only rides alongside a concrete ack."""
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+    assert _client().post("/api/plugins/ack", json={}).status_code == 400
+    assert _client().post("/api/plugins/ack", json={"trust_all": True}).status_code == 400
+
+
 def test_install_auto_enables_and_runs(monkeypatch):
     from graph.plugins import installer
 
@@ -163,6 +270,97 @@ def test_install_bundle_without_declared_enable_enables_every_member(monkeypatch
     )
     body = _client().post("/api/plugins/install", json={"url": "https://x/y"}).json()
     assert body["enabled"] == ["a", "b"]
+
+
+def test_updates_route_includes_bundles(monkeypatch):
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+    monkeypatch.setattr(installer, "check_updates", lambda: [{"id": "solo", "behind": False}])
+    monkeypatch.setattr(installer, "check_bundle_updates", lambda: [{"id": "stacky", "behind": True}])
+    body = _client().get("/api/plugins/updates").json()
+    assert body["plugins"] == [{"id": "solo", "behind": False}]
+    assert body["bundles"] == [{"id": "stacky", "behind": True}]
+
+
+def test_update_bundle_route_repins_and_reports(monkeypatch):
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "", "plugins": ["a", "dead"]},
+    )
+    monkeypatch.setattr(
+        installer,
+        "install",
+        lambda url, ref=None, **k: {"bundle": "stacky", "installed": [{"id": "a"}], "enabled": ["a"]},
+    )
+    monkeypatch.setattr(installer, "orphaned_bundle_members", lambda bid, before: ["dead"])
+    monkeypatch.setattr(installer, "uninstall", lambda pid, **k: None)
+
+    body = _client().post("/api/plugins/bundles/stacky/update").json()
+    assert body["enabled"] == ["a"] and body["reloaded"] is True
+    assert body["removed_members"] == ["dead"] and body["retire_error"] is None
+    assert body["load_errors"] == {}
+
+
+def test_update_bundle_route_404s_unknown(monkeypatch):
+    """Unknown bundle → 404 on BOTH bundle routes (the 2732 review caught update
+    mapping the same 'not installed' case to 400 while delete returned 404)."""
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+    monkeypatch.setattr(installer, "bundle_entry", lambda bid: None)
+    assert _client().post("/api/plugins/bundles/ghost/update").status_code == 404
+
+
+def test_uninstall_bundle_route(monkeypatch):
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=["a"], disabled=[], meta=[])
+    monkeypatch.setattr(
+        installer,
+        "uninstall_bundle",
+        lambda bid, purge=False: {
+            "id": bid,
+            "removed_members": ["a"],
+            "skipped_missing": [],
+            "kept": [],
+            "purged": purge,
+        },
+    )
+    body = _client().delete("/api/plugins/bundles/stacky?purge=true").json()
+    assert body["ok"] is True and body["removed_members"] == ["a"] and body["purged"] is True
+    assert body["reloaded"] is True
+
+
+def test_install_surfaces_load_errors(monkeypatch):
+    """An enabled plugin that fails to IMPORT on the reload is skipped by the loader —
+    the reload still succeeds — so the install response must carry the failure
+    (#2716). Before, the console toasted "enabled and live" for code that never loaded."""
+    from graph.plugins import installer
+
+    _wire(
+        monkeypatch,
+        enabled=[],
+        disabled=[],
+        meta=[{"id": "broken", "enabled": True, "error": "No module named 'leftpad'"}],
+    )
+    monkeypatch.setattr(installer, "install", lambda url, ref=None, **k: {"id": "broken"})
+    body = _client().post("/api/plugins/install", json={"url": "https://x/broken"}).json()
+    assert body["reloaded"] is True and body["enabled"] == ["broken"]
+    assert body["load_errors"] == {"broken": "No module named 'leftpad'"}
+
+
+def test_install_clean_load_reports_empty_load_errors(monkeypatch):
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[{"id": "fine", "enabled": True}])
+    monkeypatch.setattr(installer, "install", lambda url, ref=None, **k: {"id": "fine"})
+    body = _client().post("/api/plugins/install", json={"url": "https://x/fine"}).json()
+    assert body["load_errors"] == {}
 
 
 def test_install_bundle_seeds_config_defaults_without_clobbering(monkeypatch):
@@ -458,13 +656,40 @@ def test_installed_route_merges_loader_meta(monkeypatch):
     assert "manifest" not in by_id["github"]  # present=False → manifest never loaded
 
 
+def test_installed_route_carries_load_error(monkeypatch):
+    """The last reload's per-plugin load failure rides the inventory rows (#2716) —
+    previously only the console/runtime-status payload carried it, so API consumers
+    saw an enabled-but-dead plugin as healthy."""
+    from pathlib import Path
+
+    from graph.plugins import installer
+
+    _wire(
+        monkeypatch,
+        enabled=["broken"],
+        disabled=[],
+        meta=[{"id": "broken", "enabled": True, "error": "boom"}, {"id": "fine", "enabled": True}],
+    )
+    monkeypatch.setattr(installer, "live_plugins_dir", lambda: Path("/nonexistent-plugins-dir"))
+    monkeypatch.setattr(
+        installer,
+        "list_installed",
+        lambda: [{"id": "broken", "present": False}, {"id": "fine", "present": False}],
+    )
+    by_id = {p["id"]: p for p in _client().get("/api/plugins/installed").json()["plugins"]}
+    assert by_id["broken"]["error"] == "boom"
+    assert by_id["fine"]["error"] is None
+
+
 def test_updates_route_returns_check_results(monkeypatch):
     from graph.plugins import installer
 
     _wire(monkeypatch, enabled=[], disabled=[], meta=[])
     monkeypatch.setattr(installer, "check_updates", lambda: [{"id": "github", "update_available": True}])
+    monkeypatch.setattr(installer, "check_bundle_updates", lambda: [])
     body = _client().get("/api/plugins/updates").json()
-    assert body == {"plugins": [{"id": "github", "update_available": True}]}
+    # `bundles` rides alongside since #2718 (empty when no bundles are installed).
+    assert body == {"plugins": [{"id": "github", "update_available": True}], "bundles": []}
 
 
 # ── install-deps route + deps_missing (wizard post-install report) ────────────
@@ -529,3 +754,78 @@ def test_installed_carries_bundle_provenance(monkeypatch, tmp_path):
     by_id = {p["id"]: p for p in body["plugins"]}
     assert by_id["board"]["bundle"] == {"id": "pm_stack", "name": "Project Manager", "url": "https://x/pm-stack"}
     assert "bundle" not in by_id["solo"]
+
+
+def test_update_bundle_route_maps_install_failure_to_400(monkeypatch):
+    """The typed split: BundleNotInstalledError → 404 (tested above), any other
+    InstallError → 400 — a genuine install failure must not read as 'doesn't exist'."""
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "", "plugins": []},
+    )
+
+    def boom(url, ref=None, **k):
+        raise installer.InstallError("clone failed")
+
+    monkeypatch.setattr(installer, "install", boom)
+    res = _client().post("/api/plugins/bundles/stacky/update")
+    assert res.status_code == 400 and "clone failed" in res.json()["detail"]
+
+
+def test_uninstall_bundle_route_maps_other_failures_to_400(monkeypatch):
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+
+    def boom(bid, purge=False):
+        raise installer.InstallError("lock write refused")
+
+    monkeypatch.setattr(installer, "uninstall_bundle", boom)
+    res = _client().delete("/api/plugins/bundles/stacky")
+    assert res.status_code == 400 and "lock write refused" in res.json()["detail"]
+
+
+def test_update_bundle_route_flags_stale_router_restart(monkeypatch):
+    """A force re-install over a LIVE mounted router serves stale routes until
+    restart (#942) — the bundle update route must flag it like the single-plugin one."""
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[], router_keys={("board", "/api/plugins/board")})
+    monkeypatch.setattr(
+        installer,
+        "bundle_entry",
+        lambda bid: {"id": bid, "source_url": "https://x/stack", "requested_ref": "", "plugins": ["board"]},
+    )
+    monkeypatch.setattr(
+        installer,
+        "install",
+        lambda url, ref=None, **k: {"bundle": "stacky", "installed": [{"id": "board"}], "enabled": ["board"]},
+    )
+    monkeypatch.setattr(installer, "orphaned_bundle_members", lambda bid, before: [])
+    body = _client().post("/api/plugins/bundles/stacky/update").json()
+    assert body["restart_recommended"] is True  # live router → old routes until restart
+
+
+def test_installed_route_emits_the_bundle_registry(monkeypatch):
+    """`bundles` = the lock's registry verbatim (#2718): a bundle whose members were
+    all removed individually has NO member rows but is still installed — the console
+    strip must list it, so the route sends the authoritative list."""
+    from pathlib import Path
+
+    from graph.plugins import installer
+
+    _wire(monkeypatch, enabled=[], disabled=[], meta=[])
+    monkeypatch.setattr(installer, "live_plugins_dir", lambda: Path("/nonexistent-plugins-dir"))
+    monkeypatch.setattr(installer, "list_installed", lambda: [])
+    monkeypatch.setattr(
+        installer,
+        "_read_lock",
+        lambda: {"plugins": [], "bundles": [{"id": "ghost_stack", "name": "Ghost", "plugins": ["gone"]}]},
+    )
+    body = _client().get("/api/plugins/installed").json()
+    assert body["plugins"] == []
+    assert body["bundles"] == [{"id": "ghost_stack", "name": "Ghost"}]

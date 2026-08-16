@@ -435,6 +435,17 @@ export const SETTINGS_SCHEMA = [
       { key: "secrets_manager.client_secret", label: "Machine identity client secret", type: "secret", section: "Secrets manager", restart: false, description: "Stored in secrets.yaml, never echoed back.", options: [], value: "", is_set: true, scope: "agent", source: "agent", depends_on: { key: "secrets_manager.enabled" } },
     ],
   },
+  {
+    // Hosted chat-thread publishing (#2179 P2, #2683/#2684) — its own "Publish" category /
+    // sidenav section, same pattern as Secrets manager above.
+    section: "Publish",
+    category: "Publish",
+    fields: [
+      { key: "publish.endpoint_url", label: "Hosted publish endpoint URL", type: "string", section: "Publish", restart: false, description: "", options: [], value: "", default: "", scope: "agent", source: "agent" },
+      { key: "publish.timeout_seconds", label: "Publish timeout (seconds)", type: "number", section: "Publish", restart: false, description: "", options: [], value: 15, default: 15, scope: "agent", source: "agent" },
+      { key: "publish.revoke_endpoint_url", label: "Revoke endpoint URL", type: "string", section: "Publish", restart: false, description: "", options: [], value: "", default: "", scope: "agent", source: "agent" },
+    ],
+  },
 ];
 
 // External secrets manager (ADR 0080) — GET /api/secrets/status. Sync (POST) answers
@@ -978,6 +989,10 @@ export const TELEMETRY_SUMMARY = {
   by_model: [
     { model: "claude-opus-4-8", turns: 2, cost_usd: 0.21, total_tokens: 12000 },
     { model: "claude-haiku-4-5", turns: 1, cost_usd: 0.0054, total_tokens: 1800 },
+  ],
+  by_tool: [
+    { tool: "web_search", calls: 3, p50_duration_ms: 800, p95_duration_ms: 2200, p99_duration_ms: 3000 },
+    { tool: "calculator", calls: 1, p50_duration_ms: 20, p95_duration_ms: 40, p99_duration_ms: 60 },
   ],
 };
 

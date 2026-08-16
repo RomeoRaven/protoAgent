@@ -578,6 +578,53 @@ export type ToolCall = {
   parentId?: string;
 };
 
+/** One artifact reference resolved into a chat-bundle tool_call part (#2179 P2, graph.chat_bundle
+ *  / plugins.artifact.resolve_for_bundle). `available: false` covers a deleted artifact, a binary
+ *  `file`-kind artifact (bytes are never bundled — `file_meta` only), or a version the artifact
+ *  plugin's own retention has since trimmed away — never a guess at the wrong content. */
+export type ChatBundleArtifact =
+  | { id: string; artifact_kind: string; title: string; version: number; available: true; content: string }
+  | {
+      id: string;
+      artifact_kind: string;
+      title: string;
+      available: false;
+      reason: string;
+      file_meta?: { filename: string; mime: string; size: number };
+    };
+
+/** One block of a chat-bundle message (graph.chat_bundle.build_bundle) — ordered text runs and
+ *  tool-call groups, mirroring `ChatPart`/`ToolCall` so a bundle can render close to 1:1 with
+ *  what the console showed, rather than a flattened transcript. */
+export type ChatBundlePart =
+  | { kind: "text"; text: string }
+  | { kind: "tool_call"; id: string; name: string; input: Record<string, unknown>; output: string; artifact?: ChatBundleArtifact };
+
+export type ChatBundleMessage = { role: "user" | "assistant"; parts: ChatBundlePart[] };
+
+/** The structured chat-bundle manifest (ADR 0099) — what the pre-publish review previews and
+ *  what actually gets published, verbatim (the server never lets those two diverge). */
+export type ChatBundleManifest = {
+  bundle_version: number;
+  kind: "chat-bundle";
+  exported_at: string;
+  thread_id: string;
+  title: string;
+  messages: ChatBundleMessage[];
+};
+
+/** One thread this instance has published to the hosted viewer (#2684) — never carries
+ *  the revoke token, which stays server-internal. `revoked_at` null = still live. */
+export type PublishedLink = {
+  id: string;
+  thread_id: string;
+  title: string;
+  public_url: string;
+  published_at: number;
+  expires_at: string | null;
+  revoked_at: number | null;
+};
+
 /** Wire shape of a single tool event streamed over the A2A tool-call DataPart. */
 export type ToolEvent = {
   id: string;
@@ -861,6 +908,34 @@ export type SetupStatus = {
 };
 
 // Telemetry (ADR 0006 Slice 3) — mirrors /api/telemetry/* (telemetry_store.py).
+
+// One row of TelemetrySummary.by_model — cost/token totals plus this model's
+// OWN p50/p95/p99 duration (#2678), computed from the same turns already
+// recorded, distinct from the turn-level percentiles alongside it.
+export type TelemetryByModelRow = {
+  model: string;
+  turns: number;
+  cost_usd: number;
+  total_tokens: number;
+  p50_duration_ms: number;
+  p95_duration_ms: number;
+  p99_duration_ms: number;
+};
+
+// One row of TelemetrySummary.by_tool (#2697) — per-tool p50/p95/p99 EXECUTION
+// duration (on_tool_start→on_tool_end in the turn loop), not the whole-turn
+// figures. `calls` is the number of duration samples aggregated, which can be
+// less than the turn-level `tool_calls` total when a call didn't carry a
+// duration (an older row, or a tool_end producer that doesn't stamp one).
+// Sorted by p95 descending server-side — slowest tools lead.
+export type TelemetryByToolRow = {
+  tool: string;
+  calls: number;
+  p50_duration_ms: number;
+  p95_duration_ms: number;
+  p99_duration_ms: number;
+};
+
 export type TelemetrySummary = {
   turns: number;
   input_tokens: number;
@@ -874,9 +949,11 @@ export type TelemetrySummary = {
   avg_duration_ms: number;
   p50_duration_ms: number;
   p95_duration_ms: number;
+  p99_duration_ms: number;
   success_rate: number;
   cache_hit_ratio: number;
-  by_model: { model: string; turns: number; cost_usd: number; total_tokens: number }[];
+  by_model: TelemetryByModelRow[];
+  by_tool: TelemetryByToolRow[];
 };
 
 export type TelemetryTurn = {
@@ -908,7 +985,7 @@ export type TelemetryInsights = {
   flagged_count: number;
   levers: {
     cache: { hit_ratio: number; read_tokens: number; est_savings_usd: number };
-    routing: { by_model: { model: string; turns: number; cost_usd: number; total_tokens: number }[] };
+    routing: { by_model: TelemetryByModelRow[] };
     success_rate: number;
   };
   unproven_levers: string[];
@@ -1218,6 +1295,10 @@ export type Archetype = {
   // the desktop app needs the managed CPython). The picker warns at choose-time when
   // a requirement isn't provisioned. Optional: absent on older hosts.
   requires?: string[];
+  // Tool names the archetype's persona assumes exist (#2277). Forwarded verbatim on
+  // create so the member persists them to workspace.yaml and warns at boot when its
+  // bound toolset doesn't cover the contract. Optional: absent on older hosts.
+  requires_tools?: string[];
 };
 
 // What an archetype's bundle would set up — the read-only pre-install peek

@@ -68,6 +68,40 @@ def test_archetypes_fall_back_when_catalog_missing(client, monkeypatch):
     assert all(a["soul"].strip() for a in arr)  # soul_preset resolved to real content
 
 
+def test_bundle_archetype_resolves_soul_preset(client, monkeypatch):
+    """A bundle's archetype: block can name a host `soul_preset` — the same soul /
+    soul_preset pair the catalog supports (#2715). Before, only inline `soul` worked on
+    the bundle path, and a preset-naming bundle silently fell back to the base persona.
+    An unknown preset resolves to "" (warned in the log; the console then falls back)."""
+
+    def fake_lock():
+        return {
+            "bundles": [
+                {
+                    "id": "presetful",
+                    "source_url": "https://github.com/x/a",
+                    "archetype": {"label": "P", "soul_preset": "base"},
+                },
+                {
+                    "id": "inline",
+                    "source_url": "https://github.com/x/b",
+                    "archetype": {"label": "I", "soul": "# Inline"},
+                },
+                {
+                    "id": "ghost",
+                    "source_url": "https://github.com/x/c",
+                    "archetype": {"label": "G", "soul_preset": "no-such-preset"},
+                },
+            ]
+        }
+
+    monkeypatch.setattr("graph.plugins.installer._read_lock", fake_lock)
+    by_id = {a["id"]: a for a in client.get("/api/archetypes").json()["archetypes"]}
+    assert by_id["presetful"]["soul"].strip()  # resolved to the real preset content
+    assert by_id["inline"]["soul"] == "# Inline"  # inline still wins when present
+    assert by_id["ghost"]["soul"] == ""  # unknown preset → empty, console falls back
+
+
 def test_archetypes_dedupe_installed_bundle_against_catalog(client, monkeypatch):
     # An installed bundle whose id/URL already appears in the catalog must NOT produce a
     # duplicate RadioCard (duplicate React key + ambiguous radio value). Catalog wins.
@@ -168,6 +202,30 @@ def test_create_forwards_inputs_and_secrets(client, monkeypatch):
     assert r.status_code == 200
     assert captured["inputs"] == {"token": "ghp_x"}
     assert captured["secrets"] == [{"key": "openai_api_key", "value": "sk-1"}]
+
+
+def test_create_forwards_requires_tools(client, monkeypatch):
+    """POST /api/fleet threads the archetype's `requires_tools` contract into manager.create
+    (#2277/#2713) — blank entries dropped, absent field → None so nothing is persisted."""
+    from graph.workspaces import manager
+
+    captured: dict = {}
+
+    def fake_create(name, **kwargs):
+        captured.update(kwargs)
+        return {"id": f"{name}-0", "name": name, "port": 7999, "path": "/tmp", "installed": []}
+
+    monkeypatch.setattr(manager, "create", fake_create)
+    r = client.post(
+        "/api/fleet",
+        json={"name": "pm", "start": False, "requires_tools": ["github_create_issue", "  "]},
+    )
+    assert r.status_code == 200
+    assert captured["requires_tools"] == ["github_create_issue"]
+
+    captured.clear()
+    assert client.post("/api/fleet", json={"name": "pm2", "start": False}).status_code == 200
+    assert captured["requires_tools"] is None
 
 
 def test_create_ignores_malformed_inputs_and_secrets(client, monkeypatch):

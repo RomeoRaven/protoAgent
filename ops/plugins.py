@@ -17,6 +17,7 @@ about the live HTTP app, so it stays in the REST adapter — computed there from
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -34,6 +35,10 @@ class InstallResult:
     # Bundle mcp: servers seeded into the HOST config this install (#2118) — empty for
     # single plugins, non-activated installs, and bundles that declare no servers.
     mcp_seeded: list[str] = field(default_factory=list)
+    # Per-plugin import/registration failures from the post-enable reload (#2716):
+    # a plugin that fails to LOAD is skipped by the loader, so the reload itself still
+    # succeeds — `reloaded=True` + an id in `enabled` is NOT proof the code is live.
+    load_errors: dict[str, str] = field(default_factory=dict)
 
 
 def _enabled_ids_from_summary(summary: dict) -> list[str]:
@@ -69,6 +74,7 @@ async def install_and_activate(
     by: str = "ops",
     allow: list[str] | None = None,
     activate: bool = True,
+    respect_disabled: bool = False,
     ctx: OpContext,
     apply_settings: Callable[[dict], tuple[bool, list]] | None = None,
     mcp_inputs: dict | None = None,
@@ -100,7 +106,15 @@ async def install_and_activate(
 
     cfg = ctx.graph_config
     enabled = list(getattr(cfg, "plugins_enabled", []) or [])
-    disabled = [p for p in (getattr(cfg, "plugins_disabled", []) or []) if p not in ids]
+    currently_disabled = list(getattr(cfg, "plugins_disabled", []) or [])
+    if respect_disabled:
+        # UPDATE semantics (#2718): re-installing a bundle must not undo an operator's
+        # explicit disable — ids sitting in plugins.disabled stay there; only ids with
+        # no recorded state (new members) get the fresh-install enable treatment.
+        ids = [p for p in ids if p not in currently_disabled]
+        disabled = currently_disabled
+    else:
+        disabled = [p for p in currently_disabled if p not in ids]
     for pid in ids:
         if pid not in enabled:
             enabled.append(pid)
@@ -137,10 +151,28 @@ async def install_and_activate(
         if bundle_secrets:
             await asyncio.to_thread(apply_bundle_secrets, cfg_path, lock, list(bundle_secrets))
 
-    ok, messages = apply_settings(config_updates)
+    # Off the event loop: the applier does a full config write + graph rebuild —
+    # inline it stalls every other request for the duration (2732/2735 reviews;
+    # same D9 rule the devkit's reload_plugins already follows).
+    ok, messages = await asyncio.to_thread(apply_settings, config_updates)
     if ok:
+        # The reload "succeeding" only means the graph rebuilt — the loader SKIPS a
+        # plugin whose import/registration fails and records the failure on its meta
+        # entry, so read the post-reload roster for the ids we just enabled (#2716).
+        from runtime.state import STATE
+
+        load_errors = {
+            str(m.get("id")): str(m.get("error"))
+            for m in (STATE.plugin_meta or [])
+            if m.get("id") in ids and m.get("error")
+        }
         return InstallResult(
-            summary=summary, installed_ids=installed_ids, enabled=ids, reloaded=True, mcp_seeded=mcp_seeded
+            summary=summary,
+            installed_ids=installed_ids,
+            enabled=ids,
+            reloaded=True,
+            mcp_seeded=mcp_seeded,
+            load_errors=load_errors,
         )
     # The install itself succeeded (code on disk + locked); surface the enable-reload
     # failure without failing the whole op — it can be enabled manually.
@@ -154,14 +186,149 @@ async def install_and_activate(
     )
 
 
+# ── Bundle lifecycle past install (ADR 0049 D4, #2718) ─────────────────────────
+
+
+@dataclass
+class BundleUpdateResult:
+    install: InstallResult  # the force-reinstall half (summary/enabled/reloaded/load_errors)
+    removed_members: list[str]  # members the new manifest dropped, now uninstalled
+    retire_error: str | None = None  # non-fatal: dropped-member cleanup/reload failure
+
+
+@op(
+    name="plugins.update_bundle",
+    risk="disruptive",
+    summary="Re-resolve a bundle's ref, reinstall members at the new pins, retire dropped ones, hot-reload.",
+)
+async def update_bundle(
+    bundle_id: str,
+    *,
+    ref: str | None = None,
+    by: str = "ops",
+    allow: list[str] | None = None,
+    ctx: OpContext,
+    apply_settings: Callable[..., tuple[bool, list]] | None = None,
+) -> BundleUpdateResult:
+    """Bundle-level update: a force re-install of the bundle repo at its recorded ref
+    (or ``ref``) — member pins re-resolve exactly as a fresh install would, the lock
+    row is rewritten, and (via ``install_and_activate``) the declared enable set +
+    config/mcp/secrets seeding re-apply as defaults with operator values winning.
+    When updating the RECORDED ref, a release-tag pin moves to the newest semver
+    tag first (tags are immutable — re-installing the recorded one would be a
+    no-op forever, same rule as the single-plugin update route); an explicit
+    caller ``ref`` is a pin request and is used as-is, never replaced.
+    Members the NEW manifest no longer names are
+    RETIRED afterwards (uninstalled + module-purged + a pure reload) when they're
+    still exclusively this bundle's — a member another bundle lists, or one the
+    operator re-installed directly, is left alone."""
+    from graph.plugins import installer
+    from graph.plugins.loader import purge_plugin_modules
+
+    entry = await asyncio.to_thread(installer.bundle_entry, bundle_id)
+    if entry is None:
+        raise installer.BundleNotInstalledError(f"bundle {bundle_id!r} is not installed.")
+    source_url = str(entry.get("source_url") or "")
+    if not source_url:
+        raise installer.InstallError(f"bundle {bundle_id!r} has no source_url — cannot update.")
+    before_members = [str(p) for p in entry.get("plugins") or []]
+
+    target_ref = ref or (entry.get("requested_ref") or None)
+    # Chase the newest semver tag ONLY when updating the RECORDED ref — an explicit
+    # caller-passed `ref` is a pin request and must never be silently replaced
+    # (the 2732 review's coderabbit major; the CLI already had this guard).
+    if ref is None and target_ref and installer.is_release_tag(target_ref):
+        try:
+            status = await asyncio.to_thread(installer.check_plugin_update, entry)
+            target_ref = status.get("latest_ref") or target_ref
+        except Exception:  # noqa: BLE001 — best-effort; fall back to the recorded ref
+            pass
+
+    res = await install_and_activate(
+        source_url,
+        target_ref,
+        force=True,
+        by=by,
+        allow=allow,
+        activate=apply_settings is not None,
+        respect_disabled=True,  # an update must not undo an operator's explicit disable
+        ctx=ctx,
+        apply_settings=apply_settings,
+    )
+
+    # Accumulate retire failures — reassigning per member reported only the LAST
+    # one and hid the rest (2732 review).
+    retire_errors: list[str] = []
+    dropped = await asyncio.to_thread(installer.orphaned_bundle_members, bundle_id, before_members)
+    for pid in dropped:
+        try:
+            await asyncio.to_thread(installer.uninstall, pid)
+        except installer.InstallError as exc:
+            retire_errors.append(f"{pid}: {exc}")
+            continue
+        purge_plugin_modules(pid)
+    if dropped and apply_settings is not None:
+        # The member uninstalls scrubbed the YAML's enabled refs — a pure reload
+        # (config=None) picks the file state up and drops their live tools/routes.
+        # Off the event loop: full graph rebuild (same rule as the activate apply).
+        ok, messages = await asyncio.to_thread(apply_settings, None)
+        if not ok:
+            retire_errors.append("; ".join(str(m) for m in messages) or "retire reload failed")
+    return BundleUpdateResult(
+        install=res, removed_members=dropped, retire_error="; ".join(retire_errors) or None
+    )
+
+
+@op(
+    name="plugins.uninstall_bundle",
+    risk="destructive",
+    summary="Uninstall a bundle: its exclusively-owned members + the lock row, then hot-reload.",
+)
+async def uninstall_bundle(
+    bundle_id: str,
+    *,
+    purge: bool = False,
+    ctx: OpContext,
+    apply_settings: Callable[..., tuple[bool, list]] | None = None,
+) -> dict:
+    """One-action bundle removal (before this, removing a stack meant hand-uninstalling
+    members against a provenance row that then went stale). Members shared with another
+    bundle or re-owned by a direct install are kept — ``installer.uninstall_bundle``
+    decides; this op adds the live half: module purge per removed member + a pure
+    reload so their tools/routes actually leave the running agent."""
+    from graph.plugins import installer
+    from graph.plugins.loader import purge_plugin_modules
+
+    report = await asyncio.to_thread(installer.uninstall_bundle, bundle_id, purge=purge)
+    for pid in report.get("removed_members") or []:
+        purge_plugin_modules(pid)
+    reloaded = False
+    reload_error: str | None = None
+    if apply_settings is not None and report.get("removed_members"):
+        # Off the event loop — full graph rebuild (2732/2735 reviews, D9 rule).
+        ok, messages = await asyncio.to_thread(apply_settings, None)
+        reloaded = bool(ok)
+        if not ok:
+            reload_error = "; ".join(str(m) for m in messages) or "reload failed"
+    return {**report, "reloaded": reloaded, "reload_error": reload_error}
+
+
 # ── Bundle peek (archetype preview) ────────────────────────────────────────────
 # Enumerate what an UN-installed bundle would set up — members, each member's
 # manifest identity, skills, pip deps, capabilities — without installing anything.
 # Read-only: fetches to a throwaway staging dir, never touches plugins.lock or
-# config. Results are TTL-cached per URL so the archetype picker can call freely.
+# config. Results are TTL-cached per (url, ref) so the archetype picker can call freely.
 
 _PEEK_TTL_SECONDS = 600.0
-_peek_cache: dict[str, tuple[float, dict]] = {}
+# Keyed by (url, ref) — a url-only key served one ref's preview for every ref of
+# the same bundle within the TTL (2735 review).
+_peek_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+# A bundle-manifest member id used in a filesystem path must be ONE safe path
+# component: leading alnum, then alnum/dot/underscore/hyphen — no separators, so
+# `..`/`x/../y` can't resolve outside the peek tempdir. (Deliberately a superset of
+# the loader's install-time id rule; this guard is about path safety only.)
+_SAFE_MEMBER_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _peek_skills(root: Path) -> list[dict]:
@@ -213,7 +380,7 @@ def _peek_bundle_sync(url: str, ref: str | None = None) -> dict:
     from infra.paths import instance_paths
 
     now = time.monotonic()
-    hit = _peek_cache.get(url)
+    hit = _peek_cache.get((url, ref or ""))
     if hit and now - hit[0] < _PEEK_TTL_SECONDS:
         return hit[1]
 
@@ -232,12 +399,21 @@ def _peek_bundle_sync(url: str, ref: str | None = None) -> dict:
                 "mcp": [],
                 "secrets": [],
             }
-            _peek_cache[url] = (now, result)
+            _peek_cache[(url, ref or "")] = (now, result)
             return result
 
         members = []
         for entry in bundle.get("plugins", []):
             pid = entry.get("id")
+            # The id comes from a FETCHED manifest — untrusted data used in a path.
+            # Without this check a manifest id like `x/../../dir` resolves the member
+            # dir OUTSIDE the TemporaryDirectory before installer._fetch writes (the
+            # 2735 review's major). One safe path component, nothing else.
+            if not _SAFE_MEMBER_ID_RE.fullmatch(str(pid or "")):
+                members.append(
+                    {"id": pid, "builtin": bool(entry.get("builtin")), "error": "invalid member id in manifest"}
+                )
+                continue
             try:
                 if entry.get("builtin"):
                     members.append(_peek_member_from(builtin_root / pid, entry))
@@ -263,9 +439,12 @@ def _peek_bundle_sync(url: str, ref: str | None = None) -> dict:
             # up front, WITHOUT installing (this is a read-only peek). Slice 1 of #2041.
             "mcp": list(bundle.get("mcp") or []),
             "secrets": list(bundle.get("secrets") or []),
+            # The archetype: block, verbatim — so pre-install surfaces (the devkit's
+            # verify_bundle, future preview UI) can sanity-check it without installing.
+            "archetype": dict(bundle.get("archetype") or {}),
         }
 
-    _peek_cache[url] = (now, result)
+    _peek_cache[(url, ref or "")] = (now, result)
     return result
 
 

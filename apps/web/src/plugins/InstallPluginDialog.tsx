@@ -6,6 +6,7 @@ import { Plus } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "../lib/api";
+import { useTrustAck } from "./TrustAckDialog";
 import { usePluginRefresh } from "./usePluginManage";
 
 const REGISTRY_GUIDE_URL = "https://protolabsai.github.io/protoAgent/guides/plugin-registry";
@@ -18,11 +19,21 @@ export function InstallPluginDialog({ open, onClose }: { open: boolean; onClose:
   const [url, setUrl] = useState("");
   const [ref, setRef] = useState("");
   const [status, setStatus] = useState("");
+  // Consent gate (#2721): needs_ack means nothing was fetched — the shared hook
+  // holds the target (the inputs must NOT clear), asks, acks, and retries.
+  const { requestAck, ackDialog } = useTrustAck({
+    onAckError: (m) => setStatus(m),
+    onCancel: () => setStatus("Install cancelled — the source wasn't trusted."),
+  });
   const refreshAll = usePluginRefresh();
 
   const install = useMutation({
     mutationFn: () => api.installPlugin(url.trim(), ref.trim() || undefined),
     onSuccess: (res) => {
+      if (res.needs_ack) {
+        requestAck({ url: url.trim(), source: res.source ?? url.trim(), retry: () => install.mutate() });
+        return;
+      }
       const s = res.installed;
       // Shared installed-set refresh: the runtime roster, the lock-backed inventory that
       // gates Uninstall, the freshness poll, and the settings schema — install auto-enables
@@ -31,10 +42,12 @@ export function InstallPluginDialog({ open, onClose }: { open: boolean; onClose:
       refreshAll();
       setUrl("");
       setRef("");
-      // Clean install (auto-enabled, nothing to flag) → close; the new row shows in the
-      // list. If auto-enable failed or there are deps to install manually, keep the
-      // dialog open with the note so it isn't lost.
-      if (!res.enable_error && !s.requires_pip?.length) {
+      // Clean install (auto-enabled, everything loaded, nothing to flag) → close; the
+      // new row shows in the list. If auto-enable failed, a plugin failed to LOAD on
+      // the reload (#2716), or there are deps to install manually, keep the dialog
+      // open with the note so it isn't lost.
+      const loadErrs = Object.entries(res.load_errors ?? {});
+      if (!res.enable_error && !loadErrs.length && !s.requires_pip?.length) {
         onClose();
         return;
       }
@@ -43,7 +56,9 @@ export function InstallPluginDialog({ open, onClose }: { open: boolean; onClose:
       setStatus(
         res.enable_error
           ? `Installed ${who} — auto-enable failed (${res.enable_error}); enable it from the list${deps}`
-          : `Installed ${who}${deps}`,
+          : loadErrs.length
+            ? `Installed ${who} — failed to load: ${loadErrs.map(([id, e]) => `${id} (${e})`).join("; ")}${deps}`
+            : `Installed ${who}${deps}`,
       );
     },
     onError: (e: unknown) => setStatus(e instanceof Error ? e.message : "install failed"),
@@ -84,6 +99,7 @@ export function InstallPluginDialog({ open, onClose }: { open: boolean; onClose:
         </Button>
       </div>
       {status ? <p className="plugin-install-status" role="status">{status}</p> : null}
+      {ackDialog}
     </Dialog>
   );
 }

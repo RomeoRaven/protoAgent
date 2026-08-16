@@ -28,16 +28,33 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated, Any
 
+import regex as _regex  # aliased — search_files's own `regex: bool` PARAM shadows the bare name
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import ToolException, tool
+from langgraph.prebuilt import InjectedState
 
 from tools.shell import run_command as _shell_run
 
 log = logging.getLogger("protoagent.fs")
 
 _MAX_READ_CHARS = 50_000
+_DEFAULT_READ_LINES = 1000  # ~_MAX_READ_CHARS worth of typical 40-60 char source lines
 _MAX_LIST = 400
 _MAX_MATCHES = 200
+_MAX_CONTEXT_LINES = 20  # clamp on search_files(context_lines=…) — a runaway value shouldn't blow the result budget
+# search_files(regex=true)'s `query` is model-supplied; stdlib `re` has no match
+# timeout, and a catastrophic-backtracking pattern can hang for a caller-controlled
+# amount of time regardless of how short the input is (verified: ~30 adversarial
+# chars already took 70s, unbounded beyond that — capping input LENGTH doesn't help,
+# the blowup happens well within any reasonable cap). `regex` (already a transitive
+# dep via tiktoken, promoted to direct) is API-compatible and honors `timeout=`.
+_REGEX_MATCH_TIMEOUT_S = 2.0
+# A hard cap on TOTAL rendered lines (matches + context), independent of _MAX_MATCHES —
+# 200 matches at context_lines=20 would otherwise emit up to 200*41 lines (~40x the old
+# tool's ~200-line worst case), since _MAX_MATCHES bounds match COUNT, not output size.
+_MAX_SEARCH_OUTPUT_LINES = 400
 
 # What `search_files` walks past by default (#2541). Two different harms, one list:
 # a compiled artifact dumped into the transcript is several KB of marshalled bytecode
@@ -293,6 +310,93 @@ def _bypass_requested() -> bool:
     return bool(current_request_metadata().get("bypass_permissions"))
 
 
+# `read_file` memoization (opt-in, `tools.memoize_reads.enabled`) — found via a
+# live-session transcript audit: the same file, read twice non-consecutively in one
+# turn, returned byte-identical truncated content both times (stall_guard's stuck-
+# loop detector only watches the trailing *contiguous* run, so a non-consecutive
+# repeat like this passes it unnoticed). A file's content is static within a turn
+# UNLESS the agent itself writes it, so a cached read is invalidated the moment a
+# write to the SAME (project, path) lands later in the turn.
+#
+# Lives inside `read_file` itself (via InjectedState), not as middleware around it:
+# an earlier middleware-based design that returned a cached result WITHOUT calling
+# the real tool handler silently skipped the `on_tool_end` callback event the rest
+# of the stack depends on (the console tool card, tool_durations, the turn's own
+# stall-message logic) — verified empirically against a real graph run. Checking
+# inside the tool body instead means the tool still "runs" (cheaply — no real read),
+# so the normal callback path fires exactly as it does for every other call.
+_WRITE_TOOLS = frozenset({"write_file", "edit_file", "delete_file"})
+
+
+def _this_turn_messages(state) -> list:
+    messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", None) or []
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            return list(messages[i + 1 :])
+    return list(messages)
+
+
+def _norm_pagination(value, default: int) -> int:
+    """Coerce a possibly-absent/None/invalid `offset`/`limit` tool-call arg to the
+    same clamped value `read_file` itself would actually use (``max(1, v)``) — NOT
+    a naive ``v or default`` fallback, which wrongly jumps an explicit ``0`` (or
+    any falsy value) all the way to the unrelated default instead of clamping it to
+    1 like the real call does. Getting this wrong desyncs the memoization key from
+    what actually ran: an explicit ``limit=0`` call effectively reads 1 line, but
+    ``0 or _DEFAULT_READ_LINES`` would compare it as if it read 1000."""
+    if value is None:
+        return default
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _memoized_read(state, project: str, path: str, offset: int, limit: int, limit_was_explicit: bool) -> str | None:
+    """The prior read's content to reuse, or None to read for real. Only a call
+    whose EXACT (project, path, offset, limit) hasn't been written to since its read
+    qualifies — a different offset OR limit is a different chunk of the file, not a
+    repeat, so both are keyed in. The LAST event touching that key (read or write),
+    scanned in turn order, decides.
+
+    ``limit_was_explicit`` has to be part of the key too, separate from the numeric
+    ``limit``: an UNSET limit and an explicit ``limit=1000`` both normalize to the
+    same effective value (``_DEFAULT_READ_LINES``), but they can return DIFFERENT
+    content — unset auto-extends past 1000 lines when the whole remainder still
+    fits the char cap, an explicit 1000 never does. Comparing the numeric value
+    alone would let an unset-limit call get served a truncated explicit-limit
+    result (or vice versa) as "unchanged," silently hiding content one of the two
+    calls actually would have returned."""
+    if state is None:
+        return None
+    messages = _this_turn_messages(state)
+    results_by_id = {
+        m.tool_call_id: m for m in messages if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None)
+    }
+    last_content: str | None = None
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in msg.tool_calls or []:
+            tc_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            tc_args = (tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)) or {}
+            if tc_args.get("project") != project or tc_args.get("path") != path:
+                continue
+            if tc_name in _WRITE_TOOLS:
+                last_content = None  # a later write invalidates any earlier cached read at ANY offset/limit
+            elif (
+                tc_name == "read_file"
+                and _norm_pagination(tc_args.get("offset"), 1) == offset
+                and _norm_pagination(tc_args.get("limit"), _DEFAULT_READ_LINES) == limit
+                and (tc_args.get("limit") is not None) == limit_was_explicit
+            ):
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                result = results_by_id.get(tc_id)
+                if result is not None and getattr(result, "status", "success") != "error":
+                    last_content = result.content if isinstance(result.content, str) else None
+    return last_content
+
+
 def build_fs_tools(config) -> list:
     """Build the fenced filesystem tools from config. Empty list when no valid
     projects are registered (so the primitive is inert by default)."""
@@ -311,6 +415,7 @@ def build_fs_tools(config) -> list:
             log.info("[fs] filesystem enabled but no valid projects registered — no tools")
         return []
     allow_run = bool(getattr(config, "filesystem_allow_run", False))
+    memoize_reads = bool(getattr(config, "tools_memoize_reads_enabled", False))
     # run_command is unsandboxed (arbitrary argv as the server user), so by
     # default each invocation is gated behind a HITL approval (the operator sees
     # the command + approves/denies). Forks can disable the gate (e.g. inside a
@@ -350,21 +455,107 @@ def build_fs_tools(config) -> list:
         return "\n".join(out) + more if out else "(empty)"
 
     @tool
-    def read_file(project: str, path: str) -> str:
-        """Read a text file inside a managed project (relative path). Truncated if large."""
+    def read_file(
+        project: str,
+        path: str,
+        offset: int = 1,
+        limit: int | None = None,
+        state: Annotated[Any, InjectedState] = None,
+    ) -> str:
+        """Read a text file inside a managed project (relative path).
+
+        `offset`/`limit` are LINE numbers (offset=1 is the first line), the same
+        addressing `search_files` uses — a hit at "file.py:342" reads straight in
+        as `read_file(path="file.py", offset=320, limit=60)` to see it in context,
+        no guessing needed. Returns up to `limit` lines starting at `offset`. A
+        truncated result names the next offset to pass, so a file larger than one
+        chunk is reachable in full across a few calls.
+
+        Leave `limit` unset for the common case: everything from `offset` to EOF
+        comes back in one call whenever it fits the ~50K-char safety cap, matching
+        a small file's old one-call guarantee regardless of line count (a file
+        with 2000 short lines still reads in full if the whole thing is only a
+        few KB). Pass an EXPLICIT `limit` to cap the page to exactly that many
+        lines even when the file would otherwise fit in one call — e.g. paging
+        through a file with many short lines N-at-a-time on purpose. A single
+        line longer than ~50K chars (e.g. a minified bundle) is itself cut short
+        either way — prefer `search_files` over paging through a line like that.
+        """
         try:
             target = registry.resolve(project, path)
         except ValueError as exc:
             return f"Error: {exc}"
         if not target.is_file():
             return f"Error: no such file: {path}"
+        offset = max(1, offset)
+        explicit_limit = None if limit is None else max(1, limit)
+        effective_limit = explicit_limit if explicit_limit is not None else _DEFAULT_READ_LINES
+        if (
+            memoize_reads
+            and _memoized_read(state, project, path, offset, effective_limit, explicit_limit is not None) is not None
+        ):
+            # A short pointer, not the content again — the saving is real context
+            # tokens (the earlier full result is still visible earlier in this
+            # turn's history), not just a skipped disk read.
+            return f"(unchanged since the identical read earlier this turn — see that read_file result above for {project}/{path}.)"
         try:
             text = _read_text_verbatim(target)
         except OSError as exc:
             return f"Error: cannot read {path}: {exc}"
-        if len(text) > _MAX_READ_CHARS:
-            return text[:_MAX_READ_CHARS] + f"\n… (truncated at {_MAX_READ_CHARS} chars)"
-        return text
+        lines = text.splitlines(keepends=True)
+        total = len(lines)
+        # offset=1 must stay valid for an empty file (total=0) — `max(total, 1)`
+        # keeps that floor without letting a LARGER offset silently skip the
+        # check just because the file happens to be empty.
+        if offset > max(total, 1):
+            return f"Error: offset {offset} is past the end of {path} ({total} lines)."
+        start = offset - 1
+        remainder = lines[start:]
+        if explicit_limit is None and sum(len(ln) for ln in remainder) <= _MAX_READ_CHARS:
+            # No line-count cap was requested, and everything from `offset` to EOF
+            # fits the char budget anyway — return it whole. Without this, a file
+            # with more than _DEFAULT_READ_LINES short lines but well under the
+            # char cap would truncate at the line count alone, a real regression
+            # from the old char-only contract (confirmed live: a 2000-line, ~4KB
+            # file used to read in one call and would otherwise now cut off at 1000).
+            wanted = remainder
+        else:
+            wanted = lines[start : start + effective_limit]
+
+        # Char safety net independent of `limit` — a run of pathologically long
+        # lines (or one minified line) must not blow the budget just because it's
+        # "only a few lines." Always include at least one line so a huge single
+        # line still makes progress instead of returning nothing.
+        selected: list[str] = []
+        chars = 0
+        line_truncated = False
+        for ln in wanted:
+            if selected and chars + len(ln) > _MAX_READ_CHARS:
+                break
+            if not selected and len(ln) > _MAX_READ_CHARS:
+                selected.append(ln[:_MAX_READ_CHARS])
+                chars += _MAX_READ_CHARS
+                line_truncated = True
+                break
+            selected.append(ln)
+            chars += len(ln)
+        returned = len(selected)
+        chunk = "".join(selected)
+        reached_eof = (start + returned) >= total
+        if offset == 1 and reached_eof and not line_truncated:
+            return chunk  # the common case, unchanged: the whole (small) file in one call
+        end_line = offset + returned - 1
+        note = f"\n… (showing lines {offset}-{end_line} of {total}"
+        if line_truncated:
+            note += f"; line {offset} is longer than {_MAX_READ_CHARS} chars and was cut short — try search_files instead of paging through a line like that"
+            if not reached_eof:
+                # The line itself is unreadable in full, but the FILE isn't done —
+                # without this the caller has no way to discover the rest exists.
+                note += f"; call again with offset={end_line + 1} for the rest of the file"
+        elif not reached_eof:
+            note += f"; call again with offset={end_line + 1} for more"
+        note += ")"
+        return chunk + note
 
     @tool
     def find_files(project: str, pattern: str = "**/*") -> str:
@@ -385,8 +576,28 @@ def build_fs_tools(config) -> list:
         return "\n".join(rels) + more if rels else "(no matches)"
 
     @tool
-    def search_files(project: str, query: str, path: str = ".", include_generated: bool = False) -> str:
-        """Substring-search text files under a managed project path; returns file:line matches.
+    def search_files(
+        project: str,
+        query: str,
+        path: str = ".",
+        regex: bool = False,
+        context_lines: int = 0,
+        include_generated: bool = False,
+    ) -> str:
+        """Search text files under a managed project path; returns file:line matches —
+        grep-style, addressed the same way `read_file`'s offset/limit are, so a hit at
+        "file.py:342" reads straight into `read_file(path="file.py", offset=320,
+        limit=60)`.
+
+        `query` is a literal substring by default; set regex=true to match it as a
+        Python regex instead (e.g. `def \\w+_handler\\(`) — a pattern that times out
+        (catastrophic backtracking) aborts the search with an error naming it, so
+        simplify it and retry rather than assuming the tool hung. `context_lines`
+        (like grep -C) includes that many lines before/after each match, marked `-`
+        for context vs `:` for the matching line itself, with adjacent/overlapping
+        matches merged into one block and `--` separating non-adjacent ones — so a
+        hit comes with enough of the function around it to be useful without a
+        separate read_file round trip for the common case.
 
         Binary files and generated/vendored directories are skipped by default —
         __pycache__, .pytest_cache, .mypy_cache, .ruff_cache, .tox, .git, .venv, venv,
@@ -399,6 +610,27 @@ def build_fs_tools(config) -> list:
             return f"Error: {exc}"
         root = registry.resolve(project, ".")
 
+        if regex:
+            try:
+                pattern = _regex.compile(query)
+            except _regex.error as exc:
+                return f"Error: bad regex: {exc}"
+
+            def matches(line: str) -> bool:
+                # `timeout=` is the actual guarantee against a catastrophic-
+                # backtracking pattern (e.g. `(a|a)+b`) — raises the builtin
+                # TimeoutError, left uncaught here so it propagates straight out
+                # of the search loop below and aborts the whole call immediately,
+                # rather than re-triggering the same timeout on every remaining
+                # line. Literal search (the default) has no backtracking risk.
+                return pattern.search(line, timeout=_REGEX_MATCH_TIMEOUT_S) is not None
+        else:
+
+            def matches(line: str) -> bool:
+                return query in line
+
+        context_lines = max(0, min(context_lines, _MAX_CONTEXT_LINES))
+
         skipped_dirs = False
         if base.is_file():
             files = [base]
@@ -407,22 +639,86 @@ def build_fs_tools(config) -> list:
         else:
             files, skipped_dirs = _walk_searchable(base)
 
-        hits: list[str] = []
+        blocks: list[str] = []
+        n_matches = 0
+        rendered_lines = 0
         skipped_binary = False
-        for f in files:
-            if not include_generated and _is_probably_binary(f):
-                skipped_binary = True
-                continue
-            try:
-                for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                    if query in line:
-                        hits.append(f"{f.relative_to(root).as_posix()}:{i}: {line.strip()[:200]}")
-                        if len(hits) >= _MAX_MATCHES:
-                            return "\n".join(hits) + "\n… (more matches; narrow the search)"
-            except OSError:
-                continue
-        if hits:
-            return "\n".join(hits)
+        hit_cap = False
+        try:
+            for f in files:
+                if hit_cap:
+                    break
+                if not include_generated and _is_probably_binary(f):
+                    skipped_binary = True
+                    continue
+                try:
+                    lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                # Stop SCANNING once the match cap is reached — a huge file with more
+                # than _MAX_MATCHES hits shouldn't pay to enumerate all of them just to
+                # throw the rest away below.
+                hit_idx: list[int] = []
+                for i, line in enumerate(lines):
+                    if matches(line):
+                        hit_idx.append(i)
+                        if len(hit_idx) >= _MAX_MATCHES:
+                            break
+                if not hit_idx:
+                    continue
+                rel = f.relative_to(root).as_posix()
+                if context_lines == 0:
+                    for i in hit_idx:
+                        blocks.append(f"{rel}:{i + 1}: {lines[i].strip()[:200]}")
+                        n_matches += 1
+                        rendered_lines += 1
+                        if n_matches >= _MAX_MATCHES or rendered_lines >= _MAX_SEARCH_OUTPUT_LINES:
+                            hit_cap = True
+                            break
+                    continue
+                # Merge each match's [-context, +context] window into contiguous ranges
+                # so overlapping/adjacent hits render as one block, not duplicated lines.
+                ranges: list[list[int]] = []
+                for i in hit_idx:
+                    lo, hi = max(0, i - context_lines), min(len(lines) - 1, i + context_lines)
+                    if ranges and lo <= ranges[-1][1] + 1:
+                        ranges[-1][1] = max(ranges[-1][1], hi)
+                    else:
+                        ranges.append([lo, hi])
+                hit_set = set(hit_idx)
+                for lo, hi in ranges:
+                    if blocks:
+                        blocks.append("--")
+                        rendered_lines += 1
+                    for i in range(lo, hi + 1):
+                        is_hit = i in hit_set
+                        marker = ":" if is_hit else "-"
+                        # The match line strips like the zero-context path does (a hit
+                        # renders the same regardless of context_lines); context-only
+                        # lines keep their indentation — that's the point of showing them.
+                        text = lines[i].strip() if is_hit else lines[i]
+                        blocks.append(f"{rel}{marker}{i + 1}{marker} {text[:200]}")
+                        rendered_lines += 1
+                        if is_hit:
+                            n_matches += 1
+                        # Checked on EVERY line, not just at range boundaries — a single
+                        # merged range (e.g. from context_lines overlapping many nearby
+                        # hits) must not blow past the budget before the next check.
+                        if n_matches >= _MAX_MATCHES or rendered_lines >= _MAX_SEARCH_OUTPUT_LINES:
+                            hit_cap = True
+                            break
+                    if hit_cap:
+                        break
+        except TimeoutError:
+            return f"Error: regex took too long to match (possible catastrophic backtracking) — simplify the pattern: {query!r}"
+        if hit_cap:
+            # Two independent caps can trigger this: too many MATCHES, or too much
+            # OUTPUT (e.g. wide context_lines around matches that were all already
+            # found) — don't claim specifically "more matches" when it might just be
+            # more context around matches already shown in full.
+            return "\n".join(blocks) + "\n… (more matches or output; narrow the search or lower context_lines)"
+        if blocks:
+            return "\n".join(blocks)
         # Say what was NOT searched, so "(no matches)" can't be read as "not in this
         # repo" when the answer is sitting in a pruned tree.
         if skipped_dirs or skipped_binary:

@@ -4,7 +4,7 @@
 # (see [project.scripts]); only the install identifier is namespaced under protolabs-,
 # matching the sibling `protolabs-a2a`.
 name = "protolabs-agent"
-version = "0.136.0"
+version = "0.137.0"
 description = "protoAgent — LangGraph + A2A template for spawning protoLabs agents"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -82,6 +82,14 @@ dependencies = [
   "youtube-transcript-api>=1.0", # YouTube captions → text (1.x instance API)
   # Markdown → HTML for the `docs` plugin's reader view (server-side render, offline).
   "markdown-it-py>=3.0",
+  # search_files(regex=true) (#2755) compiles a model-supplied pattern — stdlib `re`
+  # has no match timeout, so a catastrophic-backtracking pattern (e.g. `(a|a)+b`) can
+  # hang the process for a caller-controlled amount of time (verified: ~30 chars of
+  # adversarial input already took 70s against stdlib `re`, unbounded beyond that).
+  # `regex` is API-compatible and adds `timeout=` on `search`/`match`, which actually
+  # bounds worst-case time — was already present transitively (via tiktoken), promoted
+  # to a direct pin so that stays true regardless of what pulls it in.
+  "regex>=2024.11.6",
 ]
 
 # The `protoagent` command (ADR 0075 D1) — the terminal control plane: install /
