@@ -281,7 +281,7 @@ async def update_bundle(
 
 @op(
     name="plugins.uninstall_bundle",
-    risk="disruptive",
+    risk="destructive",
     summary="Uninstall a bundle: its exclusively-owned members + the lock row, then hot-reload.",
 )
 async def uninstall_bundle(
