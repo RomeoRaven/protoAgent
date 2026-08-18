@@ -802,6 +802,18 @@
           "title": "0100 — Agent archetypes (starter agent types, ratified)"
         },
         {
+          "path": "adr/0101-context-lifecycle-log-surface-pressure.md",
+          "title": "0101 — Context lifecycle: log, surface, pressure"
+        },
+        {
+          "path": "adr/0102-the-trajectory-session-log-and-derived-surface.md",
+          "title": "0102 — The trajectory: append-only session log + derived surface"
+        },
+        {
+          "path": "adr/0103-programmatic-tool-calls-from-execute-code.md",
+          "title": "0103 — Programmatic tool calls: agent tools callable from execute_code"
+        },
+        {
           "path": "adr/index.md",
           "title": "Architecture Decision Records"
         }

@@ -569,6 +569,9 @@ export type ToolCall = {
   name: string;
   input?: string;
   output?: string;
+  /** True pre-truncation result size in chars (#2775) — `output` is the capped
+   *  wire preview, so the context-cost chip must estimate from this instead. */
+  outputChars?: number;
   status: "running" | "done" | "error";
   /** Client wall-clock when the start frame arrived (ms epoch). */
   startedAt?: number;
@@ -632,6 +635,8 @@ export type ToolEvent = {
   phase: "start" | "end";
   input?: string;
   output?: string;
+  /** True pre-truncation result size in chars, from the wire fragment (#2775). */
+  outputChars?: number;
   error?: boolean; // an "end" that failed (phase "failed" on the wire) → card shows the X
   /** id of the enclosing `task` delegation when this is a subagent's own tool call —
    *  set server-side so nesting is explicit (by id), not inferred from frame order. */
@@ -757,6 +762,9 @@ export type ContextWindow = {
   /** The configured compaction trigger string, for the tooltip (e.g. "tokens:120000"). */
   trigger?: string;
   enabled?: boolean;
+  /** What the NEXT request on this thread starts from (last prompt + completion) —
+   *  a floor, not a promise (#2773, ADR 0101 D6). Absent on pre-#2789 backends. */
+  projectedTokens?: number;
 };
 
 /** Emphasis tone for a local SYSTEM NOTE (a role-"system" message without a `report`) —
@@ -952,8 +960,44 @@ export type TelemetrySummary = {
   p99_duration_ms: number;
   success_rate: number;
   cache_hit_ratio: number;
+  /** Context-fill series (#2773, ADR 0101 D6) — peak/p95 of per-turn context-window
+   *  fill, zero rows excluded. Absent on pre-#2789 backends. */
+  max_context_tokens?: number;
+  p95_context_tokens?: number;
   by_model: TelemetryByModelRow[];
   by_tool: TelemetryByToolRow[];
+};
+
+// Trajectory read surface (ADR 0102 S2, #2806) — the per-conversation event
+// stream and the availability-joined call reconstruction behind /trajectory.
+export type TrajectoryEvent = {
+  index: number;
+  ts?: string;
+  t: "request" | "response" | "surface_op" | string;
+  // request
+  model?: string;
+  tools_count?: number;
+  msgs?: { id?: string | null; role: string; sha: string; chars: number }[];
+  // response
+  status?: string;
+  error?: string;
+  usage?: { input?: number; output?: number; cache_read?: number; cache_creation?: number };
+  // surface_op
+  op?: string;
+  cause?: string;
+  removed?: number;
+  kept?: number;
+  rewritten_ids?: string[];
+};
+
+export type TrajectoryCall = {
+  found: boolean;
+  call: number;
+  calls: number;
+  model: string;
+  ts: string;
+  messages: { id?: string | null; role: string; sha: string; chars: number; status: string; preview?: string }[];
+  availability: { available: number; rewritten: number; missing: number };
 };
 
 export type TelemetryTurn = {
@@ -977,6 +1021,11 @@ export type TelemetryTurn = {
   // Langfuse trace for this turn — empty/absent when tracing was off. Paired
   // with /api/telemetry/recent's `langfuse_trace_url_template` to deep-link.
   trace_id?: string | null;
+  /** Peak single-call prompt size = this turn's context-window fill (#2773).
+   *  0/absent for turns recorded before the column existed. */
+  context_tokens?: number;
+  /** Derived per-turn cache-hit ratio (cache reads / prompt tokens), from recent(). */
+  cache_hit_ratio?: number;
 };
 
 export type TelemetryInsights = {

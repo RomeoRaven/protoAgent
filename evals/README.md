@@ -66,6 +66,28 @@ python -m evals.compare results/run-OLD.json results/run-NEW.json
 | `workflow` | A recipe runs end-to-end via `/api/workflows/{name}/run`; assert on its output **and** (optionally) on tool-firing — `expected_tools` / `expected_any_tools` check the audit log, so a case can require a step to have actually called a tool (e.g. a quant step that backtests, not one that only describes a backtest) |
 | `memory-regression` | Memory delivery-layer probes ([ADR 0069](../docs/adr/0069-memory-delivery-layer.md) D10): a knowledge-update case (seed a fact, seed its supersede, assert the newer value wins and the stale one is not restated — `forbidden_patterns`), an abstention case (ask about an adjacent-but-absent fact, judge that it declines rather than fabricates — `verify_rubric`), and a poisoning replay (ingest a doc with an embedded instruction payload, then a later benign turn; assert both the behavioral condition — the payload token never appears — and the store-level one — `verify_kb.max_chunks_containing` bounds the marker's row count so the "save a memory that …" payload never persists) |
 
+## PTC graduation bench (ADR 0103, #2807)
+
+The decision harness for programmatic tool calls — a two-lane suite over the
+same deterministic task, judged against thresholds pre-registered on #2807:
+
+```bash
+# once: fixtures + the project-registration snippet
+python -m evals.ptc_bench fixtures --dir /path/to/ptc-bench-files
+
+# the run: generates the two-lane tasks file, drives evals.runner, joins the
+# per-turn telemetry by pinned session id, prints the verdict
+python -m evals.ptc_bench run --project ptcbench --base-url http://127.0.0.1:7871 --reps 2
+```
+
+Lane provability rides the audit log: the loop lane forbids `execute_code`;
+the code lane REQUIRES `ptc:read_file` (the bridge's audit prefix) and forbids
+the direct tool — a run that quietly used the wrong mode fails its lane.
+Correctness is symmetric (labeled `SIZE:` answers, no character counting), so a
+cheaper-but-wrong lane can never graduate. Run it on ≥v0.138.0 with prompt
+caching ON — the history breakpoints made loop rounds cache-cheap, and an
+uncached comparison would flatter PTC dishonestly.
+
 ## File layout
 
 ```
@@ -121,6 +143,26 @@ Two negative assertions (added for the `memory-regression` probes, usable on any
   most** `max` chunks contain the marker (`max` defaults to 0). The store-level
   half of the poisoning replay: the seeded doc counts as 1, so `max: 1` proves
   no *new* memory row carrying the payload was written.
+- `forbidden_tools`: `["…"]` — tools that must **not** fire (audit-log
+  channel). Selective abstention: `expected_tools: []` asserts *no* tool
+  fired at all, while this lets unrelated tools fire and only requires the
+  named ones to stay cold — e.g. a plain calendar question may hit the
+  calendar tool but must not render a full daily brief. An errored attempt
+  still counts as fired: reaching for the tool is the violation.
+
+## Plugin-owned suites (`--tasks-file`)
+
+A plugin repo can ship its own eval cases (same JSON shape) and run them with
+this runner against an instance that has the plugin installed:
+
+```bash
+python -m evals.runner --tasks-file ../cowork-plugin/evals/tasks.json
+```
+
+The file **replaces** the built-in suite for that run — compose with `--tasks`
+to filter within it. Reports land in `evals/results/` either way, tagged with
+the model under test, so `evals/report.py` trends plugin suites alongside the
+core one.
 
 ### Goal-mode cases (`kind: "goal"`)
 

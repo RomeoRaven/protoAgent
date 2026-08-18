@@ -308,6 +308,49 @@ def _default_filesystem_allow_run() -> bool:
     return os.environ.get("PROTOAGENT_UI", "").strip().lower() != "none"
 
 
+def _parse_sources_allow(sources: dict):
+    """``plugins.sources.allow`` with the absent-vs-explicit-empty distinction
+    (#2743 item 1): absent → ``None`` (open), explicit ``[]`` → deny-all,
+    non-empty → the allowlist. An explicit empty list previously meant OPEN —
+    warn loudly on the flip so an operator carrying a literal ``allow: []``
+    learns their config now hardens instead of silently changing behavior."""
+    if "allow" not in sources:
+        return None
+    allow = [str(x) for x in (sources.get("allow") or [])]
+    if not allow:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[plugins] sources.allow is an EXPLICIT empty list — since #2743 that means "
+            "DENY-ALL plugin installs (it used to mean open). Remove the key to allow any "
+            "source, or list the origins you trust."
+        )
+    return allow
+
+
+def _default_prompt_cache_ttl() -> str:
+    """Profile-aware app-default for ``prompt_cache.ttl`` (#2780, ADR 0101 D7).
+
+    The 5m ephemeral tier fits an interactive dev chat, where turns arrive
+    faster than the TTL. Fleet members and the packaged desktop app are
+    long-lived agents that routinely idle past 5m between turns — every re-warm
+    re-pays the full stable prefix uncached, so they default to the 1h
+    persistent tier (Anthropic prices 1h writes at 2x base input vs 1.25x for
+    5m; one avoided re-warm already covers the premium on these profiles).
+
+    Signals, deliberately coarse: a fleet member runs with ``PROTOAGENT_HOME``
+    (its workspace as instance root — ``graph/workspaces/manager.run_exec``);
+    the desktop app is a frozen binary. A standalone instance an operator
+    relocated via ``PROTOAGENT_HOME`` matches too — same long-lived profile,
+    same trade. An explicit ``prompt_cache.ttl`` in config always wins.
+    """
+    import sys
+
+    if getattr(sys, "frozen", False) or os.environ.get("PROTOAGENT_HOME", "").strip():
+        return "1h"
+    return "5m"
+
+
 def _host_scoped_fields():
     """The host-scoped (ADR 0047 ``scope=="host"``) settings fields — the single
     source for both the host-layer filter and the shadow check, so they can't drift."""
@@ -440,6 +483,13 @@ class LangGraphConfig:
     # single step by a wide margin (an MCP call is separately bounded at 300s by
     # ``mcp.call_timeout_seconds``). ``0`` disables the guard.
     turn_stall_timeout_seconds: float = 900.0
+    # Round governance (#2710, ADR 0101 D8). ``round_nudge_after``: model rounds
+    # into a turn before ONE re-grounding note is injected (long runs decay
+    # instruction adherence — the duplicate-card incident was 21 rounds in);
+    # 0 disables. ``round_hard_cap``: end the turn with an honest hand-back at
+    # this many rounds; 0 (default) = off — max_iterations remains the backstop.
+    round_nudge_after: int = 25
+    round_hard_cap: int = 0
     # Native vision (ADR 0021): set true when `model_name` is image-capable (e.g.
     # protolabs/fast, protolabs/smart). The chat composer then sends attached
     # images as native multimodal parts straight to the model instead of routing
@@ -553,6 +603,15 @@ class LangGraphConfig:
     compaction_enabled: bool = True
     compaction_trigger: str = "fraction:0.8"
     compaction_keep_messages: int = 20
+    # In-history tool-result pruning (#2782, ADR 0101 D3) — the near-lossless
+    # step BEFORE compaction's lossy summarize: at ``at_fraction`` of the model's
+    # context window, tool results older than the newest ``keep_messages`` are
+    # rewritten to head+tail stubs in one batched pass. See
+    # graph/middleware/tool_result_pruner.py for the full mechanics.
+    pruning_enabled: bool = True
+    pruning_at_fraction: float = 0.6
+    pruning_keep_messages: int = 20
+    pruning_min_chars: int = 4000
     compaction_model: str = ""  # blank = summarize with the main model
 
     # Deferred tools (ADR 0005 #3) — progressive tool disclosure for high tool
@@ -902,6 +961,14 @@ class LangGraphConfig:
     # narrower arguments, never a failed turn. ``0`` disables it; a single server
     # entry can override with ``call_timeout``.
     mcp_call_timeout_seconds: float = 300.0
+    # Bounds a single MCP tool RESULT (``mcp.max_result_chars``) — the one lane
+    # that had no size cap at all (#2781, ADR 0101 D3): every built-in tool
+    # truncates at call time, but an MCP server returning 500KB put 500KB into
+    # history, re-sent verbatim on every later model call for the thread's life.
+    # Over the cap, the result is rewritten to bounded head + omission marker +
+    # bounded tail so both ends survive. Matches read_file's ``_MAX_READ_CHARS``.
+    # ``0`` disables it; a single server entry can override with ``max_result_chars``.
+    mcp_max_result_chars: int = 50_000
     mcp_denylist: list[str] = field(default_factory=list)
     # Persistent sessions (default ON): each server keeps ONE long-lived MCP
     # session reused across tool calls, auto-reconnected once when it dies.
@@ -965,9 +1032,13 @@ class LangGraphConfig:
     # runs code on import, so it stays consent-gated (ADR 0071). No effect off-frozen
     # (a source/server run pip-installs into its own venv as before).
     plugins_allow_unbundled_deps: bool = False
-    # Optional source allowlist for git-URL installs (ADR 0027 D3) — host/org globs
-    # (e.g. ``github.com/protoLabsAI/*``); empty = any URL allowed (gated install).
-    plugins_sources_allow: list[str] = field(default_factory=list)
+    # Optional source allowlist for git-URL installs (ADR 0027 D3) — host/org
+    # globs (e.g. ``github.com/protoLabsAI/*``). Absent-vs-explicit-empty is
+    # load-bearing since #2743 (the #2691 lesson, same pattern as ``official``
+    # below): ``None`` (key absent) = any URL allowed; an explicit empty list =
+    # DENY-ALL (a hardening stance, what a defense-minded admin writing ``[]``
+    # means); non-empty = the allowlist. Previously ``[]`` silently meant open.
+    plugins_sources_allow: list[str] | None = None
     # Trust & consent (ADR 0071 D3, #2721) — decides only whether the console asks
     # for a one-time "this runs code" confirm before an install; install ≠ enable ≠
     # trust semantics are untouched. ``official``: auto-trusted source globs —
@@ -1428,6 +1499,8 @@ class LangGraphConfig:
             turn_stall_timeout_seconds=model.get(
                 "turn_stall_timeout_seconds", cls.turn_stall_timeout_seconds
             ),
+            round_nudge_after=model.get("round_nudge_after", cls.round_nudge_after),
+            round_hard_cap=model.get("round_hard_cap", cls.round_hard_cap),
             request_timeout=model.get("request_timeout", cls.request_timeout),
             llm_max_retries=model.get("max_retries", cls.llm_max_retries),
             top_p=model.get("top_p", cls.top_p),
@@ -1445,7 +1518,9 @@ class LangGraphConfig:
             enforcement_disallowed_tools=(data.get("enforcement", {}).get("disallowed_tools", [])),
             enforcement_rate_limits=(data.get("enforcement", {}).get("rate_limits", {})),
             prompt_cache_enabled=data.get("prompt_cache", {}).get("enabled", cls.prompt_cache_enabled),
-            prompt_cache_ttl=data.get("prompt_cache", {}).get("ttl", cls.prompt_cache_ttl),
+            # Absent (or blank) resolves through the profile-aware default —
+            # 1h for fleet/desktop, 5m interactive (#2780). Explicit always wins.
+            prompt_cache_ttl=(data.get("prompt_cache", {}).get("ttl") or _default_prompt_cache_ttl()),
             prompt_cache_force=data.get("prompt_cache", {}).get("force", cls.prompt_cache_force),
             cache_warming_enabled=data.get("prompt_cache", {})
             .get("warm", {})
@@ -1456,6 +1531,10 @@ class LangGraphConfig:
             compaction_enabled=data.get("compaction", {}).get("enabled", cls.compaction_enabled),
             compaction_trigger=data.get("compaction", {}).get("trigger", cls.compaction_trigger),
             compaction_keep_messages=data.get("compaction", {}).get("keep_messages", cls.compaction_keep_messages),
+            pruning_enabled=data.get("pruning", {}).get("enabled", cls.pruning_enabled),
+            pruning_at_fraction=data.get("pruning", {}).get("at_fraction", cls.pruning_at_fraction),
+            pruning_keep_messages=data.get("pruning", {}).get("keep_messages", cls.pruning_keep_messages),
+            pruning_min_chars=data.get("pruning", {}).get("min_chars", cls.pruning_min_chars),
             compaction_model=data.get("compaction", {}).get("model", cls.compaction_model),
             tools_deferred_enabled=data.get("tools", {}).get("deferred", {}).get("enabled", cls.tools_deferred_enabled),
             tools_deferred_keep=list(data.get("tools", {}).get("deferred", {}).get("keep", []) or []),
@@ -1562,6 +1641,7 @@ class LangGraphConfig:
             mcp_call_timeout_seconds=mcp.get(
                 "call_timeout_seconds", cls.mcp_call_timeout_seconds
             ),
+            mcp_max_result_chars=mcp.get("max_result_chars", cls.mcp_max_result_chars),
             mcp_denylist=list(mcp.get("denylist", []) or []),
             mcp_persistent_sessions=bool(
                 mcp.get("persistent_sessions", cls.mcp_persistent_sessions)
@@ -1577,7 +1657,7 @@ class LangGraphConfig:
             plugins_disabled=list(plugins.get("disabled", []) or []),
             plugins_dir=plugins.get("dir", cls.plugins_dir),
             plugins_allow_unbundled_deps=bool(plugins.get("allow_unbundled_deps", cls.plugins_allow_unbundled_deps)),
-            plugins_sources_allow=list((plugins.get("sources", {}) or {}).get("allow", []) or []),
+            plugins_sources_allow=_parse_sources_allow(plugins.get("sources", {}) or {}),
             # ``official``'s absent-vs-explicit-empty distinction is load-bearing
             # (#2691's lesson): absent → the protoLabsAI default; an explicit empty
             # list → "no official sources" (a fork's hardening choice).

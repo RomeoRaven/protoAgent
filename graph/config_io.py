@@ -744,6 +744,7 @@ def config_to_dict(config: LangGraphConfig) -> dict[str, Any]:
                 "servers": list(config.mcp_servers),
                 "timeout_seconds": config.mcp_timeout_seconds,
                 "call_timeout_seconds": config.mcp_call_timeout_seconds,
+                "max_result_chars": config.mcp_max_result_chars,
                 "denylist": list(config.mcp_denylist),
                 "persistent_sessions": config.mcp_persistent_sessions,
             },
@@ -767,7 +768,13 @@ def config_to_dict(config: LangGraphConfig) -> dict[str, Any]:
                 # store MUST survive this dict — an ack that doesn't persist re-asks
                 # forever (the exact write-path drop the June audit warned about).
                 "sources": {
-                    "allow": list(config.plugins_sources_allow),
+                    # Absent-vs-explicit-empty is semantic (#2743): None (open)
+                    # OMITS the key; [] (deny-all) writes an explicit empty list.
+                    **(
+                        {"allow": list(config.plugins_sources_allow)}
+                        if config.plugins_sources_allow is not None
+                        else {}
+                    ),
                     "official": list(config.plugins_sources_official),
                     "acked": list(config.plugins_sources_acked),
                 },

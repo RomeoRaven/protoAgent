@@ -534,6 +534,7 @@ function toolEventFromMeta(metadata: ExtMetadata): ToolEvent | null {
         result?: string;
         error?: string;
         parentToolCallId?: string;
+        outputChars?: number;
       }
     | null;
   if (!d) return null;
@@ -544,6 +545,9 @@ function toolEventFromMeta(metadata: ExtMetadata): ToolEvent | null {
     input: d.args,
     // A "failed" end carries the error text in `error`; fall back to it for the body.
     output: d.result ?? d.error,
+    // True pre-truncation result size (#2775) — proto-JSON round-trips numbers as
+    // floats, so coerce back to an int for the chip arithmetic.
+    ...(typeof d.outputChars === "number" ? { outputChars: Math.floor(d.outputChars) } : {}),
     error: d.phase === "failed" || Boolean(d.error),
     // Set only for a subagent's own tool calls → nest under the `task` card by id.
     ...(d.parentToolCallId ? { parentId: d.parentToolCallId } : {}),
@@ -614,11 +618,14 @@ export function contextFromParts(parts?: RawPart[]): ContextWindow | null {
         maxTokens?: number;
         trigger?: string;
         enabled?: boolean;
+        projectedTokens?: number;
       }
     | null;
   if (!d || typeof d.contextTokens !== "number") return null;
   return {
     contextTokens: d.contextTokens,
+    // Proto-JSON round-trips numbers as floats — floor back for token arithmetic.
+    ...(typeof d.projectedTokens === "number" ? { projectedTokens: Math.floor(d.projectedTokens) } : {}),
     ...(typeof d.compactionAtTokens === "number" ? { compactionAtTokens: d.compactionAtTokens } : {}),
     ...(typeof d.maxTokens === "number" ? { maxTokens: d.maxTokens } : {}),
     ...(typeof d.trigger === "string" ? { trigger: d.trigger } : {}),
@@ -873,6 +880,18 @@ export const api = {
   // Delete all FINISHED background jobs (clears the stacked-up history).
   clearFinishedBackground() {
     return request<{ ok: boolean; cleared?: number }>("/api/background/clear", { method: "POST" });
+  },
+
+  trajectoryEvents(sessionId: string, limit = 20) {
+    return request<{ found: boolean; events: import("./types").TrajectoryEvent[]; total: number }>(
+      `/api/trajectory/${encodeURIComponent(sessionId)}?limit=${limit}`,
+    );
+  },
+
+  trajectoryCall(sessionId: string, n: number) {
+    return request<import("./types").TrajectoryCall & { reason?: string }>(
+      `/api/trajectory/${encodeURIComponent(sessionId)}/call/${n}`,
+    );
   },
 
   telemetrySummary(since?: string) {
@@ -1861,6 +1880,18 @@ export const api = {
   // `before: true` = exclusive cut (#2491): the target itself is discarded too —
   // Regenerate rewinds to just before the last user message so its resend REPLACES
   // the turn instead of appending a duplicate pair.
+  forkChatSession(sessionId: string, newSessionId: string, messageId: string, content?: string, occurrence?: number) {
+    return request<{
+      found: boolean;
+      kept: number;
+      discarded: number;
+      reason: string;
+      message: string;
+    }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/fork`, {
+      method: "POST",
+      body: { new_session_id: newSessionId, message_id: messageId, content, occurrence },
+    });
+  },
   rewindChatSession(sessionId: string, messageId: string, content?: string, occurrence?: number, before?: boolean) {
     return request<{
       found: boolean;
@@ -2369,7 +2400,9 @@ export const api = {
   // Pip-install a plugin's declared requires_pip (the code-exec step `install`
   // deliberately skips) — previously CLI-only.
   installPluginDeps(id: string) {
-    return request<{ ok: boolean; installed: string[] }>("/api/plugins/install-deps", {
+    // needs_ack (#2743): deps-install re-checks source trust like install does — the
+    // caller renders the same confirm dialog and retries after POST /api/plugins/ack.
+    return request<{ ok?: boolean; installed?: string[]; needs_ack?: boolean; source?: string }>("/api/plugins/install-deps", {
       method: "POST",
       body: { id },
     });

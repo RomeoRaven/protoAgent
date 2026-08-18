@@ -194,12 +194,24 @@ prompt_cache:
 | Key | Default | What |
 |---|---|---|
 | `enabled` | `true` | Attach `cache_control` to the stable prefix for every model. Rejection → auto-fallback (per model, per session); silent zero-hit → a once-per-model WARNING. `false` = plain delivery only. |
-| `ttl` | `"5m"` | Cache tier: `5m` (ephemeral) or `1h` (persistent). |
+| `ttl` | profile-aware | Cache tier: `5m` (ephemeral) or `1h` (persistent). Absent, it resolves by profile (#2780, ADR 0101 D7): **`1h` on fleet members and the packaged desktop app** (long-lived agents that idle past 5m between turns — a single avoided prefix re-warm covers the 1h tier's higher write price), `5m` on an interactive dev instance. Explicit config always wins. |
 | `force` | `false` | Trust-the-operator mode: always attach, never auto-fall back (a rejection propagates instead of degrading silently). |
 | `warm.enabled` | `false` | Run a background heartbeat (`graph/cache_warmer.py`) that periodically reproduces the cached system prefix so the **first** request after an idle gap hits a warm cache instead of a full miss. |
 | `warm.interval_seconds` | `3300` | Heartbeat period. Set just under `ttl` (default 55m for the `1h` tier). |
 
 **When to enable `warm`:** sporadic but latency-sensitive traffic on the `1h` tier — the ~1-token ping per interval is cheap relative to a cold miss on a multi-thousand-token prefix while a user waits. Leave it **off** for steady traffic (the cache stays warm on its own — warming is then pure cost) and for providers where the zero-hit warning fired (nothing to warm). It runs as its own asyncio task (started/stopped with the server), **not** through the scheduler — the scheduler fires full agent turns, the wrong primitive for a keep-alive.
+
+## `pruning`
+
+In-history tool-result pruning (#2782, ADR 0101 D3/D4) — the near-lossless relief step that runs **before** compaction's lossy summarize. At `at_fraction` of the model's context window (chars÷4 estimate; a fixed conservative floor when the gateway reports no window), tool results older than the newest `keep_messages` are rewritten to bounded head + omission marker + bounded tail, in **one batched pass** so the rolling history cache breakpoints (#2777) take a single miss instead of one per call. Replacement is by message id, so tool-call pairing survives; the marker says the middle is gone and to re-run the tool if needed. A pass here often keeps the 0.8 compaction valve from firing at all.
+
+```yaml
+pruning:
+  enabled: true       # on by default
+  at_fraction: 0.6    # prune at 60% of the window — before compaction's 0.8
+  keep_messages: 20   # the newest N messages are never touched
+  min_chars: 4000     # results smaller than this aren't worth a marker
+```
 
 ## `compaction`
 
@@ -540,8 +552,9 @@ Connect external [Model Context Protocol](../guides/mcp.md) servers; their tools
 | `enabled` | `false` | Connect the configured servers and expose their tools. |
 | `timeout_seconds` | `20` | Per-server **discovery** timeout. A slow/unreachable server is skipped, never fatal. Does not bound a tool call — that's `call_timeout_seconds`. |
 | `call_timeout_seconds` | `300` | Bounds a single tool **invocation**. A trip cancels that call and returns a recoverable tool error the model can retry with narrower arguments — never a failed turn. `0` disables it. Deliberately generous: real calls do run for minutes (a filesystem search over a large tree measured ~4 min), so this is a backstop against a call that will *never* return, not a latency budget. |
+| `max_result_chars` | `50000` | Bounds a single tool **result** (#2781, ADR 0101 D3). Over the cap, the result is rewritten to bounded head + omission marker + bounded tail — the marker names the true size and this knob. The one lane that previously had no size cap: an over-large result otherwise re-enters the context on every later model call for the thread's life. `0` disables it; a server entry can override with `max_result_chars`. |
 | `denylist` | `[]` | Namespaced tool names to drop (e.g. `filesystem__write_file`). |
-| `servers` | `[]` | List of `{name, transport, …}`. `stdio` → `command`/`args`/`env`/`cwd`; `streamable_http`/`sse` → `url`/`headers`. Per-server: `enabled: false` skips connecting it (lazy); `tools: {include: [...], exclude: [...]}` filters which of its tools bind; `call_timeout` overrides `call_timeout_seconds` for that server alone. |
+| `servers` | `[]` | List of `{name, transport, …}`. `stdio` → `command`/`args`/`env`/`cwd`; `streamable_http`/`sse` → `url`/`headers`. Per-server: `enabled: false` skips connecting it (lazy); `tools: {include: [...], exclude: [...]}` filters which of its tools bind; `call_timeout` overrides `call_timeout_seconds` for that server alone; `max_result_chars` likewise overrides the global result cap (`0` = uncapped). |
 
 Per-server `tools.include` is an **allowlist** (only those tools bind) — the fix for a server with a large catalog flooding context; `exclude` drops from the remainder (`include` wins on conflict). The global `denylist` is the cross-server hard block. Both match the bare or namespaced tool name. See [ADR 0005](../adr/0005-tool-pollution-and-progressive-disclosure.md) on tool pollution.
 
@@ -605,7 +618,7 @@ Drop-in [plugins](../guides/plugins.md) (manifest + `register()`) that contribut
 | `enabled` | `[]` | Plugin `id`s to load. A plugin also loads if its own manifest has `enabled: true`. |
 | `disabled` | `[]` | Plugin `id`s to force **OFF** even when their manifest says `enabled: true` — the way a fork drops a bundled first-party plugin (e.g. `discord`, `google`) without deleting its directory or editing core. |
 | `dir` | `""` | Override the writable plugins root (default `<config-dir>/plugins`). |
-| `sources.allow` | `[]` | Optional allowlist of host/org globs for git-URL installs (e.g. `[github.com/yourorg/*]`); empty = any URL (gated install). (ADR 0027.) |
+| `sources.allow` | _(absent)_ | Optional allowlist of host/org globs for git-URL installs (e.g. `[github.com/yourorg/*]`). Absent-vs-explicit-empty is semantic (#2743, same rule as `sources.official`): key **absent** = any URL allowed (gated install); an **explicit `[]`** = deny-all — the hardening stance a defense-minded admin writing an empty list means. A config carrying a literal `allow: []` from before #2743 flips from open to deny and the boot log says so loudly — remove the key to stay open. (ADR 0027.) |
 | `update_policy` | `{}` | Opt-in background auto-updates, keyed by plugin `id`. Each value is `{track, when}`: a non-empty `track` **arms** the plugin (the ref comes from `plugins.lock`); `when` is `idle` (default — defer while a chat turn is/was just in flight) or `always`. A SHA-pinned plugin is never auto-updated. Empty = manual-only (the default). (#1720; see the [Plugins guide](../guides/plugins.md#keeping-plugins-current).) |
 | `autoupdate_interval_hours` | `6` | Cadence of the auto-update sweep in hours; `0` disables the loop. Only plugins in `update_policy` are ever touched. |
 
