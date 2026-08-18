@@ -8,6 +8,7 @@ ROOT anchors there off the repo root rather than the test's parent dir."""
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,19 +17,27 @@ ROOT = Path(__file__).resolve().parent.parent / "plugins" / "artifact"
 
 
 def _load(monkeypatch, tmp_path):
-    """Fresh module bound to a temp ARTIFACT_DIR so history is isolated per test."""
+    """Fresh package bound to a temp ARTIFACT_DIR so history is isolated per test.
+
+    Loaded as a PACKAGE (submodule_search_locations, the way the host loader does)
+    so the plugin's relative imports resolve. Prior runs' submodules are evicted
+    from sys.modules first — a cached ``artifact_under_test._tools`` would carry
+    mutable module state (nudge counters, poll stamps) across tests."""
     monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path))
     monkeypatch.delenv("PROTOAGENT_INSTANCE", raising=False)
+    for k in [k for k in sys.modules if k.startswith("artifact_under_test")]:
+        del sys.modules[k]
     spec = importlib.util.spec_from_file_location(
-        "artifact_under_test", ROOT / "__init__.py"
+        "artifact_under_test", ROOT / "__init__.py", submodule_search_locations=[str(ROOT)]
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    sys.modules["artifact_under_test"] = mod
     spec.loader.exec_module(mod)
     # No real browser in tests → never block a tool on the async render verdict (#1458). The
     # render-feedback tests drive the store directly; _await_render still returns an already-
     # recorded result on its first (pre-sleep) check.
-    mod._RENDER_WAIT_MS = 0
+    mod._render_status._RENDER_WAIT_MS = 0
     return mod
 
 
@@ -87,9 +96,7 @@ def test_update_requires_exactly_one_match(monkeypatch, tmp_path):
 
 def test_update_with_no_artifact_is_a_clean_message(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
-    assert "No artifact" in art.update_artifact.invoke(
-        {"old_string": "a", "new_string": "b"}
-    )
+    assert "No artifact" in art.update_artifact.invoke({"old_string": "a", "new_string": "b"})
 
 
 def test_rewrite_replaces_whole_source_keeps_kind(monkeypatch, tmp_path):
@@ -107,9 +114,7 @@ def test_update_targets_by_id_and_touches_to_front(monkeypatch, tmp_path):
     art.show_artifact.invoke({"kind": "html", "code": "first"})
     first_id = _arts(art)[0]["id"]
     art.show_artifact.invoke({"kind": "html", "code": "second"})  # now front
-    art.update_artifact.invoke(
-        {"old_string": "first", "new_string": "FIRST", "artifact_id": first_id}
-    )
+    art.update_artifact.invoke({"old_string": "first", "new_string": "FIRST", "artifact_id": first_id})
     arts = _arts(art)
     assert arts[0]["id"] == first_id  # edited artifact moved to front
     assert arts[0]["versions"][-1]["code"] == "FIRST"
@@ -142,9 +147,7 @@ def test_get_artifact_returns_current_source(monkeypatch, tmp_path):
     assert "<h1>First</h1>" in older and "One" in older
 
     # After an edit, returns the latest version's code.
-    art.update_artifact.invoke(
-        {"old_string": "2", "new_string": "9", "artifact_id": _arts(art)[0]["id"]}
-    )
+    art.update_artifact.invoke({"old_string": "2", "new_string": "9", "artifact_id": _arts(art)[0]["id"]})
     assert "<svg>9</svg>" in art.get_artifact.invoke({})
 
 
@@ -169,9 +172,7 @@ def test_versions_rotate_to_max(monkeypatch, tmp_path):
     for i in range(1, 5):
         art.rewrite_artifact.invoke({"code": f"v{i}"})
     versions = _arts(art)[0]["versions"]
-    assert (
-        len(versions) == 3 and versions[-1]["code"] == "v4"
-    )  # oldest trimmed, newest kept
+    assert len(versions) == 3 and versions[-1]["code"] == "v4"  # oldest trimmed, newest kept
 
 
 def test_artifacts_rotate_to_max(monkeypatch, tmp_path):
@@ -230,7 +231,7 @@ def test_config_layer_precedence_env_then_ui_then_default(monkeypatch, tmp_path)
     assert art._max_history() == 20
 
     # host/UI config drives it (simulate Settings ▸ Plugins → artifact.ask_enabled).
-    monkeypatch.setattr(art, "_plugin_cfg", lambda: {"ask_enabled": True, "history": 7})
+    monkeypatch.setattr(art._config, "_plugin_cfg", lambda: {"ask_enabled": True, "history": 7})
     assert art._ask_enabled() is True
     assert art._max_history() == 7
 
@@ -328,7 +329,7 @@ def test_nudge_window_expires(monkeypatch, tmp_path):
     art_id = _saved_id(art.save_file_artifact.invoke({"path": p}))
     art.save_file_artifact.invoke({"path": p, "artifact_id": art_id})
     real_now = art._now
-    monkeypatch.setattr(art, "_now", lambda: real_now() + art._SAVE_NUDGE_WINDOW_MS + 1)
+    monkeypatch.setattr(art._store, "_now", lambda: real_now() + art._SAVE_NUDGE_WINDOW_MS + 1)
     # Old stamps aged out — the counter restarts instead of nagging forever.
     assert "NOTE:" not in art.save_file_artifact.invoke({"path": p, "artifact_id": art_id})
 
@@ -375,9 +376,7 @@ def test_data_routes_on_the_gated_prefix(monkeypatch, tmp_path):
     art.show_artifact.invoke({"kind": "svg", "code": "<x/>", "title": "T"})
     art.update_artifact.invoke({"old_string": "<x/>", "new_string": "<y/>"})
     cur = c.get("/api/plugins/artifact/current").json()
-    assert (
-        cur["code"] == "<y/>" and cur["version"] == 2
-    )  # latest version of the focused artifact
+    assert cur["code"] == "<y/>" and cur["version"] == 2  # latest version of the focused artifact
     hist = c.get("/api/plugins/artifact/history").json()
     assert len(hist["artifacts"]) == 1 and len(hist["artifacts"][0]["versions"]) == 2
     assert hist["current"] == hist["artifacts"][0]["id"]
@@ -411,7 +410,7 @@ def test_shell_polls_adaptively_with_etag(monkeypatch, tmp_path):
     """The shell page's poll loop (#2256): conditional fetch, 304 short-circuit,
     idle backoff constants, and no flat setInterval driver."""
     art = _load(monkeypatch, tmp_path)
-    html = art._SHELL_HTML
+    html = art._SHELL_HTML + art._SHELL_JS
     assert "If-None-Match" in html
     assert "304" in html
     assert "POLL_IDLE_MS" in html and "POLL_FAST_MS" in html
@@ -438,9 +437,7 @@ def test_put_route_saves_a_user_edit_as_a_new_version(monkeypatch, tmp_path):
     c = TestClient(_app(art))
     art.show_artifact.invoke({"kind": "html", "code": "<p>v1</p>"})
     aid = art._read_store()["artifacts"][0]["id"]
-    r = c.put(
-        f"/api/plugins/artifact/artifact/{aid}", json={"code": "<p>v2 by user</p>"}
-    )
+    r = c.put(f"/api/plugins/artifact/artifact/{aid}", json={"code": "<p>v2 by user</p>"})
     assert r.status_code == 200 and r.json()["version"] == 2
     a = art._read_store()["artifacts"][0]
     assert a["versions"][-1] == {
@@ -450,10 +447,7 @@ def test_put_route_saves_a_user_edit_as_a_new_version(monkeypatch, tmp_path):
     }
     assert a["versions"][0]["code"] == "<p>v1</p>"  # agent's v1 preserved (no clobber)
     # unknown id → 404; oversize → 413.
-    assert (
-        c.put("/api/plugins/artifact/artifact/nope", json={"code": "x"}).status_code
-        == 404
-    )
+    assert c.put("/api/plugins/artifact/artifact/nope", json={"code": "x"}).status_code == 404
     monkeypatch.setenv("ARTIFACT_MAX_CODE_KB", "1")
     art2 = _load(monkeypatch, tmp_path)
     c2 = TestClient(_app(art2))
@@ -498,12 +492,7 @@ def test_ask_route_is_opt_in_and_validates(monkeypatch, tmp_path):
     monkeypatch.setenv("ARTIFACT_ASK_MAX_CHARS", "5")
     art2 = _load(monkeypatch, tmp_path)
     c2 = TestClient(_app(art2))
-    assert (
-        c2.post(
-            "/api/plugins/artifact/ask", json={"prompt": "way too long"}
-        ).status_code
-        == 413
-    )
+    assert c2.post("/api/plugins/artifact/ask", json={"prompt": "way too long"}).status_code == 413
 
 
 def test_manifest_view_path_matches_the_served_public_route(monkeypatch, tmp_path):
@@ -521,7 +510,7 @@ def test_manifest_view_path_matches_the_served_public_route(monkeypatch, tmp_pat
 
 def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
-    html = art._SHELL_HTML
+    html = art._SHELL_HTML + art._SHELL_JS
     # rule 4 — the same-origin DS kit, base-prefixed by hand (loads before the kit).
     assert "/_ds/plugin-kit.css" in html
     assert "/_ds/plugin-kit.js" in html
@@ -552,7 +541,8 @@ def test_edit_overlay_does_not_teardown_the_frame(monkeypatch, tmp_path):
     code re-rendered on exit, which raced the reflow and made mermaid measure text at 0
     size (`transform: translate(undefined, NaN)` → a black panel the `lastRendered` cache
     never repainted). Keep the frame visible/sized the whole time."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     # the editor overlays the stage, so editing never needs to tear the frame down.
     assert "#editor{position:absolute;inset:0" in html
     # exitEdit must not force a re-render of the (un-changed) frame on exit — the
@@ -563,7 +553,8 @@ def test_edit_overlay_does_not_teardown_the_frame(monkeypatch, tmp_path):
 def test_ask_bridge_is_wired(monkeypatch, tmp_path):
     """The window.protoArtifact.ask shim is injected into artifacts and the shell
     relays it to the gated /ask endpoint (the agent-callback bridge)."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     assert "window.protoArtifact" in html and "protoArtifact:ask" in html
     assert "protoArtifact:result" in html
     assert 'apiFetch("/api/plugins/artifact/ask"' in html
@@ -577,7 +568,8 @@ def test_graphic_kinds_get_a_crisp_fit_to_window_viewport(monkeypatch, tmp_path)
     inline max-width:Npx). No CSS transform / raster layer, which pixelated on zoom-in in
     WKWebView; pan/zoom is intentionally traded away for crispness. Both kinds share the one
     `viewport(...)` wrapper."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     # the viewport container exists and fits the svg crisply as a vector.
     assert 'id="__vp"' in html
     assert "max-width:100% !important" in html and "max-height:100% !important" in html
@@ -595,7 +587,8 @@ def test_graphic_kinds_get_a_crisp_fit_to_window_viewport(monkeypatch, tmp_path)
 def test_libs_are_vendored_same_origin_not_cdn(monkeypatch, tmp_path):
     """react/mermaid load from the same-origin vendor route — NO cdnjs (so artifacts
     work offline), every lib still SRI-pinned (sha512 of the vendored bytes)."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     assert "cdnjs.cloudflare.com" not in html  # no external CDN dependency
     assert "/plugins/artifact/vendor/" in html  # served same-origin
     # all four libs present, each with an integrity hash.
@@ -646,11 +639,10 @@ def test_vendor_route_serves_js_and_blocks_traversal(monkeypatch, tmp_path):
 def test_react_kind_uses_import_map_and_module_babel(monkeypatch, tmp_path):
     """react artifacts compile as a MODULE (so `import` works) and ship a curated import
     map resolving bare specifiers to the same-origin vendored ESM modules."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     assert 'type="importmap"' in html
-    assert (
-        'data-type="module"' in html
-    )  # babel compiles to a module → top-level import ok
+    assert 'data-type="module"' in html  # babel compiles to a module → top-level import ok
     # bare specifiers → vendored modules (incl. the React shims that share one React instance)
     for spec, file in (
         ('"react":', "react.shim.mjs"),
@@ -668,7 +660,8 @@ def test_harness_guards_against_silent_blank(monkeypatch, tmp_path):
     base(), so it covers every kind) and, for react, flags a component that's DEFINED but never
     mounted into #root — so a broken artifact shows WHY instead of a silent blank (the
     'looks stuck' failure mode)."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     # Universal error surfacing (base() → every artifact frame).
     assert "window.__artErr" in html
     assert 'addEventListener("error"' in html
@@ -683,7 +676,8 @@ def test_harness_guards_against_silent_blank(monkeypatch, tmp_path):
 def test_markdown_kind_renders_via_marked(monkeypatch, tmp_path):
     """markdown artifacts render via the vendored `marked` ESM into #md; the source is
     base64'd into the module (no quote/newline/</script> escaping pitfalls)."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     assert 'import { marked } from "marked"' in html
     assert "marked.mjs" in html and 'id="md"' in html
     assert "atob(" in html and "btoa(" in html  # base64 round-trip of the source
@@ -693,7 +687,8 @@ def test_markdown_kind_renders_via_marked(monkeypatch, tmp_path):
 def test_ds_kit_injected_into_artifacts(monkeypatch, tmp_path):
     """html/react/markdown artifacts link the same-origin DS plugin-kit stylesheet so the
     `.pl-*` classes + `--pl-*` tokens work inside the sandbox and match the console theme."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     assert "/_ds/plugin-kit.css" in html and "function dsLink()" in html
     # the live theme's key tokens are carried into the nested (no-stylesheet-access) frame.
     assert "--pl-color-accent:" in html
@@ -718,11 +713,15 @@ def test_no_premature_script_close_in_shell(monkeypatch, tmp_path):
     know JS syntax), breaking boot (empty picker / blank frame / a stray invalid import map).
     Every script the shell INJECTS into an artifact must escape its close as ``<\\/script>``;
     only the shell's own two ``<script>`` blocks may carry a real close."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
-    assert html.count("</script>") == 2, (
-        "exactly the slug-base + main module <script> closes; an extra literal </script> "
-        "(comment/string) would close the module early — escape it as <\\/script>"
+    art = _load(monkeypatch, tmp_path)
+    assert art._SHELL_HTML.count("</script>") == 2, (
+        "exactly the slug-base inline close + the shell.js module tag's close; an extra "
+        "literal </script> would close a script early"
     )
+    # shell.js is a REAL .js file now — the outer page can't be truncated by it, but the
+    # srcdoc strings it builds are HTML documents whose embedded scripts still need the
+    # escape. Any literal close here is an unescaped srcdoc bug.
+    assert "</script>" not in art._SHELL_JS, "escape srcdoc script closes as <\\/script>"
 
 
 # ── render feedback: the code→render→fix loop (#1458) ───────────────────────────
@@ -753,8 +752,14 @@ def test_render_status_unknown_id_or_version_is_a_noop(monkeypatch, tmp_path):
     c = _client(art)
     art.show_artifact.invoke({"kind": "html", "code": "x"})
     aid = art._read_store()["artifacts"][0]["id"]
-    assert c.post("/api/plugins/artifact/render-status", json={"id": aid, "version": 9, "ok": True}).json()["recorded"] is False
-    assert c.post("/api/plugins/artifact/render-status", json={"id": "nope", "version": 1, "ok": True}).json()["recorded"] is False
+    assert (
+        c.post("/api/plugins/artifact/render-status", json={"id": aid, "version": 9, "ok": True}).json()["recorded"]
+        is False
+    )
+    assert (
+        c.post("/api/plugins/artifact/render-status", json={"id": "nope", "version": 1, "ok": True}).json()["recorded"]
+        is False
+    )
     assert "render" not in art._read_store()["artifacts"][0]["versions"][0]
 
 
@@ -791,7 +796,7 @@ def test_create_reply_surfaces_render_error_when_renderer_live(monkeypatch, tmp_
     store = art._read_store()
     store["artifacts"][0]["versions"][0]["render"] = {"ok": False, "error": "Icon is not defined", "ts": art._now()}
     art._write_store(store)
-    art._LAST_POLL_TS = art._now()
+    art._render_status._LAST_POLL_TS = art._now()
     suffix = art._render_suffix(aid, 1)
     assert "FAILED to render" in suffix and "Icon is not defined" in suffix
     # a clean render reads as such
@@ -803,7 +808,7 @@ def test_create_reply_surfaces_render_error_when_renderer_live(monkeypatch, tmp_
 
 def test_render_wait_is_skipped_when_no_renderer(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
-    art._LAST_POLL_TS = 0  # no panel poll ⇒ headless ⇒ no wait, no inline verdict
+    art._render_status._LAST_POLL_TS = 0  # no panel poll ⇒ headless ⇒ no wait, no inline verdict
     assert art._renderer_live() is False
     out = art.show_artifact.invoke({"kind": "react", "code": "x"})
     assert "FAILED to render" not in out and "rendered cleanly" not in out
@@ -823,7 +828,8 @@ def test_react_srcdoc_auto_mounts_app(monkeypatch, tmp_path):
     """The react harness auto-mounts a top-level `App` when the artifact defined it but never
     called render() — the #1 first-try failure. Fires only if #root is still empty (an explicit
     render wins), and routes any throw through __artErr."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     assert 'typeof App!=="undefined"' in html
     assert "React.createElement(App)" in html
     assert "if(r.firstChild)return;" in html  # never double-mounts a self-mounting artifact
@@ -841,7 +847,7 @@ def test_check_artifact_waits_for_a_live_render(monkeypatch, tmp_path):
     store = art._read_store()
     store["artifacts"][0]["versions"][0]["render"] = {"ok": True, "error": "", "ts": art._now()}
     art._write_store(store)
-    art._LAST_POLL_TS = 0
+    art._render_status._LAST_POLL_TS = 0
     assert "rendered cleanly" in art.check_artifact.invoke({"artifact_id": aid})
 
 
@@ -851,10 +857,11 @@ def test_live_theme_repush_is_wired(monkeypatch, tmp_path):
     stale palette. The shell observes the kit's token rewrite on the root element and
     postMessages fresh tokens; the SHIM applies them without a re-srcdoc (interactive
     artifact state survives)."""
-    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
     # frame side: the SHIM handles the theme message and updates :root vars in place.
-    assert 'protoArtifact:theme' in html
-    assert 'st.setProperty(k,String(m.tokens[k]))' in html
+    assert "protoArtifact:theme" in html
+    assert "st.setProperty(k,String(m.tokens[k]))" in html
     # shell side: observe the kit re-theme + re-push after a fresh srcdoc load.
     assert "new MutationObserver(pushTheme).observe(document.documentElement" in html
     assert '$frame.addEventListener("load", pushTheme)' in html
@@ -998,7 +1005,7 @@ def test_save_file_artifact_registered_and_shell_has_filecard(monkeypatch, tmp_p
     art.register(_Reg())
     assert "save_file_artifact" in names
     # the shell renders file kinds as a download card, hides Edit, and downloads via the blob route
-    html = art._SHELL_HTML
+    html = art._SHELL_HTML + art._SHELL_JS
     assert "function fileCard(v)" in html
     assert 'a.kind==="file" ? fileCard(v) : srcdoc(a.kind, v.code)' in html
     assert "/blob?version=" in html
@@ -1111,7 +1118,7 @@ def test_clip_truncates_on_a_codepoint_boundary(monkeypatch, tmp_path):
     4-byte emoji straddling the budget is excluded cleanly, not decoded to a broken char."""
     art = _load(monkeypatch, tmp_path)
     note_len = len(art._PREVIEW_TRUNC.encode())
-    monkeypatch.setattr(art, "_max_preview_bytes", lambda: note_len + 5)  # 5-byte body budget
+    monkeypatch.setattr(art._config, "_max_preview_bytes", lambda: note_len + 5)  # 5-byte body budget
     out = art._clip("😀" * 30)  # 4-byte codepoints, well over budget — byte-5 cut splits the 2nd
     assert out.endswith(art._PREVIEW_TRUNC)
     body = out[: -len(art._PREVIEW_TRUNC)]
@@ -1233,3 +1240,41 @@ def test_resolve_for_bundle_detects_trim_and_reports_unavailable(monkeypatch, tm
     # same post-trim length) — also unavailable, not a lucky guess at the wrong content.
     ambiguous = art.resolve_for_bundle(aid, 2)
     assert ambiguous["available"] is False and "trimmed" in ambiguous["reason"]
+
+
+# ── typed file previews (v0.17.0): csv/tsv table, md prose, json pretty ────────
+
+
+def test_text_ext_covers_data_and_code_files(monkeypatch, tmp_path):
+    """.tsv and .py previews decode verbatim — not the '(binary file …)' note —
+    regardless of what the platform's mimetypes table says about the extension."""
+    art = _load(monkeypatch, tmp_path)
+    for name, body in (("t.tsv", "a\tb\n1\t2"), ("s.py", "print('hi')")):
+        f = tmp_path / name
+        # newline="\n" pins LF on disk — Windows' default translation writes CRLF and
+        # the verbatim-preview equality below would fail there (the CRLF trap, cf. #2814).
+        f.write_text(body, encoding="utf-8", newline="\n")
+        art.save_file_artifact.invoke({"path": str(f)})
+        assert _arts(art)[0]["versions"][0]["code"] == body
+
+
+def test_shell_types_file_previews(monkeypatch, tmp_path):
+    """fileCard dispatches by extension: DSV parser + row-capped table for csv/tsv,
+    mdDoc reuse for .md, JSON pretty-print, text fallback."""
+    art = _load(monkeypatch, tmp_path)
+    html = art._SHELL_HTML + art._SHELL_JS
+    assert "function parseDsv(" in html
+    assert "function previewKind(" in html
+    assert "TABLE_MAX_ROWS" in html
+    assert "return mdDoc(" in html  # .md files reuse the markdown kind's renderer
+    assert "JSON.stringify(JSON.parse(" in html
+
+
+def test_shell_trunc_marker_mirrors_python(monkeypatch, tmp_path):
+    """The shell strips the preview-truncation note before parsing a table/json —
+    its marker string must stay a literal mirror of _PREVIEW_TRUNC or clipped
+    previews would feed the note into the parsers."""
+    art = _load(monkeypatch, tmp_path)
+    mark = "(preview truncated — download the file for the full content)"
+    assert art._PREVIEW_TRUNC.endswith(mark)
+    assert '"' + mark + '"' in art._SHELL_JS

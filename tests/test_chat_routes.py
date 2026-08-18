@@ -308,12 +308,9 @@ def test_delete_session_purges_legacy_summary_name(monkeypatch, tmp_path):
 
 def test_compact_session_route(monkeypatch):
     # The route is a thin pass-through to server.chat.compact_session — forwards the
-    # path session_id and returns the compaction result dict verbatim. /compact is
-    # behind the chat.compact developer flag (ADR 0068); force it ON via the env
-    # override so the pass-through is what's under test, not the gate.
+    # path session_id and returns the compaction result dict verbatim.
     import operator_api.chat_routes as cr
 
-    monkeypatch.setenv("PROTOAGENT_FLAG_CHAT_COMPACT", "1")
     seen: list[str] = []
 
     async def _fake_compact(session_id):
@@ -337,10 +334,10 @@ def test_compact_session_route(monkeypatch):
     assert body["message"] == "Compacted this conversation"
 
 
-def test_compact_session_route_refuses_when_flag_off(monkeypatch):
-    # /compact is pre-release (chat.compact developer flag, ADR 0068): on the prod
-    # channel the dev-tier flag resolves OFF, the route 403s, and compact_session is
-    # never reached — the checkpoint can't be touched through a disabled gate.
+def test_compact_session_route_available_on_prod_channel(monkeypatch):
+    # #2785 / ADR 0101 D5: the chat.compact dev flag expired past its own
+    # remove_by; the never-lossy manual compaction is generally available — the
+    # prod channel reaches compact_session with no gate in the way.
     import operator_api.chat_routes as cr
 
     monkeypatch.delenv("PROTOAGENT_FLAG_CHAT_COMPACT", raising=False)
@@ -349,14 +346,13 @@ def test_compact_session_route_refuses_when_flag_off(monkeypatch):
 
     async def _fake_compact(session_id):
         called.append(session_id)
-        return {}
+        return {"refused": False, "message": "ok"}
 
     monkeypatch.setattr(cr, "compact_session", _fake_compact)
     c = _client(monkeypatch)
     resp = c.post("/api/chat/sessions/s1/compact")
-    assert resp.status_code == 403
-    assert "chat.compact" in resp.json()["detail"]
-    assert called == []
+    assert resp.status_code == 200
+    assert called == ["s1"]
 
 
 def test_rewind_session_route(monkeypatch):
@@ -747,3 +743,25 @@ def test_aside_session_route(monkeypatch):
     body = c.post("/api/chat/sessions/s1/aside", json={"question": "what's the answer?"}).json()
     assert seen == [("s1", "what's the answer?")]
     assert body["found"] is True and body["answer"] == "42"
+
+
+def test_fork_session_route(monkeypatch):
+    # Thin pass-through to server.chat.fork_session (#2803) — forwards the path
+    # session_id, the new_session_id, and the rewind-shaped target spec.
+    import operator_api.chat_routes as cr
+
+    seen: list[tuple] = []
+
+    async def _fake_fork(session_id, new_session_id, **kw):
+        seen.append((session_id, new_session_id, kw.get("content"), kw.get("occurrence")))
+        return {"found": True, "kept": 4, "discarded": 2, "reason": "", "message": "Forked with 4 message(s) of real context."}
+
+    monkeypatch.setattr(cr, "fork_session", _fake_fork)
+    c = _client(monkeypatch)
+    body = c.post(
+        "/api/chat/sessions/s1/fork",
+        json={"new_session_id": "s2", "content": "answer1", "occurrence": 1},
+    ).json()
+    assert seen == [("s1", "s2", "answer1", 1)]
+    assert body["found"] is True and body["kept"] == 4
+    assert "real context" in body["message"]

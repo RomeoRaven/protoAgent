@@ -141,6 +141,10 @@ class TurnOutcome:
     # duration_ms (an older/alternate producer, e.g. a workflow yield) — those calls
     # still count toward `tool_calls` above, just not toward this durable breakdown.
     tool_durations: dict[str, list[int]] = field(default_factory=dict)
+    # Peak single-call prompt size this turn — the context-window FILL the thread
+    # reached, distinct from the summed spend in `usage` (#1372, persisted per
+    # ADR 0101 D6 so context growth is a series, not a one-turn readout).
+    context_tokens: int = 0
     # Provenance (ADR 0022) — what triggered this turn, from the inbound A2A
     # message metadata. ``origin`` ∈ scheduler|inbox|webhook|a2a|"" (empty = a
     # live/operator turn); ``trigger`` is a human label (job id / inbox source);
@@ -367,9 +371,7 @@ class ProtoAgentExecutor(AgentExecutor):
         # control or re-attach to this turn) before any work runs (ADR 0051). `resumed`
         # marks a HITL continuation (the parked task got its answer), so a host can flip
         # a "needs approval" surface back to "running" (#2132).
-        _notify_progress(
-            context.context_id, context.task_id, {"phase": "turn_started", "resumed": resume}
-        )
+        _notify_progress(context.context_id, context.task_id, {"phase": "turn_started", "resumed": resume})
 
         text = context.get_user_input()
         images = _extract_image_parts(context)
@@ -406,6 +408,13 @@ class ProtoAgentExecutor(AgentExecutor):
         # model's own count of all prompt tokens, incl. cache reads). Unlike the summed
         # usage above, this is the live context-window FILL, not per-turn spend (#1372).
         context_tokens = 0
+        # The FINAL model call's input/output, kept separately from the peak above: the
+        # next request on this thread starts from last prompt + last completion, which
+        # makes them the honest basis for the projectedTokens estimate (#2773). The next
+        # turn's user message and envelope aren't knowable here, so the projection is a
+        # floor, not a promise — ADR 0101 D6 keeps precision at the adapter layer.
+        last_call_input = 0
+        last_call_output = 0
         llm_calls = 0
         tool_calls = 0
         _counted_tool_call_ids: set[str] = set()  # dedupe key for tool_calls below
@@ -428,25 +437,29 @@ class ProtoAgentExecutor(AgentExecutor):
         answer_aid = f"{context.task_id or 'turn'}-answer"
         _text_buf = ""
         _answer_started = False  # first chunk creates the artifact (append=False); rest append
-        # Batched by a char threshold: small enough that the live bubble still fills
-        # smoothly, large enough that a long answer doesn't emit hundreds of frames.
-        # This was 240 (an 11KB answer ≈ 48 frames), raised from an original 24
-        # (≈ 480 frames) out of concern that more frames would race the
-        # teardown-cancel grace window (a2a_impl/registry.py FLUSH_GRACE_S, #1713)
-        # and strand the terminal REPLACE + COMPLETED frames on a slow/large
-        # stream. 240 reads as chunky in the console — the model writes in
-        # visible ~40-word blocks instead of a stream. Re-tested that concern
-        # directly: 30x through the real SendStreamingMessage SSE body at the
-        # original 24 (≈ 480 frames for the same 11KB case) produced zero
-        # teardown-grace warnings and zero dropped/truncated answers (see
-        # tests/test_a2a_flush_granularity.py) — FLUSH_GRACE_S only fires on a
-        # genuinely hung producer, not on frame count, so lowering this is safe
-        # as far as the app-level producer/consumer path goes. (Not re-tested:
-        # real TCP/network backpressure or a slow browser-side consumer — if a
-        # future report ties this back to teardown behavior under real load,
-        # look there first.) Governs both the answer text (below) and reasoning
-        # batching (#1710).
-        _FLUSH_CHARS = 60
+        # Batched by a char threshold OR an elapsed-time floor, whichever trips
+        # first — size alone made the stream chunky twice over (#2766): the frame
+        # only fires when the buffer crosses the threshold, so the console fills
+        # in ~10-word blocks, and a slow producer leaves the tail parked in the
+        # buffer indefinitely (there is no timer; nothing flushes until the NEXT
+        # delta tips the size check). History of the size knob: 240 (an 11KB
+        # answer ≈ 48 frames — "reads as chunky, visible ~40-word blocks"), then
+        # 60, originally 24. The teardown-race concern that motivated raising it
+        # (registry FLUSH_GRACE_S, #1713) was re-tested and disproven at 24 —
+        # 30x through the real SendStreamingMessage SSE body, zero grace-window
+        # warnings, zero truncation (tests/test_a2a_flush_granularity.py):
+        # FLUSH_GRACE_S fires on a genuinely hung producer, not frame count.
+        # (Still not re-tested: real TCP backpressure / a slow browser consumer —
+        # if a future report ties chunkiness back to teardown under load, look
+        # there first.) Governs the answer text and reasoning batching (#1710).
+        _FLUSH_CHARS = 24
+        # The time floor: a buffer older than this flushes on the next delta even
+        # below the size threshold, so a slowly-generating model still trickles
+        # word by word instead of parking a 23-char tail. Event-driven (checked
+        # per delta, no background timer) — a buffer can still sit through a
+        # genuine mid-answer SILENCE, but the existing flush-before-tool/end
+        # paths already cover every event boundary where that matters.
+        _FLUSH_INTERVAL_S = 0.1
         # Reasoning ("thinking") deltas arrive one token at a time. Batch them
         # like the answer text so the live thinking bubble still fills word by
         # word without a WORKING status frame per token — unbatched, one turn
@@ -454,23 +467,31 @@ class ProtoAgentExecutor(AgentExecutor):
         # history Message row downstream (#1710; the durable store additionally
         # coalesces whole contiguous reasoning runs — a2a_impl.stores).
         _reasoning_buf = ""
+        # Monotonic stamp of each buffer's last flush, for the time floor. Starts
+        # "long ago" so the very first delta of a turn flushes immediately — the
+        # first visible words should never wait out a full size threshold.
+        _text_flushed_at = 0.0
+        _reasoning_flushed_at = 0.0
+
+        def _should_flush(buf: str, flushed_at: float) -> bool:
+            return len(buf) >= _FLUSH_CHARS or (bool(buf) and time.monotonic() - flushed_at >= _FLUSH_INTERVAL_S)
 
         async def _flush_reasoning() -> None:
-            nonlocal _reasoning_buf
+            nonlocal _reasoning_buf, _reasoning_flushed_at
             if not _reasoning_buf:
                 return
             payload_text, _reasoning_buf = _reasoning_buf, ""
+            _reasoning_flushed_at = time.monotonic()
             await updater.update_status(
                 TaskState.TASK_STATE_WORKING,
-                message=updater.new_agent_message(
-                    [_data_part_proto({"text": payload_text}, REASONING_MIME)]
-                ),
+                message=updater.new_agent_message([_data_part_proto({"text": payload_text}, REASONING_MIME)]),
             )
 
         async def _flush_text() -> None:
-            nonlocal _text_buf, _answer_started
+            nonlocal _text_buf, _answer_started, _text_flushed_at
             if not _text_buf:
                 return
+            _text_flushed_at = time.monotonic()
             chunk = _text_buf
             await updater.add_artifact(
                 [_text_part(chunk)],
@@ -523,6 +544,10 @@ class ProtoAgentExecutor(AgentExecutor):
                     except Exception:  # noqa: BLE001 — telemetry must never break a turn
                         meta = {}
                 context_meta = {"contextTokens": context_tokens, **meta}
+                if last_call_input > 0:
+                    # What the NEXT request on this thread will roughly cost before
+                    # anything new is added: last prompt + last completion (#2773).
+                    context_meta["projectedTokens"] = last_call_input + last_call_output
             parts, ext_meta = _terminal_parts(
                 body,
                 deltas,
@@ -585,6 +610,7 @@ class ProtoAgentExecutor(AgentExecutor):
                 tool_calls=tool_calls,
                 models=list(models),
                 tool_durations=durations,
+                context_tokens=context_tokens,
                 origin=_origin,
                 trigger=_trigger,
                 priority=_priority,
@@ -620,7 +646,7 @@ class ProtoAgentExecutor(AgentExecutor):
                 if event_type == "text":
                     accumulated += payload
                     _text_buf += payload
-                    if len(_text_buf) >= _FLUSH_CHARS:
+                    if _should_flush(_text_buf, _text_flushed_at):
                         await _flush_text()
 
                 elif event_type in ("tool_start", "tool_end"):
@@ -665,9 +691,7 @@ class ProtoAgentExecutor(AgentExecutor):
                     if part is not None or tc_meta is not None:
                         await updater.update_status(
                             TaskState.TASK_STATE_WORKING,
-                            message=updater.new_agent_message(
-                                [part] if part is not None else [], metadata=tc_meta
-                            ),
+                            message=updater.new_agent_message([part] if part is not None else [], metadata=tc_meta),
                         )
                     # Realtime tap (ADR 0051) — surface the tool frame to any host hook.
                     if isinstance(payload, dict):
@@ -693,12 +717,12 @@ class ProtoAgentExecutor(AgentExecutor):
                 elif event_type == "reasoning":
                     # Live "thinking" — a reasoning DataPart on a WORKING frame,
                     # separate from the answer artifact (plain consumers ignore it).
-                    # Batched to the same char threshold as the answer text so a
-                    # token-per-event reasoning stream doesn't become a frame per
-                    # word (#1710).
+                    # Batched to the same size-or-time thresholds as the answer text
+                    # so a token-per-event reasoning stream doesn't become a frame
+                    # per word (#1710) but still trickles under a slow producer.
                     if payload:
                         _reasoning_buf += str(payload)
-                        if len(_reasoning_buf) >= _FLUSH_CHARS:
+                        if _should_flush(_reasoning_buf, _reasoning_flushed_at):
                             await _flush_reasoning()
 
                 elif event_type == "delta":
@@ -710,6 +734,8 @@ class ProtoAgentExecutor(AgentExecutor):
                         had_usage = True
                         llm_calls += 1
                         context_tokens = max(context_tokens, int(payload.get("input_tokens", 0) or 0))
+                        last_call_input = int(payload.get("input_tokens", 0) or 0)
+                        last_call_output = int(payload.get("output_tokens", 0) or 0)
                         usage["input_tokens"] += int(payload.get("input_tokens", 0) or 0)
                         usage["output_tokens"] += int(payload.get("output_tokens", 0) or 0)
                         usage["cache_read_input_tokens"] += int(payload.get("cache_read_input_tokens", 0) or 0)
@@ -903,6 +929,11 @@ def _tool_call_frame(event_type: str, payload: Any) -> tuple[Part | None, dict[s
         # fragment rather than the old DataPart's content.value.
         if payload.get("parentId"):
             meta[pa.TOOL_CALL_EXT_URI]["parentToolCallId"] = str(payload["parentId"])
+        # True pre-truncation result size (#2775) — `result` above is the capped
+        # card preview; the console's context-cost chip needs the real size. Same
+        # extra-key lane as parentToolCallId.
+        if event_type == "tool_end" and isinstance(payload.get("output_chars"), int):
+            meta[pa.TOOL_CALL_EXT_URI]["outputChars"] = payload["output_chars"]
         return None, meta
     if payload:
         return _text_part(str(payload)), None

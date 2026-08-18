@@ -448,6 +448,25 @@ def _coerce_tool_output(value) -> str:
     return _coerce_tool_value(getattr(value, "content", value))
 
 
+def _tool_output_chars(value) -> int:
+    """True size of a tool result BEFORE the preview truncation (#2775).
+
+    The SSE frame's ``output`` is capped at ``_TOOL_PREVIEW_CHARS`` (800 ≈ 200
+    tokens), which is below the console cost chip's own 250-token display floor
+    — estimating from the preview made the #2282 chip mathematically dead. Same
+    coercion as the preview (ToolMessage unwrap, dict/list → JSON), minus the cap.
+    """
+    v = getattr(value, "content", value)
+    if v is None or v == "":
+        return 0
+    if isinstance(v, (dict, list)):
+        try:
+            return len(json.dumps(v, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            pass
+    return len(str(v))
+
+
 def _interrupt_payload(val) -> dict:
     """Shape a LangGraph interrupt value into the ``input-required`` payload the
     A2A layer parks and the console renders. Richer HITL shapes pass through:
@@ -764,6 +783,9 @@ async def _run_turn_stream(
                     "id": getattr(output, "tool_call_id", None) or event.get("run_id") or name,
                     "name": name,
                     "output": coerced,
+                    # True pre-truncation size — the preview above is capped, so the
+                    # console's context-cost estimate must come from this (#2775).
+                    "output_chars": _tool_output_chars(output),
                     "error": getattr(output, "status", None) == "error",
                     "duration_ms": tool_duration_ms,  # #2697 — execution time, on_tool_start→on_tool_end
                     **({"parentId": parent_tool_id} if parent_tool_id else {}),
@@ -1603,6 +1625,43 @@ async def _chat_langgraph_stream_impl(
                 await record_failed_turn(session_id, f"**Error:** {retry_msg}")
                 yield ("error", retry_msg)
             else:
+                # Context overflow (#2783, ADR 0101 D4): before this, NOTHING caught
+                # the overflow class — the raw error surfaced, ModelFallback re-sent
+                # the same oversized prompt elsewhere, and the next turn hit the same
+                # wall. Now: force-compact the thread once (safety-valve semantics —
+                # archive best-effort, loud on failure) and retry a single time. A
+                # second failure falls through to the honest error below, but the
+                # thread is smaller, so the NEXT turn no longer inherits the wall.
+                from graph.llm import is_context_overflow_error
+
+                # The turn's `async with _thread_lock` unwound before this handler ran,
+                # so the compact + retry re-acquire it — the serialize-per-thread
+                # invariant must hold for the rewrite exactly as for a turn.
+                if is_context_overflow_error(e) and await _force_compact_for_overflow(_tid, session_id):
+                    yield (
+                        "tool_start",
+                        "🧹 The request overflowed the model's context window — older history "
+                        "was force-compacted; retrying once.",
+                    )
+                    try:
+                        async with _thread_lock(_tid):
+                            async for frame in _run_native_turn(
+                                "(The previous request overflowed the context window and the earlier "
+                                "history was compacted to a summary. Continue exactly where you left off.)",
+                                session_id,
+                                config,
+                                request_metadata=request_metadata,
+                                resume=False,
+                                images=None,
+                            ):
+                                yield frame
+                        return
+                    except Exception as retry_exc:  # noqa: BLE001 — second failure surfaces honestly
+                        log.exception(
+                            "[a2a-stream] overflow retry failed for session=%s: %s", session_id, retry_exc
+                        )
+                        e = retry_exc
+
                 log.exception(
                     "[a2a-stream] unhandled exception for session=%s: %s",
                     session_id,
@@ -1642,6 +1701,63 @@ def _compaction_message(result: dict) -> str:
         f"last {kept}. The agent now carries a summary of the earlier messages plus the recent ones, at a "
         f"fraction of the token cost; the full raw history stays searchable via memory recall."
     )
+
+
+async def _force_compact_for_overflow(thread_id: str, session_id: str) -> bool:
+    """Emergency thread shrink after a context-window overflow (#2783, ADR 0101 D4).
+
+    Runs ``compact_thread`` in safety-valve mode (``force=True`` — archive
+    best-effort, stub summary on summarizer failure; see compaction_op) under
+    the per-thread lock. Returns whether the thread actually shrank — a refusal
+    (e.g. the thread is already tiny, so overflow must have another cause)
+    means retrying would hit the same wall, and the caller surfaces the
+    original error instead.
+    """
+    if STATE.graph is None or STATE.checkpointer is None:
+        return False
+    try:
+        from graph.compaction_op import compact_thread
+
+        async with _thread_lock(thread_id):
+            result = await compact_thread(
+                STATE.graph,
+                STATE.checkpointer,
+                STATE.knowledge_store,
+                STATE.graph_config,
+                thread_id,
+                session_id,
+                force=True,
+                # Tighter than the configured keep: the window is ALREADY blown, so
+                # the retry needs real headroom, not a gentle trim.
+                keep_recent=min(10, int(getattr(STATE.graph_config, "compaction_keep_messages", 20) or 20)),
+            )
+        # `too_short` is a benign no-op (refused=False, removed=0) — but for THIS
+        # caller a thread that didn't shrink means the retry hits the same wall,
+        # so recovery requires actual removal, not merely non-refusal.
+        ok = not result.get("refused") and int(result.get("removed") or 0) > 0
+        if ok:
+            log.warning(
+                "[a2a-stream] overflow recovery compacted thread %s: removed %s message(s), archived=%s",
+                thread_id,
+                result.get("removed"),
+                result.get("archived"),
+            )
+            try:
+                from observability import metrics
+
+                metrics.record_overflow_recovery()
+            except Exception:  # noqa: BLE001 — telemetry must never break recovery
+                pass
+        else:
+            log.warning(
+                "[a2a-stream] overflow recovery could not shrink thread %s (%s) — surfacing the original error",
+                thread_id,
+                result.get("reason"),
+            )
+        return ok
+    except Exception:  # noqa: BLE001 — recovery must never mask the original error
+        log.exception("[a2a-stream] overflow recovery itself failed for thread %s", thread_id)
+        return False
 
 
 async def compact_session(session_id: str, *, request_metadata: dict | None = None) -> dict:
@@ -1995,6 +2111,75 @@ async def rewind_session(
             before=before,
         )
     return {**result, "message": _rewind_message(result)}
+
+
+async def fork_session(
+    session_id: str,
+    new_session_id: str,
+    *,
+    message_id: str | None = None,
+    index: int | None = None,
+    content: str | None = None,
+    occurrence: int | None = None,
+    request_metadata: dict | None = None,
+) -> dict:
+    """Fork a chat session at a target message (#2803): copy the checkpoint
+    prefix through the target onto ``new_session_id``'s thread, leaving the
+    source untouched — so the forked tab's agent actually REMEMBERS the branch
+    point instead of starting amnesiac behind a seeded-looking transcript.
+
+    Both thread locks are taken in sorted order (never a lock cycle), so the
+    fork can't race a live turn on either thread.
+    """
+    base = {"found": False, "kept": 0, "discarded": 0}
+    if STATE.graph is None:
+        return {**base, "reason": "setup", "message": "Setup required — finish the setup wizard first."}
+    if not (new_session_id or "").strip():
+        return {**base, "reason": "no_target", "message": "Fork needs the new session's id."}
+
+    from graph.rewind_op import fork_thread
+
+    src_tid = _resolve_thread_id(request_metadata, session_id)
+    dst_tid = _resolve_thread_id(None, new_session_id)
+    if src_tid == dst_tid:
+        return {**base, "reason": "same_thread", "message": "A fork must target a different session."}
+    first, second = sorted((src_tid, dst_tid))
+    async with _thread_lock(first):
+        async with _thread_lock(second):
+            result = await fork_thread(
+                STATE.graph,
+                STATE.checkpointer,
+                src_tid,
+                dst_tid,
+                target_index=index,
+                target_id=message_id,
+                target_content=content,
+                occurrence=occurrence,
+            )
+    return {**result, "message": _fork_message(result)}
+
+
+def _fork_message(result: dict) -> str:
+    """Human-readable status line for a fork result — honest about the failure
+    modes, because the console falls back to a display-only seed and must SAY so."""
+    if result.get("found"):
+        return f"Forked with {result.get('kept', 0)} message(s) of real context."
+    reason = result.get("reason") or ""
+    if reason in ("no_checkpointer", "empty_thread"):
+        return (
+            "No server history to fork — this branch starts fresh (the transcript "
+            "below is a display copy the agent can't see)."
+        )
+    if reason == "target_exists":
+        return "That session already has history — fork into a fresh tab instead."
+    if reason == "empty_prefix":
+        return "Nothing forkable before that point — the branch starts fresh."
+    if reason == "not_found":
+        return (
+            "Couldn't locate that message in the server history — the branch starts "
+            "fresh (display copy only)."
+        )
+    return "Fork unavailable — the branch starts fresh (display copy only)."
 
 
 def _sum_usage(per_model: dict[str, Any]) -> dict[str, int]:
