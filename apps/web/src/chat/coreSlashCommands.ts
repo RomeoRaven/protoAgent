@@ -20,6 +20,7 @@ import type { VerifierCatalog } from "../lib/types";
 import { modelChoices, modelFormPayload, modelPickerData, resolveModelArg, type ModelPickerData } from "./modelForm";
 import { promptNoteMarkdown } from "./promptView";
 import { perfNoteMarkdown } from "./perfView";
+import { trajectoryNoteMarkdown } from "./trajectoryView";
 
 // Local id for the system notes /compact posts (the command manages messages
 // directly, like /clear, so it needs to own the ids it can later replace).
@@ -126,6 +127,36 @@ registerSlashCommand({
       .catch((e) => {
         chatStore.updateMessages(sessionId, [...withoutPending(), note(`Aside failed — ${errMsg(e)}`, "danger")]);
       });
+    return true;
+  },
+});
+
+registerSlashCommand({
+  name: "trajectory",
+  // NB: the slash menu filters on name OR description — keep every other command's
+  // NAME out of this text ("model", "prompt", …) or typing that command surfaces
+  // /trajectory above it and Enter runs the wrong one (the /model e2e caught this
+  // AGAIN on this very command's first draft).
+  description: "Show what the agent saw — call-by-call timeline and history rewrites for this conversation",
+  usage: "/trajectory",
+  run: (ctx) => {
+    if (!ctx.sessionId) return false; // no session → fall through
+    const sessionId = ctx.sessionId;
+    // Two local reads (ADR 0102 S2): the event tail + the latest call's
+    // availability join. The call fetch failing must not discard the timeline.
+    void Promise.all([
+      api.trajectoryEvents(sessionId, 20),
+      api.trajectoryCall(sessionId, -1).catch(() => null),
+    ])
+      .then(([ev, call]) => {
+        ctx.noteToThread(trajectoryNoteMarkdown(ev.events, ev.total, call && call.found ? call : null), {
+          tone: "info",
+        });
+      })
+      .catch((e) => {
+        ctx.noteToThread(`Trajectory fetch failed — ${errMsg(e)}`, { tone: "danger" });
+      });
+    ctx.focusComposer();
     return true;
   },
 });
