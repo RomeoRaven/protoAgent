@@ -18,7 +18,7 @@ import { buildGoalSetBody, goalFormPayload } from "./goalForm";
 import { buildWatchCreateBody, watchFormPayload } from "./watchForm";
 import type { VerifierCatalog } from "../lib/types";
 import { modelChoices, modelFormPayload, modelPickerData, resolveModelArg, type ModelPickerData } from "./modelForm";
-import { promptNoteMarkdown } from "./promptView";
+import { historyLine, promptNoteMarkdown } from "./promptView";
 import { perfNoteMarkdown } from "./perfView";
 import { trajectoryNoteMarkdown } from "./trajectoryView";
 
@@ -173,24 +173,34 @@ registerSlashCommand({
     // Honest framing (#2243): this is the prompt AS OF the last captured call —
     // a true "next call" preview would need speculative retrieval (P3). The
     // fetch is a local read, so no optimistic pending note (unlike /btw).
-    void api
-      .promptLast(ctx.sessionId)
-      .then((res) => {
+    // The history breakdown (#2843) rides along: it reads the checkpoint (works
+    // even with capture off) and is cheap; its failure never sinks the note.
+    // request() has no timeout, so a HUNG (never-settling) breakdown must not
+    // stall the note either — race a 3s cap alongside the rejection catch.
+    const breakdown = Promise.race([
+      api.promptBreakdown(ctx.sessionId).catch(() => null),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000)),
+    ]);
+    void Promise.all([api.promptLast(ctx.sessionId), breakdown])
+      .then(([res, bd]) => {
+        const history = bd?.found && bd.breakdown ? `\n\n${historyLine(bd.breakdown)}` : "";
         if (!res.enabled) {
           ctx.noteToThread(
-            "Prompt capture is off — enable `prompts.capture` in Settings ▸ Telemetry to record what each model call receives.",
+            "Prompt capture is off — enable `prompts.capture` in Settings ▸ Telemetry to record what each model call receives." +
+              history,
             { tone: "warning" },
           );
           return;
         }
         if (!res.call) {
           ctx.noteToThread(
-            "Nothing captured for this session yet — send a message first, then `/prompt` shows what the model received.",
+            "Nothing captured for this session yet — send a message first, then `/prompt` shows what the model received." +
+              history,
             { tone: "info" },
           );
           return;
         }
-        ctx.noteToThread(promptNoteMarkdown(res.call), { tone: "info" });
+        ctx.noteToThread(promptNoteMarkdown(res.call) + history, { tone: "info" });
       })
       .catch((e) => {
         ctx.noteToThread(`Prompt fetch failed — ${errMsg(e)}`, { tone: "danger" });
