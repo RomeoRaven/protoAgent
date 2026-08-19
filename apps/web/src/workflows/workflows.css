@@ -25,10 +25,22 @@
   container-name: builder;
 }
 
+.workflow-builder > .panel-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--pl-color-bg);
+  border-top: 1px solid var(--pl-color-border);
+  padding: 8px 0;
+  margin-top: 0;
+}
+
 .builder-split {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .builder-outline {
@@ -37,6 +49,8 @@
   gap: 6px;
   overflow-x: auto;
   padding-bottom: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .builder-outline .builder-card {
@@ -59,12 +73,14 @@
 @container builder (min-width: 42rem) {
   .builder-split {
     flex-direction: row;
-    align-items: flex-start;
+    align-items: stretch;
   }
   .builder-outline {
     flex-direction: column;
     flex: 0 0 232px;
-    overflow-x: visible;
+    width: 232px;
+    max-width: 232px;
+    overflow: hidden;
     position: sticky;
     top: 0;
   }
@@ -74,18 +90,30 @@
   }
   .builder-outline-lanes {
     display: flex;
-    gap: 4px;
+    flex-direction: column;
+    gap: 3px;
     padding: 2px 0;
+    min-width: 0;
   }
   .builder-outline-lanes .workflow-lane {
-    flex: 1;
+    flex: 0 0 auto;
+    max-width: 100%;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    flex-wrap: wrap;
     gap: 3px;
     border: 1px dashed var(--pl-color-border);
     border-radius: var(--pl-radius);
-    padding: 4px;
+    padding: 3px 4px;
     min-width: 0;
+  }
+  .builder-outline-lanes .lane-chip {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
   }
   .builder-focus {
     flex: 1;
@@ -96,6 +124,8 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  max-width: 100%;
   text-align: left;
   border: 1px solid var(--pl-color-border);
   border-radius: var(--pl-radius);
@@ -129,6 +159,19 @@
   white-space: nowrap;
 }
 
+.builder-card-head > * {
+  min-width: 0;
+}
+
+.builder-card-head .pl-badge,
+.builder-card-head [class*="badge"] {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 12ch;
+  flex: 0 1 auto;
+}
+
 .builder-card-sub {
   font-size: 10.5px;
   color: var(--pl-color-fg-subtle);
@@ -160,6 +203,18 @@
   flex-wrap: wrap;
 }
 
+.builder-step-head > * {
+  min-width: 0;
+}
+
+.builder-step-head input {
+  flex: 1 1 130px;
+}
+
+.builder-step-head .checkbox-field {
+  flex: 0 0 auto;
+}
+
 .builder-input-card {
   display: flex;
   flex-direction: column;
@@ -167,6 +222,16 @@
   border: 1px solid var(--pl-color-border);
   border-radius: var(--pl-radius);
   padding: 8px;
+  min-width: 0;
+}
+
+.builder-input-card .builder-row {
+  flex-wrap: wrap;
+}
+
+.builder-input-card .builder-row input {
+  flex: 1 1 140px;
+  min-width: 0;
 }
 
 .builder-row-2 input {
@@ -747,4 +812,34 @@
 
 .builder-row > .pl-checkbox {
   flex: none;
+}
+
+/* S3 — flow polish: drag handle, drop indicator. */
+.builder-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  color: var(--pl-color-fg-subtle);
+  cursor: grab;
+  flex: 0 0 auto;
+}
+
+.builder-drag-handle:active {
+  cursor: grabbing;
+}
+
+.builder-card-dragover {
+  border-top: 2px solid var(--pl-color-accent);
+}
+
+/* The prompt is the work surface — it absorbs the pane's slack height. */
+.builder-prompt-box {
+  flex: 1;
+  display: flex;
+  min-height: 200px;
+}
+
+.builder-prompt-box .builder-prompt {
+  flex: 1;
+  height: 100%;
+  min-height: 200px;
 }
