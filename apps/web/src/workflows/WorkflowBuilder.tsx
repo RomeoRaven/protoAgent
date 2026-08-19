@@ -32,13 +32,25 @@ function fromInitial(initial: WorkflowRecipe | undefined, fallback: string): { i
       steps: [{ id: "step1", subagent: fallback, prompt: "", dependsOn: [], gate: false }],
     };
   }
+  // The server canonicalizes inputs to a list, but this loader must not crash
+  // the whole Studio on a shape it didn't expect (a mapping-authored recipe
+  // did exactly that, #2834) — normalize list | mapping | junk defensively.
+  const rawInputs: unknown = initial.inputs;
+  const inputRows: Record<string, unknown>[] = Array.isArray(rawInputs)
+    ? rawInputs.filter((i): i is Record<string, unknown> => !!i && typeof i === "object")
+    : rawInputs && typeof rawInputs === "object"
+      ? Object.entries(rawInputs).map(([name, spec]) => ({
+          name,
+          ...(spec && typeof spec === "object" ? (spec as Record<string, unknown>) : {}),
+        }))
+      : [];
   return {
-    inputs: (initial.inputs ?? []).map((i) => ({
+    inputs: inputRows.map((i) => ({
       name: String(i.name ?? ""),
       required: Boolean(i.required),
       default: i.default != null ? String(i.default) : "",
     })),
-    steps: (initial.steps ?? []).map((s) => ({
+    steps: (Array.isArray(initial.steps) ? initial.steps : []).map((s) => ({
       id: String(s.id ?? ""),
       subagent: String(s.subagent ?? fallback),
       prompt: String(s.prompt ?? ""),
@@ -113,17 +125,30 @@ export function WorkflowBuilder({
       Object.entries(initial ?? {}).filter(([k]) => !(MANAGED_KEYS as readonly string[]).includes(k)),
     );
     const origById = new Map((initial?.steps ?? []).map((s) => [String(s.id), s]));
+    // Same preservation contract as steps, keyed by name: the form manages
+    // name/required/default, but an input's annotations (type, description)
+    // must survive an edit — they're the run form's field hints.
+    const origInputByName = new Map<string, Record<string, unknown>>(
+      (Array.isArray(initial?.inputs) ? initial.inputs : [])
+        .filter((i) => !!i && typeof i === "object")
+        .map((i) => [String(i.name), i as unknown as Record<string, unknown>]),
+    );
     const recipe: Record<string, unknown> = {
       ...extras,
       name: name.trim(),
       version: initial?.version ?? 1,
       inputs: inputs
         .filter((i) => i.name.trim())
-        .map((i) => ({
-          name: i.name.trim(),
-          required: i.required,
-          ...(i.default.trim() !== "" ? { default: i.default } : {}),
-        })),
+        .map((i) => {
+          const row: Record<string, unknown> = {
+            ...(origInputByName.get(i.name.trim()) ?? {}),
+            name: i.name.trim(),
+            required: i.required,
+          };
+          if (i.default.trim() !== "") row.default = i.default;
+          else delete row.default;
+          return row;
+        }),
       steps: steps.map((st) => {
         const orig = origById.get(st.id.trim()) ?? {};
         const step: Record<string, unknown> = {
