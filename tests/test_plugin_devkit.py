@@ -826,7 +826,9 @@ def test_update_plugin_tool_routes_bundles_to_update_bundle(monkeypatch):
     async def fake_update(bid, **kw):
         from types import SimpleNamespace
 
-        return SimpleNamespace(install=_install_result(installed_ids=["a", "b"]), removed_members=["dead"], retire_error=None)
+        return SimpleNamespace(
+            install=_install_result(installed_ids=["a", "b"]), removed_members=["dead"], retire_error=None
+        )
 
     monkeypatch.setattr(op, "update_bundle", fake_update)
     out = _run(mod.update_plugin.ainvoke({"plugin_id": "stacky"}))
@@ -981,7 +983,9 @@ def test_live_apply_guards_a_raising_reload(monkeypatch):
 
     monkeypatch.setattr(STATE, "graph", object(), raising=False)
     monkeypatch.setattr(STATE, "plugin_meta", [{"id": "demo", "loaded": True}], raising=False)
-    monkeypatch.setattr(STATE, "graph_config", types.SimpleNamespace(plugins_enabled=["demo"], plugins_disabled=[]), raising=False)
+    monkeypatch.setattr(
+        STATE, "graph_config", types.SimpleNamespace(plugins_enabled=["demo"], plugins_disabled=[]), raising=False
+    )
 
     fake = types.ModuleType("server.agent_init")
 
@@ -1016,3 +1020,100 @@ def test_ops_applier_guards_a_raising_reload(monkeypatch):
     applier = mod._ops_applier()
     ok, msgs = applier(None)
     assert ok is False and any("reload exploded" in str(m) for m in msgs)
+
+
+# ── skill frontmatter gate (#reddit incident): execution + verification ────────
+
+GOOD_SKILL = "---\nname: greeter\ndescription: Say hello when asked.\n---\n\n# Greeter\nSay hi.\n"
+BAD_SKILL = "# Greeter\nSay hi — no frontmatter at all.\n"
+
+
+def test_write_file_refuses_a_skill_the_loader_would_skip(tmp_path):
+    """Execution-side gate: a frontmatter-less SKILL.md is refused AT WRITE TIME with
+    the loader's own reasons (graph.skills.loader.skill_md_problems — single source,
+    not a mirror), so the silent skills-never-load failure can't be authored."""
+    mod = _load_devkit_module(tmp_path)
+    out_root = tmp_path / "plugins"
+    out_root.mkdir()
+    _run(mod._build_scaffold_tool({"target_dir": str(out_root)}).ainvoke({"name": "Sk", "enable": False}))
+    tools = {t.name: t for t in mod._build_file_tools({"target_dir": str(out_root)})}
+
+    out = tools["plugin_write_file"].invoke(
+        {"plugin_id": "sk", "path": "skills/greeter/SKILL.md", "content": BAD_SKILL}
+    )
+    assert "✗" in out and "SKIPPED by the skills loader" in out and "frontmatter" in out
+    assert not (out_root / "sk" / "skills" / "greeter" / "SKILL.md").exists()  # refused = not written
+
+    ok = tools["plugin_write_file"].invoke(
+        {"plugin_id": "sk", "path": "skills/greeter/SKILL.md", "content": GOOD_SKILL}
+    )
+    assert ok.startswith("✓")
+    # OUTSIDE skills/ the loader may never read it — write succeeds with an
+    # advisory instead of a false refusal (fixtures/vendored copies stay writable).
+    noted = tools["plugin_write_file"].invoke({"plugin_id": "sk", "path": "fixtures/SKILL.md", "content": BAD_SKILL})
+    assert noted.startswith("✓") and "frontmatter problems" in noted
+    assert (out_root / "sk" / "fixtures" / "SKILL.md").exists()
+    # a non-skill markdown file is untouched by the gate
+    assert (
+        tools["plugin_write_file"]
+        .invoke({"plugin_id": "sk", "path": "notes.md", "content": "# no frontmatter"})
+        .startswith("✓")
+    )
+
+
+def test_verify_plugin_lints_skills_before_pytest(tmp_path, monkeypatch):
+    """Verification-side gate: _verify_plugin (test_plugin + develop_plugin's re-join)
+    fails loudly on a skill the loader would skip — naming the file — instead of
+    letting a green pytest suite hide a skill that never loads."""
+    mod = _load_devkit_module(tmp_path)
+    pdir = tmp_path / "p"
+    (pdir / "skills" / "broken").mkdir(parents=True)
+    (pdir / "skills" / "broken" / "SKILL.md").write_text(BAD_SKILL)
+    (pdir / "skills" / "fine").mkdir(parents=True)
+    (pdir / "skills" / "fine" / "SKILL.md").write_text(GOOD_SKILL)
+    monkeypatch.setattr(mod, "_run_pytest", lambda p: "✓ 3 passed")
+
+    out = mod._verify_plugin(pdir)
+    assert out.startswith("✗ skill lint")
+    assert "skills/broken/SKILL.md" in out and "frontmatter" in out
+    assert "skills/fine" not in out  # only the broken one is named
+    assert "✓ 3 passed" in out  # pytest still runs and reports
+
+    # nested grouping folders are discovered recursively, like the loader
+    (pdir / "skills" / "group" / "deep").mkdir(parents=True)
+    (pdir / "skills" / "group" / "deep" / "SKILL.md").write_text(BAD_SKILL)
+    assert "skills/group/deep/SKILL.md" in mod._verify_plugin(pdir)
+
+    # outside skills/: advisory note, never a ✗ failure (fixture/vendored copies)
+    (pdir / "fixtures").mkdir()
+    (pdir / "fixtures" / "SKILL.md").write_text(BAD_SKILL)
+    (pdir / "skills" / "broken" / "SKILL.md").write_text(GOOD_SKILL)
+    (pdir / "skills" / "group" / "deep" / "SKILL.md").write_text(GOOD_SKILL)
+    out = mod._verify_plugin(pdir)
+    assert not out.startswith("✗") and "note: SKILL.md outside skills/" in out
+    assert "fixtures/SKILL.md" in out and "✓ 3 passed" in out
+
+    (pdir / "fixtures" / "SKILL.md").write_text(GOOD_SKILL)
+    assert mod._verify_plugin(pdir) == "✓ 3 passed"  # clean lint adds nothing
+
+
+def test_skill_md_problems_is_the_loader_contract(tmp_path):
+    """The validator and the loader agree BY EXECUTION, not just construction:
+    for every case, problems == [] exactly when parse_skill_md returns a skill."""
+    from graph.skills.loader import parse_skill_md, skill_md_problems
+
+    cases = [
+        GOOD_SKILL,
+        BAD_SKILL,
+        "---\nname: x\n---\nbody",  # missing description
+        "---\n- not\n- a\n- mapping\n---\nbody",  # frontmatter not a mapping
+        "---\nname: [unclosed\n---\nbody",  # YAML error
+        "---\nname: ok\ndescription: fine\nslash: go\n---\nbody",  # extras are fine
+    ]
+    for i, text in enumerate(cases):
+        f = tmp_path / f"case{i}" / "SKILL.md"
+        f.parent.mkdir()
+        f.write_text(text, encoding="utf-8")
+        problems = skill_md_problems(text)
+        parsed = parse_skill_md(f)
+        assert (parsed is not None) == (problems == []), (i, problems, parsed)

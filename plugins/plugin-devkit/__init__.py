@@ -399,11 +399,35 @@ def _build_file_tools(config: dict | None) -> list:
             return f"✗ {e}"
         if len(content) > _WRITE_CAP:
             return f"✗ content too large ({len(content)} chars > {_WRITE_CAP}) — split the file"
+        # Execution-side skill gate: a SKILL.md the loader would SKIP is never worth
+        # writing — the failure is silent at load time (a warning in a log nobody
+        # reads), so refuse HERE with the loader's own reasons and let the author fix
+        # the frontmatter. Validated by the loader's single-source contract, not a mirror.
+        # Skill gate, scoped like _lint_skills: a SKILL.md under the conventional
+        # skills/ root that the loader would SKIP is refused (the failure is silent
+        # at load time); one elsewhere only loads if register_skill_dir names its
+        # root, so it writes with an advisory instead of a false refusal.
+        skill_note = ""
+        if target.name == "SKILL.md":
+            from graph.skills.loader import skill_md_problems
+
+            problems = skill_md_problems(content)
+            if problems:
+                rel = Path(path)
+                if rel.parts and rel.parts[0] == "skills":
+                    return (
+                        f"✗ {path} would be SKIPPED by the skills loader — not written. "
+                        f"Fix and re-write: {'; '.join(problems)}"
+                    )
+                skill_note = (
+                    " (note: this SKILL.md has frontmatter problems and would be skipped "
+                    f"if its root is registered as a skill dir: {'; '.join(problems)})"
+                )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return (
             f"✓ wrote {path} ({len(content)} chars) — call reload_plugins to make it live, "
-            f"test_plugin({plugin_id!r}) to run its suite"
+            f"test_plugin({plugin_id!r}) to run its suite" + skill_note
         )
 
     return [plugin_list_files, plugin_read_file, plugin_write_file]
@@ -433,6 +457,54 @@ def _test_interpreter() -> tuple[str | None, str | None]:
     if err:
         return None, err
     return pytest_interpreter()
+
+
+def _lint_skills(pdir: Path) -> str | None:
+    """Verification-side skill gate. Every ``SKILL.md`` under the conventional
+    ``skills/`` root — RECURSIVELY, matching the loader's ``**/SKILL.md``
+    discovery — must satisfy the loader's contract, or the plugin ships skills
+    that silently never load (the reddit-plugin failure: two frontmatter-less
+    skills, skipped with only a boot-log warning). A ``SKILL.md`` OUTSIDE
+    ``skills/`` only loads if ``register_skill_dir`` names its root — a thing
+    this static lint can't know — so problems there are ADVISORY notes, never
+    failures (a fixture or vendored copy must not fail the dev commands with a
+    verdict the loader would never issue). Returns the report, or ``None``."""
+    from graph.skills.loader import skill_md_problems
+
+    problems: list[str] = []
+    advisories: list[str] = []
+    for f in sorted(pdir.glob("**/SKILL.md")):
+        rel = f.relative_to(pdir).as_posix()
+        bucket = problems if rel.startswith("skills/") else advisories
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            bucket.append(f"{rel}: unreadable ({exc})")
+            continue
+        for p in skill_md_problems(text):
+            bucket.append(f"{rel}: {p}")
+    lines: list[str] = []
+    if problems:
+        lines.append(
+            "✗ skill lint: "
+            + str(len(problems))
+            + " problem(s) — these skills would NEVER load:\n"
+            + "\n".join(f"  - {p}" for p in problems)
+        )
+    if advisories:
+        lines.append(
+            "note: SKILL.md outside skills/ with frontmatter problems (loads only if "
+            "register_skill_dir names its root):\n" + "\n".join(f"  - {p}" for p in advisories)
+        )
+    return "\n".join(lines) if lines else None
+
+
+def _verify_plugin(pdir: Path) -> str:
+    """The verify step: skill lint FIRST (a broken skill fails fast and loudly),
+    then the pytest suite. One string, ✗-prefixed when anything failed."""
+    lint = _lint_skills(pdir)
+    out = _run_pytest(pdir)
+    return f"{lint}\n{out}" if lint else out
 
 
 def _run_pytest(pdir: Path) -> str:
@@ -506,7 +578,7 @@ def _build_test_tool(config: dict | None):
             pdir = _plugin_dir(plugin_id, target_dir)
         except ValueError as e:
             return f"✗ {e}"
-        return await asyncio.to_thread(_run_pytest, pdir)
+        return await asyncio.to_thread(_verify_plugin, pdir)
 
     return test_plugin
 
@@ -525,7 +597,9 @@ _DEVELOP_PROMPT = """You are implementing a protoAgent plugin. Your working dire
 directory — edit ONLY files inside it. The contract: `protoagent.plugin.yaml` is the
 manifest (data, read without importing); `__init__.py` exposes `register(registry)`
 (registry.register_tool / register_subagent / register_router / emit); `skills/` and
-`workflows/` are auto-discovered data. Keep it the smallest change that satisfies the
+`workflows/` are auto-discovered data. Every `skills/<name>/SKILL.md` MUST start with
+a `---` YAML frontmatter block carrying non-empty `name:` and `description:` — the
+loader silently skips the skill without it, and the host's verify step fails on it. Keep it the smallest change that satisfies the
 task. Write or update tests under `tests/` when the plugin has a suite. Do NOT run
 git, do NOT create commits or PRs, do NOT touch anything outside this directory —
 the host runs the tests and reloads the plugin after you finish.
@@ -616,7 +690,7 @@ async def _develop_and_verify(coder, adapter, scoped, prompt: str, timeout: floa
 
     # Re-join the spine at *test* (D5): verify, then hot-swap.
     lines.append("— test_plugin —")
-    lines.append(await asyncio.to_thread(_run_pytest, pdir))
+    lines.append(await asyncio.to_thread(_verify_plugin, pdir))
 
     from runtime.state import STATE
 
@@ -899,10 +973,14 @@ async def install_plugin(url: str, ref: str = "", activate: bool = True) -> str:
         return f"✗ install failed: {exc}"
     live = applier is not None
     s = res.summary
-    what = f"bundle {s['bundle']} ({len(s.get('installed') or [])} member(s))" if "bundle" in s else s.get("id", "plugin")
+    what = (
+        f"bundle {s['bundle']} ({len(s.get('installed') or [])} member(s))" if "bundle" in s else s.get("id", "plugin")
+    )
     lines = [f"✓ installed {what}"]
     if res.enabled:
-        lines.append(f"  enabled + live: {', '.join(res.enabled)}" if res.reloaded else f"  enabled: {', '.join(res.enabled)}")
+        lines.append(
+            f"  enabled + live: {', '.join(res.enabled)}" if res.reloaded else f"  enabled: {', '.join(res.enabled)}"
+        )
     elif res.enable_error:
         # The enable-reload FAILED (enabled=[] + enable_error set) — saying "fetched
         # only (activate=False)" here contradicted the ⚠ line below and misinformed
@@ -1078,7 +1156,9 @@ async def verify_bundle(url: str) -> str:
     arch = peek.get("archetype") or {}
     unknown = sorted(set(arch) - _ARCHETYPE_KEYS) if arch else []
     if unknown:
-        lines.append(f"  ⚠ archetype: unknown key(s): {', '.join(unknown)} — known: {', '.join(sorted(_ARCHETYPE_KEYS))}")
+        lines.append(
+            f"  ⚠ archetype: unknown key(s): {', '.join(unknown)} — known: {', '.join(sorted(_ARCHETYPE_KEYS))}"
+        )
     if arch and not arch.get("label"):
         lines.append("  ⚠ archetype: no label — the block won't register in the new-agent picker")
     return "\n".join(lines)
