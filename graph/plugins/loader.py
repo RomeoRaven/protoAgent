@@ -44,6 +44,7 @@ class PluginLoadResult:
     embedders: dict = field(default_factory=dict)  # name -> embed_fn factory (ADR 0031)
     a2a_skills: list = field(default_factory=list)  # A2A card skill specs (#570)
     a2a_skill_plugins: dict = field(default_factory=dict)  # skill id -> plugin id (ownership, #2754)
+    a2a_handlers: dict = field(default_factory=dict)  # accepted skill id -> deterministic handler
     routers: list = field(default_factory=list)  # {plugin_id, router, prefix} (ADR 0018)
     public_paths: list = field(default_factory=list)  # manifest-declared auth-exempt prefixes
     surfaces: list = field(default_factory=list)  # {plugin_id, name, start, stop}
@@ -656,6 +657,19 @@ def load_plugins(config, *, core_tool_names: set[str] | None = None) -> PluginLo
                 continue
             result.a2a_skills.append(spec)
             result.a2a_skill_plugins[spec["id"]] = manifest.id
+        # A deterministic handler is admitted only for a skill this SAME plugin
+        # won above. A colliding plugin cannot replace the accepted skill owner's
+        # ingress behavior, and an unadvertised handler cannot become a hidden API.
+        for skill_id, handler in registry.a2a_handlers.items():
+            owner = result.a2a_skill_plugins.get(skill_id)
+            if owner != manifest.id:
+                log.warning(
+                    "[plugins] %s: a2a handler %r has no accepted same-plugin skill owner — skipped",
+                    manifest.id,
+                    skill_id,
+                )
+                continue
+            result.a2a_handlers[skill_id] = handler
         if registry.thread_id_resolver is not None:  # last plugin wins (#571)
             if result.thread_id_resolver is not None:
                 log.warning("[plugins] %s overrides a thread_id resolver already set by another plugin", manifest.id)

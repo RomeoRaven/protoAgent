@@ -49,6 +49,27 @@ def test_register_a2a_skill_accumulates_and_validates():
     assert reg.a2a_skills[0]["name"] == "S1"
 
 
+def test_register_a2a_handler_requires_skill_id_and_callable_first_wins():
+    from graph.plugins.registry import PluginRegistry
+
+    reg = PluginRegistry.__new__(PluginRegistry)
+    reg.plugin_id = "demo"
+    reg.a2a_handlers = {}
+
+    async def first(context):
+        return context
+
+    async def duplicate(context):
+        return context
+
+    reg.register_a2a_handler("room", first)
+    reg.register_a2a_handler("", first)
+    reg.register_a2a_handler("not-callable", object())
+    reg.register_a2a_handler("room", duplicate)
+
+    assert reg.a2a_handlers == {"room": first}
+
+
 # ── resolver precedence: config + plugin, else default ──────────────────────
 
 

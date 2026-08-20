@@ -157,7 +157,11 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
     def _new_resolver(request_metadata, session_id):
         return f"reloaded:{session_id}"
 
+    async def _new_a2a_handler(context):
+        return []
+
     new_a2a_skills = [{"id": "demo-skill", "name": "Demo"}]
+    new_a2a_handlers = {"demo-skill": _new_a2a_handler}
     new_workflow_dirs = ["/plugins/demo/workflows"]
 
     monkeypatch.setattr(
@@ -182,6 +186,7 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
             surfaces=[],
             thread_id_resolver=_new_resolver,
             a2a_skills=new_a2a_skills,
+            a2a_handlers=new_a2a_handlers,
             workflow_dirs=new_workflow_dirs,
         ),
     )
@@ -199,6 +204,7 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
     assert "demo:brand_new" not in gv.plugin_verifier_names()
     monkeypatch.setattr(STATE, "thread_id_resolver", None, raising=False)
     monkeypatch.setattr(STATE, "plugin_a2a_skills", [], raising=False)
+    monkeypatch.setattr(STATE, "plugin_a2a_handlers", {}, raising=False)
     monkeypatch.setattr(STATE, "plugin_workflow_dirs", [], raising=False)
     try:
         ok, msg = ai._reload_langgraph_agent()
@@ -208,6 +214,7 @@ def test_reload_refreshes_plugin_verifier_registry(tmp_path, monkeypatch):
         # …and re-published the STATE-read seams that were boot-only before this fix.
         assert STATE.thread_id_resolver is _new_resolver
         assert STATE.plugin_a2a_skills == new_a2a_skills
+        assert STATE.plugin_a2a_handlers == new_a2a_handlers
         assert STATE.plugin_workflow_dirs == new_workflow_dirs
     finally:
         gv.set_plugin_verifiers({})

@@ -301,6 +301,7 @@ class ProtoAgentExecutor(AgentExecutor):
         structured_finalizer: Callable[[str, str], Any] | None = None,
         context_meta_provider: Callable[[], dict[str, Any]] | None = None,
         stall_timeout_provider: Callable[[], float] | None = None,
+        a2a_handler_provider: Callable[[], dict[str, Callable]] | None = None,
     ) -> None:
         # ``stream_fn_factory(text, context_id, *, resume, caller_trace,
         # request_metadata)`` → async generator of (event_type, payload). This is
@@ -321,6 +322,19 @@ class ProtoAgentExecutor(AgentExecutor):
         # executor stays free of a config import, and read per turn so an operator's
         # change takes effect on the next turn rather than needing a restart.
         self._stall_timeout_provider = stall_timeout_provider
+        # ``a2a_handler_provider()`` returns the CURRENT plugin skill-handler map.
+        # Read per request so a plugin reload can replace the map without
+        # reconstructing the SDK request handler. The plugin returns Parts only;
+        # this executor retains every task/persistence/status transition.
+        self._a2a_handler_provider = a2a_handler_provider
+
+    def _a2a_handler(self, context: RequestContext):
+        skill = _extract_skill_hint(context)
+        if not skill or self._a2a_handler_provider is None:
+            return None
+        handlers = self._a2a_handler_provider() or {}
+        handler = handlers.get(skill) if isinstance(handlers, dict) else None
+        return handler if callable(handler) else None
 
     def _stall_timeout_seconds(self) -> float:
         """The configured stall window, or 0 (guard off) if unavailable.
@@ -374,6 +388,52 @@ class ProtoAgentExecutor(AgentExecutor):
         # marks a HITL continuation (the parked task got its answer), so a host can flip
         # a "needs approval" surface back to "running" (#2132).
         _notify_progress(context.context_id, context.task_id, {"phase": "turn_started", "resumed": resume})
+
+        # Deterministic plugin ingress. A matching advertised skill never enters
+        # the model/tool loop; the handler supplies only artifact Parts while the
+        # host keeps the SDK task lifecycle, persistence, cancellation, and error
+        # semantics. HITL resumes remain on the normal executor path.
+        deterministic_handler = None if resume else self._a2a_handler(context)
+        if deterministic_handler is not None:
+            started = time.monotonic()
+            try:
+                parts = await deterministic_handler(context)
+                if not isinstance(parts, list) or any(not isinstance(part, Part) for part in parts):
+                    raise TypeError("deterministic A2A handler must return a list of Part objects")
+                if parts:
+                    await updater.add_artifact(
+                        parts,
+                        artifact_id=f"{context.task_id or 'turn'}-answer",
+                        append=False,
+                        last_chunk=True,
+                    )
+                await updater.complete()
+                _notify_terminal(
+                    TurnOutcome(
+                        task_id=context.task_id or "",
+                        context_id=context.context_id or "",
+                        state="completed",
+                        text="",
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
+                )
+            except asyncio.CancelledError:
+                await updater.cancel()
+                raise
+            except Exception as exc:  # noqa: BLE001 — handler failure is a failed A2A task
+                logger.exception("[a2a] deterministic handler failed for skill %s", _extract_skill_hint(context))
+                await updater.failed(message=updater.new_agent_message([_text_part(str(exc))]))
+                _notify_terminal(
+                    TurnOutcome(
+                        task_id=context.task_id or "",
+                        context_id=context.context_id or "",
+                        state="failed",
+                        text="",
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        error=str(exc),
+                    )
+                )
+            return
 
         text = context.get_user_input()
         images = _extract_image_parts(context)

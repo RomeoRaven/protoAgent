@@ -72,6 +72,7 @@ class DelegateRegistry:
         item_id: str | None = None,
         raw: bool = False,
         resume_task_id: str | None = None,
+        conversation_key: str | None = None,
     ) -> str:
         """Dispatch ``query`` to the named delegate.
 
@@ -84,10 +85,17 @@ class DelegateRegistry:
         d = self._items.get(name)
         if d is None:
             raise DelegateError(f"unknown delegate {name!r}. Configured: {', '.join(self._items) or '(none)'}.")
-        if raw and d.manage_git:
+        conversation_key = str(conversation_key or "").strip()
+        if conversation_key and d.type != "acp":
+            raise DelegateError(f"delegate {name!r} is type {d.type!r} — conversation_key only applies to acp delegates.")
+        if conversation_key or (raw and d.manage_git):
             import dataclasses
 
-            d = dataclasses.replace(d, manage_git=False)
+            d = dataclasses.replace(
+                d,
+                **({"conversation_key": conversation_key} if conversation_key else {}),
+                **({"manage_git": False} if raw and d.manage_git else {}),
+            )
         # Only a2a tasks can park-and-resume. Silently ignoring a resume id on any
         # other adapter would run the ANSWER as a brand-new task (for a managed-git
         # coder: a brand-new PR) — refuse instead.

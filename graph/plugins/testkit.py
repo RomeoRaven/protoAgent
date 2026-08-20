@@ -268,6 +268,7 @@ class FakeRegistry:
         self.middlewares: list = []
         self.mcp_servers: list = []
         self.a2a_skills: list = []
+        self.a2a_handlers: dict = {}
         self.skill_dirs: list = []
         self.workflow_dirs: list = []
         self.verifiers: dict = {}
@@ -337,6 +338,14 @@ class FakeRegistry:
 
     def register_a2a_skill(self, spec: dict) -> None:
         self.a2a_skills.append(spec)
+
+    def register_a2a_handler(self, skill_id: str, handler) -> None:
+        key = str(skill_id or "").strip()
+        if not key or not callable(handler):
+            raise ValueError(f"register_a2a_handler needs a skill id + callable: {skill_id!r} / {handler!r}")
+        if key in self.a2a_handlers:
+            raise ValueError(f"a2a handler {key!r} registered twice")
+        self.a2a_handlers[key] = handler
 
     def register_skill_dir(self, path) -> None:
         self.skill_dirs.append(str(path))

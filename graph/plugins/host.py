@@ -31,6 +31,10 @@ class PluginHost:
     # async (prompt, session_id) -> str — invoke the agent as a chat surface
     # (one conversation per session_id, the LangGraph thread key).
     invoke: Optional[Callable[[str, str], Awaitable[str]]] = None
+    # async (delegate_name, prompt, conversation_key) -> str — supplied by the
+    # first-party delegates plugin. Keeps callers independent of delegate/ACP
+    # config parsing, secrets, permissions, and client lifecycle internals.
+    invoke_delegate: Optional[Callable[[str, str, str], Awaitable[str]]] = None
     # (event: str, data: dict) -> None — publish to the server→client event bus.
     publish: Optional[Callable[[str, dict], Any]] = None
     # () -> subscription — subscribe to the event bus (e.g. return-address delivery).

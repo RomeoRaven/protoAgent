@@ -70,6 +70,7 @@ class PluginRegistry:
         self.skill_dirs: list[Path] = []
         self.workflow_dirs: list[Path] = []  # dirs of *.yaml workflow recipes (ADR 0027)
         self.a2a_skills: list[dict] = []  # A2A card skill specs (#570)
+        self.a2a_handlers: dict[str, object] = {}  # skill id -> deterministic request handler
         self.routers: list[dict] = []  # {"router", "prefix"}
         self.surfaces: list[dict] = []  # {"name", "start", "stop"}
         self.subagents: list = []  # SubagentConfig instances
@@ -370,6 +371,28 @@ class PluginRegistry:
             )
             return
         self.a2a_skills.append(spec)
+
+    def register_a2a_handler(self, skill_id: str, handler) -> None:
+        """Handle one advertised A2A skill deterministically before the model loop.
+
+        ``handler`` is async and receives the SDK ``RequestContext``. It returns
+        A2A ``Part`` objects; the host executor retains ownership of task state,
+        persistence, artifacts, and failure handling. One handler per skill id;
+        first registration wins so reload/order cannot silently replace ingress.
+        """
+        key = str(skill_id or "").strip()
+        if not key or not callable(handler):
+            log.warning(
+                "[plugins] %s: register_a2a_handler needs a skill id + callable: %r / %r",
+                self.plugin_id,
+                skill_id,
+                handler,
+            )
+            return
+        if key in self.a2a_handlers:
+            log.warning("[plugins] %s: a2a handler %r registered twice — keeping the first", self.plugin_id, key)
+            return
+        self.a2a_handlers[key] = handler
 
     def register_thread_id_resolver(self, fn) -> None:
         """Override how the checkpointer ``thread_id`` is derived for each turn

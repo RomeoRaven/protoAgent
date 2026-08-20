@@ -225,16 +225,41 @@ async def test_registry_dispatch_unknown_raises():
         await reg.dispatch("nope", "hi")
 
 
+async def test_registry_dispatch_scopes_acp_conversation_key_without_mutating_roster(monkeypatch):
+    reg = DelegateRegistry([{"name": "hermes", "type": "acp", "command": "hermes-acp", "workdir": "/srv/hub"}])
+    seen = []
+
+    async def capture(delegate, query, *, timeout=None, item_id=None, resume_task_id=None):
+        seen.append((delegate.conversation_key, query))
+        return "reply"
+
+    monkeypatch.setattr(ADAPTERS["acp"], "dispatch", capture)
+
+    assert await reg.dispatch("hermes", "hello", conversation_key="room:ao:thread-1") == "reply"
+    assert seen == [("room:ao:thread-1", "hello")]
+    assert reg.get("hermes").conversation_key == ""  # per-call only; config roster stays immutable
+
+
+async def test_registry_refuses_conversation_key_for_non_acp_delegate():
+    reg = DelegateRegistry([{"name": "peer", "type": "a2a", "url": "https://peer/a2a"}])
+
+    with pytest.raises(DelegateError, match="conversation_key only applies to acp"):
+        await reg.dispatch("peer", "hello", conversation_key="room:ao:thread-1")
+
+
 # ── delegate_to tool ──────────────────────────────────────────────────────────
 
 
 def _register(delegates, monkeypatch):
+    from types import SimpleNamespace
+
     monkeypatch.setattr(P, "_load_delegates_config", lambda: delegates)
 
     class _Reg:
         def __init__(self):
             self.config = {}
             self.tools = []
+            self.host = SimpleNamespace(invoke_delegate="stale")
 
         def register_tool(self, t):
             self.tools.append(t)
@@ -247,12 +272,27 @@ def _register(delegates, monkeypatch):
 def test_register_no_delegates_registers_nothing(monkeypatch):
     r = _register([], monkeypatch)
     assert r.tools == []
+    assert r.host.invoke_delegate is None
 
 
 def test_register_exposes_delegate_to_and_list_agents(monkeypatch):
     r = _register([{"name": "opus", "type": "openai", "url": "https://g/v1", "model": "m"}], monkeypatch)
     assert [t.name for t in r.tools] == ["delegate_to", "list_agents"]
     assert "opus" in r.tools[0].description
+
+
+async def test_register_exposes_named_delegate_host_service_with_conversation_key(monkeypatch):
+    seen = []
+
+    async def capture(delegate, query, *, timeout=None, item_id=None, resume_task_id=None):
+        seen.append((delegate.name, delegate.conversation_key, query))
+        return "Hermes reply"
+
+    monkeypatch.setattr(ADAPTERS["acp"], "dispatch", capture)
+    r = _register([{"name": "hermes", "type": "acp", "command": "hermes-acp", "workdir": "/srv/hub"}], monkeypatch)
+
+    assert await r.host.invoke_delegate("hermes", "hello", "room:ao:thread-1") == "Hermes reply"
+    assert seen == [("hermes", "room:ao:thread-1", "hello")]
 
 
 def test_registry_roster_shape():
@@ -573,10 +613,9 @@ async def test_acp_dispatch_reuses_client(monkeypatch):
     assert await ADAPTERS["acp"].dispatch(d, "fix the bug") == "coding done"
 
 
-async def test_acp_teardown_evicts_the_workdir_scoped_client():
-    """teardown reaps the exact cached client dispatch created — proving the
-    spec/cache-key (incl. workdir) line up, so a per-call scoped workdir tears
-    down its own subprocess."""
+async def test_acp_teardown_evicts_all_workdir_scoped_conversation_clients():
+    """Deleting one configured ACP delegate reaps every Room-thread client created
+    from that exact launch/workdir/policy spec, without needing each thread key."""
     import plugins.coding_agent as CA
 
     d = ADAPTERS["acp"].parse({"name": "proto", "type": "acp", "command": "proto", "workdir": "/tmp/wt-x"})
@@ -589,12 +628,15 @@ async def test_acp_teardown_evicts_the_workdir_scoped_client():
         async def close(self):
             self.closed = True
 
-    fake = _FakeClient()
-    CA._CLIENTS[CA._cache_key(spec)] = fake
+    first, second = _FakeClient(), _FakeClient()
+    first_key = CA._cache_key({**spec, "conversation_key": "room:ao:first"})
+    second_key = CA._cache_key({**spec, "conversation_key": "room:ao:second"})
+    CA._CLIENTS[first_key] = first
+    CA._CLIENTS[second_key] = second
 
     assert await ADAPTERS["acp"].teardown(d) is True
-    assert fake.closed is True
-    assert CA._cache_key(spec) not in CA._CLIENTS
+    assert first.closed is True and second.closed is True
+    assert first_key not in CA._CLIENTS and second_key not in CA._CLIENTS
     assert await ADAPTERS["acp"].teardown(d) is False  # idempotent
 
 

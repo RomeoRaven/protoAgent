@@ -477,6 +477,28 @@ def test_a2a_skill_cross_plugin_collision_first_wins(tmp_path, monkeypatch) -> N
     assert res.a2a_skills[0]["name"] == ("A" if owner == "aaa" else "B")  # the owner's spec survived
 
 
+def test_a2a_handler_cross_plugin_collision_follows_skill_owner(tmp_path, monkeypatch) -> None:
+    import asyncio
+
+    body = """
+async def handle(context):
+    return ['%s']
+
+def register(registry):
+    registry.register_a2a_skill({'id': 'room', 'name': '%s', 'description': 'd'})
+    registry.register_a2a_handler('room', handle)
+"""
+    root = tmp_path / "plugins"
+    _make_plugin(root, "aaa", enabled=True, body=body % ("A", "A"))
+    _make_plugin(root, "bbb", enabled=True, body=body % ("B", "B"))
+    monkeypatch.setattr(plugin_loader, "_plugin_roots", lambda config: [root])
+
+    res = load_plugins(_cfg())
+    owner = res.a2a_skill_plugins["room"]
+
+    assert asyncio.run(res.a2a_handlers["room"](None)) == (["A"] if owner == "aaa" else ["B"])
+
+
 def test_tool_collision_skipped(tmp_path, monkeypatch) -> None:
     root = tmp_path / "plugins"
     _make_plugin(root, "c", enabled=True, tool="current_time")  # core tool name
