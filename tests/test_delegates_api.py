@@ -49,12 +49,14 @@ def test_merged_delegates_overlays_secret(fake_io):
 
 
 def test_upsert_replaces_by_name_and_delete(fake_io):
+    fake_io["doc"]["unrelated"] = {"preserved": True}
     store.upsert_delegate({"name": "p", "type": "acp", "command": "proto", "workdir": "/tmp"})
     store.upsert_delegate({"name": "p", "type": "acp", "command": "proto2", "workdir": "/tmp"})
     assert len(fake_io["doc"]["delegates"]) == 1
     assert fake_io["doc"]["delegates"][0]["command"] == "proto2"
     store.delete_delegate("p")
-    assert fake_io["doc"]["delegates"] == []
+    assert "delegates" not in fake_io["doc"]
+    assert fake_io["doc"]["unrelated"] == {"preserved": True}
 
 
 # ── API ───────────────────────────────────────────────────────────────────────
@@ -114,6 +116,39 @@ def test_create_list_update_delete_flow(client, fake_io):
     # delete
     assert client.request("DELETE", "/api/delegates/opus").status_code == 200
     assert client.get("/api/delegates").json()["delegates"] == []
+
+
+def test_delete_acp_tears_down_exact_saved_delegate(client, fake_io, monkeypatch):
+    adapter = api.ADAPTERS["acp"]
+    seen = []
+
+    async def _teardown(delegate):
+        seen.append(delegate)
+        return True
+
+    monkeypatch.setattr(adapter, "teardown", _teardown)
+    client.post(
+        "/api/delegates",
+        json={"name": "coder", "type": "acp", "command": "codex-acp", "workdir": "/repo"},
+    )
+    r = client.delete("/api/delegates/coder")
+    assert r.status_code == 200
+    assert [(d.name, d.command, d.workdir) for d in seen] == [("coder", "codex-acp", "/repo")]
+    assert "delegates" not in fake_io["doc"]
+
+
+def test_delete_non_acp_does_not_call_acp_teardown(client, monkeypatch):
+    adapter = api.ADAPTERS["acp"]
+
+    async def _unexpected(_delegate):
+        raise AssertionError("non-ACP deletion must not evict an ACP client")
+
+    monkeypatch.setattr(adapter, "teardown", _unexpected)
+    client.post(
+        "/api/delegates",
+        json={"name": "peer", "type": "openai", "url": "https://g/v1", "model": "m"},
+    )
+    assert client.delete("/api/delegates/peer").status_code == 200
 
 
 def test_create_invalid_returns_400(client):
