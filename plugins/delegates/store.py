@@ -106,7 +106,11 @@ def _save_list(delegates: list) -> None:
     doc = load_yaml_doc() or {}
     if not isinstance(doc, dict):
         doc = {}
-    doc["delegates"] = delegates
+    if delegates:
+        doc["delegates"] = delegates
+    else:
+        # Restore the true no-delegate state instead of persisting ``delegates: []``.
+        doc.pop("delegates", None)
     save_yaml_doc(doc)
 
 

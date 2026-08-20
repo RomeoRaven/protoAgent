@@ -195,6 +195,23 @@ def build_router():
 
     @router.delete("/api/delegates/{name}")
     async def _delete(name: str):
+        # Tear down a saved ACP delegate while its exact, secret-overlaid launch
+        # spec is still available.  The ACP client cache is keyed by that spec;
+        # deleting config first loses the only reliable handle to its process group.
+        stored = next(
+            (e for e in store.merged_delegates() if isinstance(e, dict) and e.get("name") == name),
+            None,
+        )
+        if isinstance(stored, dict) and stored.get("type") == "acp":
+            adapter = ADAPTERS["acp"]
+            try:
+                delegate = adapter.parse(dict(stored))
+            except DelegateError as exc:
+                # Invalid entries cannot have launched from their current spec. Keep
+                # the historical ability to remove them instead of trapping bad config.
+                log.warning("cannot parse ACP delegate %r for teardown: %s", name, exc)
+            else:
+                await adapter.teardown(delegate)
         store.delete_delegate(name)
         ok, msg = await _reload()
         return {"ok": ok, "message": msg, **_list_payload()}
