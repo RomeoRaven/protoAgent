@@ -41,7 +41,10 @@ import { useServerTurn, useServerTurnSessions } from "./server-turn-store";
 import { filesFromTransfer, isLargePaste, pastedTextFile } from "./paste";
 import { inputHistory, pushInputHistory } from "./inputHistory";
 import { finalizeStoppedMessages, resolveStopTarget } from "./stopTurn";
-import { rewindableTailId, addComponent, addToolRef, appendReasoning, appendText, replaceText } from "./parts";
+import { rewindableTailId, replaceText } from "./parts";
+import { applyComponent, applyReasoning, applyText, applyToolEvent } from "./turnReducers";
+import { reattachTurn } from "./reattach";
+import { loadDraft, loadScroll, loadSteers, saveDraft, saveScroll, saveSteers } from "./scratchState";
 import { createStreamWatchdog } from "./streamWatchdog";
 import { ADD_SELECTOR, isIncognitoAddClick, trackShiftHeld } from "./shiftCue";
 import { sessionsToClose } from "./bulkClose";
@@ -451,6 +454,13 @@ export function ChatSurface({
   );
 }
 
+
+// Steer-queue ref initializer — mirrors the lazy state init (a useRef can't take
+// an initializer function, and re-reading storage per render would be wasteful).
+function steerQueueRef_init(sessionId: string): { id: string; text: string }[] {
+  return loadSteers(sessionId);
+}
+
 function ChatSessionSlot({
   sessionId,
   visible,
@@ -466,7 +476,14 @@ function ChatSessionSlot({
 }) {
   const session = useSession(sessionId);
   const chat = useChatState();
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => loadDraft(sessionId));
+  // Persist the draft per session (Swap & Resume S3) — an agent switch is a full
+  // navigation, and a half-written message used to vanish silently. Debounced a
+  // touch so streaming keystrokes don't hammer sessionStorage.
+  useEffect(() => {
+    const t = setTimeout(() => saveDraft(sessionId, draft), 150);
+    return () => clearTimeout(t);
+  }, [draft, sessionId]);
   // Turn status is still tracked (drives the stream lifecycle) but no longer surfaced as
   // a spinner/"working…" strip above the composer — the inline indicators cover it now.
   const [, setStatusMessage] = useState("");
@@ -508,11 +525,12 @@ function ChatSessionSlot({
   // Mid-turn steering: user messages queued WHILE a turn streams (optimistic),
   // reconciled at turn-end. The ref mirrors the state so the post-stream reconcile
   // (a stale render closure) reads the live queue.
-  const [steerQueue, setSteerQueueState] = useState<{ id: string; text: string }[]>([]);
-  const steerQueueRef = useRef<{ id: string; text: string }[]>([]);
+  const [steerQueue, setSteerQueueState] = useState<{ id: string; text: string }[]>(() => loadSteers(sessionId));
+  const steerQueueRef = useRef<{ id: string; text: string }[]>(steerQueueRef_init(sessionId));
   const setSteerQueue = (next: { id: string; text: string }[]) => {
     steerQueueRef.current = next;
     setSteerQueueState(next);
+    saveSteers(sessionId, next); // scratch state survives a swap (S3)
   };
   // Forwarded into the DS PromptInput (inputRef) — for slash-completion focus and
   // the Ctrl/⌘+Enter caret insert. The DS component owns the auto-grow.
@@ -878,65 +896,78 @@ function ChatSessionSlot({
     }
   }
 
+
+  // Guard unsent composer work (S3): a draft or ready attachments prompt before
+  // the page unloads (agent switch, reload, close). A merely-streaming turn does
+  // NOT guard — turns are server-owned and reattach on return (S0/S1).
+  useEffect(() => {
+    const dirty = Boolean(draft.trim()) || attachments.length > 0;
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [draft, attachments]);
+
+
+  // Scroll memory (S3): returning to a transcript you had scrolled back through
+  // restores your place; near-bottom clears the memory so the default stays
+  // pinned-to-latest. Uses the DS Conversation's stable .pl-convo-scroll element.
+  useEffect(() => {
+    const root = document.getElementById(`pl-conv-${sessionId}`);
+    const el = root?.querySelector<HTMLElement>(".pl-convo-scroll");
+    if (!el) return;
+    const saved = loadScroll(sessionId);
+    if (saved !== null && el.scrollHeight > el.clientHeight) {
+      // After the DS's land-at-bottom mount effect — two frames out.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        el.scrollTop = saved;
+      }));
+    }
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 32;
+        saveScroll(sessionId, atBottom ? null : el.scrollTop);
+      });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- bind once per slot
+  }, [sessionId]);
+
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
     };
   }, []);
 
-  // Self-heal an interrupted turn (reload / network blip / a stale tab): if the
-  // last assistant message is stuck in `streaming` with no live controller,
-  // reconcile it against the server's durable task (A2A tasks/get) — finalize
-  // when terminal, polling briefly if it's genuinely still running. Without this
-  // an interrupted stream spins forever even though the server completed.
+  // Reattach an interrupted turn (Swap & Resume S1): if the last assistant
+  // message is stuck in `streaming` with no live controller, resubscribe to the
+  // server-owned task — the snapshot replay fills in everything missed (tool
+  // cards, reasoning, text) and the live tail streams in like a normal turn.
+  // Cold agents (409/502 behind the fleet proxy) are retried with backoff; a
+  // turn that already ended falls back to one snapshot replay + finalize.
   useEffect(() => {
     if (abortRef.current) return; // a live turn in this slot owns the stream
     const snap = chatStore.getSnapshot().sessions.find((s) => s.id === sessionId);
     const last = [...(snap?.messages || [])].reverse().find((m) => m.role === "assistant");
     if (!last || last.status !== "streaming" || !last.taskId || !last.id) return;
-
-    const assistantId = last.id;
-    const taskId = last.taskId;
-    const TERMINAL = /completed|failed|canceled|cancelled/i;
-    let cancelled = false;
-    let polls = 0;
-    const MAX_POLLS = 40; // ~2 min at 3s — then give up and leave it as-is
-
-    function finalize(state: string, text: string) {
-      const cur = chatStore.getSnapshot().sessions.find((s) => s.id === sessionId);
-      if (!cur) return;
-      const failed = /fail|cancel/i.test(state);
-      chatStore.updateMessages(
-        sessionId,
-        cur.messages.map((m) => {
-          if (m.id !== assistantId) return m;
-          const toolCalls = m.toolCalls?.map((c) => (c.status === "running" ? { ...c, status: "done" as const } : c));
-          return { ...m, content: text || m.content, status: failed ? "error" : "done", toolCalls };
-        }),
-      );
-      chatStore.setSessionStatus(sessionId, failed ? "error" : "idle");
-    }
-
-    async function tick() {
-      if (cancelled) return;
-      let res: { state: string; text: string };
-      try {
-        res = await api.getTask(taskId);
-      } catch {
-        return; // best-effort — leave the message as-is on a hard error
-      }
-      if (cancelled) return;
-      if (!res.state || TERMINAL.test(res.state)) {
-        // terminal, or the task is gone (un-stick rather than spin forever)
-        finalize(res.state, res.text);
-        return;
-      }
-      if (++polls < MAX_POLLS) setTimeout(tick, 3000);
-    }
-    void tick();
-    return () => {
-      cancelled = true;
-    };
+    return reattachTurn(sessionId, last.id, last.taskId, {
+      onStatus: (m) => setStatusMessage(m),
+      onHitl: (payload) => {
+        updateHitl(payload);
+        notifyIfHidden(payload.title || "protoAgent needs your input", payload.question || payload.description);
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reattach is keyed to the session slot
   }, [sessionId]);
 
   const messages = session?.messages || [];
@@ -1559,44 +1590,16 @@ function ChatSessionSlot({
           if (!latest) return;
           chatStore.updateMessages(
             session.id,
-            latest.messages.map((message) =>
-              message.id === assistantId
-                ? {
-                    ...message,
-                    content: append ? `${message.content}${text}` : text,
-                    // A replace spans the WHOLE turn's text (the terminal frame re-sends
-                    // the full canonical answer, preamble included) — replaceText keeps
-                    // the streamed interleaving when nothing diverged and rebuilds
-                    // otherwise; appendText's open-run rewrite would double a pre-tool
-                    // preamble.
-                    parts: append
-                      ? appendText(message.parts, text, true)
-                      : replaceText(message.parts, text, message.content),
-                    status: "streaming",
-                  }
-                : message,
-            ),
+            latest.messages.map((message) => (message.id === assistantId ? applyText(message, text, append) : message)),
           );
         },
         onReasoning: (delta) => {
           bumpWatchdog();
-          // Accumulate the streamed scratch_pad two ways: into `reasoning` (the
-          // flat block kept for history/persistence) AND into the ordered `parts`,
-          // so live turns render thinking inline at the point it occurred — between
-          // the tool calls it precedes — rather than hoisted to the top.
           const latest = chatStore.getSnapshot().sessions.find((item) => item.id === session.id);
           if (!latest) return;
           chatStore.updateMessages(
             session.id,
-            latest.messages.map((message) =>
-              message.id === assistantId
-                ? {
-                    ...message,
-                    reasoning: `${message.reasoning ?? ""}${delta}`,
-                    parts: appendReasoning(message.parts, delta),
-                  }
-                : message,
-            ),
+            latest.messages.map((message) => (message.id === assistantId ? applyReasoning(message, delta) : message)),
           );
         },
         onToolCall: (evt) => {
@@ -1609,70 +1612,15 @@ function ChatSessionSlot({
           if (!latest) return;
           chatStore.updateMessages(
             session.id,
-            latest.messages.map((message) => {
-              if (message.id !== assistantId) return message;
-              const calls = [...(message.toolCalls || [])];
-              const idx = calls.findIndex((c) => c.id === evt.id);
-              const now = Date.now();
-              // Ordered render blocks: a top-level tool opens/extends a tool group in
-              // emission order; children (parentId set) nest under their parent's card,
-              // so they don't get their own block.
-              let nextParts = message.parts;
-              if (evt.phase === "start") {
-                // Nest a subagent's own tool under its `task` card. The server tags the
-                // child frame with the parent delegation's id (authoritative — works even
-                // though the task's end races AHEAD of the child); fall back to "last open
-                // task wins" only for older servers that don't send it.
-                const openTask = [...calls]
-                  .reverse()
-                  .find((c) => c.name === "task" && c.status === "running" && c.id !== evt.id);
-                const card: ToolCall = {
-                  id: evt.id,
-                  name: evt.name,
-                  input: evt.input,
-                  status: "running",
-                  startedAt: now,
-                  parentId: evt.parentId ?? openTask?.id,
-                };
-                if (idx >= 0) calls[idx] = { ...calls[idx], ...card };
-                else calls.push(card);
-                if (card.parentId == null) nextParts = addToolRef(message.parts, evt.id);
-              } else {
-                // end — flip the matching card to done/error (or create one if the
-                // start frame was missed). A failed end (e.g. a declined run_command)
-                // closes the card as an error (X). Stamp elapsed when we saw the start.
-                const startedAt = idx >= 0 ? calls[idx].startedAt : undefined;
-                const durationMs = startedAt !== undefined ? now - startedAt : undefined;
-                const endStatus = evt.error ? "error" : "done";
-                if (idx >= 0) {
-                  calls[idx] = { ...calls[idx], output: evt.output, outputChars: evt.outputChars, status: endStatus, durationMs };
-                } else {
-                  // Missed start — treat as a fresh top-level call so it still renders.
-                  calls.push({ id: evt.id, name: evt.name, output: evt.output, outputChars: evt.outputChars, status: endStatus });
-                  nextParts = addToolRef(message.parts, evt.id);
-                }
-              }
-              return { ...message, toolCalls: calls, parts: nextParts };
-            }),
+            latest.messages.map((message) => (message.id === assistantId ? applyToolEvent(message, evt) : message)),
           );
         },
         onComponent: (spec) => {
-          // A renderable component (ADR 0051) — add it as an ORDERED part at its emission
-          // point so it renders ABOVE the answer text that streams in after (#1323). `components`
-          // is kept as the history/persistence fallback for messages without ordered parts.
           const latest = chatStore.getSnapshot().sessions.find((item) => item.id === session.id);
           if (!latest) return;
           chatStore.updateMessages(
             session.id,
-            latest.messages.map((message) =>
-              message.id === assistantId
-                ? {
-                    ...message,
-                    parts: addComponent(message.parts, spec),
-                    components: [...(message.components || []), spec],
-                  }
-                : message,
-            ),
+            latest.messages.map((message) => (message.id === assistantId ? applyComponent(message, spec) : message)),
           );
         },
         onCost: (usage) => {
@@ -1834,7 +1782,7 @@ function ChatSessionSlot({
 
   return (
     <div className="chat-session-slot" hidden={!visible}>
-      <Conversation>
+      <Conversation id={`pl-conv-${sessionId}`}>
         {messages.length === 0 ? (
           <Empty icon={<TerminalSquare />} description="No messages in this session." />
         ) : (
@@ -1845,6 +1793,7 @@ function ChatSessionSlot({
               onCancelDelegation={cancelDelegation}
               actions={{
                 copiedId,
+                sessionId: session?.id,
                 onCopy: copyMessage,
                 onFork: forkAtMessage,
                 onRewind: rewindAtMessage,

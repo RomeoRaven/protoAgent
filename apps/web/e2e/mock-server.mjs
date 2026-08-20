@@ -49,7 +49,10 @@ import {
   TELEMETRY_TURNS,
   WATCHES,
   VERIFIERS,
+  WORKFLOW_RECIPE_FULL,
+  WORKFLOW_RUN_RECORD,
   WORKFLOW_RUN_RESULT,
+  WORKFLOW_RUN_SUMMARIES,
   WORKFLOWS,
 } from "./fixtures.mjs";
 
@@ -373,6 +376,14 @@ function handleApiGet(pathname, fleet = FLEET, params = new URLSearchParams(), m
       };
     case "/api/plugins/workflows/list":
       return { workflows: WORKFLOWS };
+    case "/api/plugins/workflows/runs":
+      return { runs: [] }; // Pending Gates queue — nothing parked in the e2e
+    case "/api/plugins/workflows/runs/all":
+      return { runs: WORKFLOW_RUN_SUMMARIES };
+    case "/api/plugins/workflows/runs/run-e2e-1":
+      return WORKFLOW_RUN_RECORD;
+    case "/api/plugins/workflows/research-and-brief/recipe":
+      return { recipe: WORKFLOW_RECIPE_FULL };
     case "/api/theme":
       return { theme: null }; // per-agent theme (ADR 0042); null → DS defaults
     case "/api/fleet":
@@ -548,14 +559,45 @@ const server = createServer(async (req, res) => {
     // FLAT on `result`, member-style `{text}` parts. The legacy `tasks/get` is -32601 on
     // the live server — answering it here is how the self-heal rotted unnoticed.
     if (body?.method === "GetTask") {
+      // A task id carrying "history" also returns a durable history with a
+      // tool-call-v1 frame — the Swap & Resume replay path (reattach.ts) must
+      // render the tool card the operator never saw live.
+      const wantHistory = String(body.params?.id || "").includes("history");
       return sendJson(res, {
         jsonrpc: "2.0",
         id: body.id,
         result: {
-          id: body.params?.id, contextId: "reconcile",
+          // The real server stamps the task's own context id (= the console
+          // session). The history-replay spec relies on the match (the frame
+          // dispatcher drops foreign-context frames); plain reconciles keep the
+          // legacy placeholder.
+          id: body.params?.id, contextId: wantHistory ? "s-stuck" : "reconcile",
           status: { state: "TASK_STATE_COMPLETED" },
           artifacts: [{ parts: [{ text: "RECONCILED ANSWER" }] }],
+          ...(wantHistory
+            ? {
+                history: [
+                  {
+                    role: "ROLE_AGENT",
+                    parts: [],
+                    metadata: {
+                      "https://proto-labs.ai/a2a/ext/tool-call-v1": {
+                        toolCallId: "missed-t1", name: "file_bug", phase: "completed", result: "BUG-42",
+                      },
+                    },
+                  },
+                ],
+              }
+            : {}),
         },
+      });
+    }
+    if (body?.method === "SubscribeToTask") {
+      // The real server rejects resubscribe for a TERMINAL task — the console's
+      // reattach then falls back to GetTask snapshot replay. Mirror that.
+      return sendJson(res, {
+        jsonrpc: "2.0", id: body.id,
+        error: { code: -32004, message: "task is not running (UnsupportedOperationError)" },
       });
     }
     if (body?.method === "CancelTask") {
@@ -980,8 +1022,17 @@ const server = createServer(async (req, res) => {
     if (/^\/api\/plugins\/workflows\/[^/]+\/run$/.test(pathname)) {
       return sendJson(res, WORKFLOW_RUN_RESULT);
     }
+    if (/^\/api\/plugins\/workflows\/[^/]+\/start$/.test(pathname)) {
+      // The Studio's detached run (#2829) — the timeline then polls the record.
+      return sendJson(res, { started: true, run_id: "run-e2e-1" });
+    }
+    if (pathname === "/api/plugins/workflows/validate") {
+      return sendJson(res, { errors: [] });
+    }
     if (pathname === "/api/plugins/workflows/save") {
-      return sendJson(res, { saved: true, name: "demo" });
+      // Echo the posted recipe name (the real route does) so Save & test can
+      // select what it just saved. `body` is already parsed by readBody above.
+      return sendJson(res, { saved: true, name: String(body?.name || "demo") });
     }
     if (req.method === "DELETE" && /^\/api\/plugins\/workflows\/[^/]+$/.test(pathname)) {
       return sendJson(res, { deleted: true });

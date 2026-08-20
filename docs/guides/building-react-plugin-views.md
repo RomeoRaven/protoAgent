@@ -213,6 +213,15 @@ const res = await kit.apiFetch("/api/chat", { method: "POST", body: ... });  // 
 Prefer the kit over hardcoding hex values, a theme map, or a CDN — colors and the handshake both come
 from the console's own DS, so your view always matches the operator's live theme.
 
+**Error states, not empty-state lies.** An empty state must only render on a successful empty
+response; failures must get an error state — silent catch-to-empty is a bug class (#2885). A
+persistently failing fetch (401, 504, dead store) that falls through to the default empty state is
+indistinguishable from "genuinely no data", so the operator never learns the panel is broken. In a
+poll loop, tolerate a one-off miss, but count consecutive failures and surface an error strip
+(HTTP status + a short "retrying" note, `--pl-color-danger` text on a muted ground) once they
+persist; clear it on the next success. The artifact panel's `poll()` is the reference
+implementation.
+
 ## Events — broadcast and subscribe (ADR 0039)
 
 Plugins talk to the rest of the app through the **event bus**, never by importing each other. You
@@ -351,6 +360,22 @@ Pass `editable: true` when focus is in one of your own text fields and the host 
 respect the same typing gate it applies to its own inputs. A forwarded chord reaches only
 **global** bindings — the host can't see inside your iframe, so it can't know which of its
 panels is focused, and firing another panel's scoped chord would be worse than not firing.
+
+## Fleet-proxied requests: the 20-second read lane
+
+When your view runs on a fleet **member**, every request rides the hub's reverse
+proxy — and plain requests to `/plugins/…` / `/api/plugins/…` get a **20s read
+timeout** (a stalled member must answer with a 504 instead of parking the
+browser's per-origin connection pool, which is what froze whole consoles before
+the lanes existed). Two lanes are exempt:
+
+- **SSE** — send `Accept: text/event-stream` (or use the bus via the kit) and the
+  proxy holds the stream open indefinitely, with a 30s comment keepalive so an
+  abandoned stream still unwinds.
+- **WebSockets** — upgraded connections relay untimed.
+
+So: never hold a plain GET/POST open as a long-poll. For anything slower than
+~20s, return early and deliver the result over the event bus, or stream SSE.
 
 ## Trust & the sandbox split
 

@@ -250,6 +250,14 @@ jobs:
   web-e2e:
     name: Web E2E smoke
     runs-on: ubuntu-latest  # workspace-config: allow-hosted-runner public repo — GH-hosted is free
+    # Browsers + system deps come PREINSTALLED in the Playwright job container —
+    # ZERO apt at runtime. This retires the apt lock-contention flake class that
+    # failed five runs across 2026-08-18/19 and outlived two rounds of runner
+    # hardening (#2845/#2849): background apt could hold the dpkg locks (or just
+    # fetch slowly) longer than any polite wait. The tag is pinned to the LOCKED
+    # @playwright/test version — a guard step below fails loudly on drift.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -269,51 +277,18 @@ jobs:
         # the uiStore persist migration). Fast — runs before the heavier
         # Playwright path so a reducer regression fails the job early.
         run: npm run test:unit --workspace @protoagent/web
-      - name: Resolve Playwright version
-        id: pw
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright browsers
-        id: pw-cache
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - name: Install Playwright browser + deps
-        # The chromium binary is the slow ~100MB CDN download that intermittently
-        # stalled ~10min until the job-level orphan-kill fired (#1167). Cache it keyed
-        # on the Playwright version (skips the download entirely on a hit — only the
-        # fast apt system-deps run then), and hard-cap each attempt with `timeout` so
-        # a stalled download fails fast and retries instead of hanging the whole job.
-        timeout-minutes: 8
+      - name: Playwright version must match the container image
+        # The pinned container ships the browsers for exactly one Playwright
+        # version. When package-lock bumps @playwright/test, bump the job's
+        # `container.image` tag in lockstep — this guard turns silent drift
+        # (subtle browser-mismatch failures) into a one-line fix instruction.
         run: |
-          # The runner's own background apt (unattended-upgrades / apt-daily) can hold
-          # /var/lib/apt/lists/lock for tens of seconds right after boot — three quick
-          # 5s retries all collided with the SAME held lock and failed the job three
-          # separate times on 2026-08-18 (exit 100: "Could not get lock … held by
-          # process N (apt-get)"). Wait the lock out ONCE up front, bounded, instead
-          # of racing it: playwright's installer shells out to apt itself, so this is
-          # the only seam where we can be polite about it.
-          for i in $(seq 1 24); do
-            if ! sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-              break
-            fi
-            echo "apt lock held by a background process — waiting (${i}/24)…"
-            sleep 5
-          done
-          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
-            cmd="playwright install-deps chromium"   # binary cached → apt deps only
-          else
-            cmd="playwright install --with-deps chromium"
+          want="1.61.1"
+          have=$(node -p "require('@playwright/test/package.json').version")
+          if [ "$have" != "$want" ]; then
+            echo "::error::@playwright/test is $have but the web-e2e container is pinned to v$want — update the container image tag in checks.yml (job web-e2e) to mcr.microsoft.com/playwright:v$have-noble"
+            exit 1
           fi
-          for attempt in 1 2 3; do
-            if timeout 240 npm --workspace @protoagent/web exec -- $cmd; then
-              exit 0
-            fi
-            echo "::warning::playwright install attempt $attempt stalled/failed; retrying…"
-            sleep 20
-          done
-          echo "::error::playwright install failed after 3 attempts"
-          exit 1
       - name: Run E2E smoke (built SPA vs mock backend)
         # Builds the web app, then drives it with Playwright against the
         # deterministic mock backend (apps/web/e2e/mock-server.mjs) — no Python,

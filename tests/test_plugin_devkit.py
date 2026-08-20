@@ -255,6 +255,54 @@ def test_file_tools_roundtrip_and_fence(tmp_path):
     assert "✗" in tools["plugin_list_files"].invoke({"plugin_id": "no-such-plugin"})
 
 
+def test_plugin_read_file_paginates_by_line(tmp_path):
+    """plugin_read_file offset/limit (#2840) — line-addressed pagination matching
+    core read_file (#2709): defaults return a small file whole, an explicit window
+    returns exactly those lines with a continuation hint naming the next offset."""
+    mod = _load_devkit_module(tmp_path)
+    out_root = tmp_path / "out"
+    out_root.mkdir()
+    scaffold = mod._build_scaffold_tool({"target_dir": str(out_root)})
+    _run(scaffold.ainvoke({"name": "Pager", "enable": False}))
+
+    tools = {t.name: t for t in mod._build_file_tools({"target_dir": str(out_root)})}
+    body = "".join(f"line {n}\n" for n in range(1, 11))  # 10 numbered lines
+    tools["plugin_write_file"].invoke({"plugin_id": "pager", "path": "notes.md", "content": body})
+
+    # defaults: the whole small file in one call, verbatim (backward compatible)
+    assert tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "notes.md"}) == body
+
+    # an explicit window returns exactly those lines + the next offset to continue
+    page = tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "notes.md", "offset": 3, "limit": 4})
+    assert page.startswith("line 3\nline 4\nline 5\nline 6\n")
+    assert "line 2" not in page and "line 7\n" not in page
+    assert "showing lines 3-6 of 10" in page and "offset=7" in page
+
+    # limit alone pages from the top and still names the continuation
+    page = tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "notes.md", "limit": 2})
+    assert page.startswith("line 1\nline 2\n") and "offset=3" in page
+
+    # a window ending exactly at EOF reports the range but no further offset
+    tail = tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "notes.md", "offset": 9})
+    assert tail.startswith("line 9\nline 10\n")
+    assert "showing lines 9-10 of 10" in tail and "offset=" not in tail
+
+    # past-EOF offsets refuse instead of returning an empty success
+    assert "✗ offset 42" in tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "notes.md", "offset": 42})
+
+    # a file bigger than the read cap paginates instead of char-truncating: the
+    # first default call cuts at a line boundary and names the offset that reads
+    # the remainder in full
+    long_line = "x" * 1000
+    big = "".join(f"{long_line} {n}\n" for n in range(1, 61))  # ~60KB, 60 lines
+    tools["plugin_write_file"].invoke({"plugin_id": "pager", "path": "big.md", "content": big})
+    first = tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "big.md"})
+    assert "… ✂ (showing lines 1-" in first and "of 60" in first
+    next_offset = int(first.rsplit("offset=", 1)[1].split(" ", 1)[0])
+    rest = tools["plugin_read_file"].invoke({"plugin_id": "pager", "path": "big.md", "offset": next_offset})
+    assert rest.endswith(f"showing lines {next_offset}-60 of 60)")
+
+
 def test_test_plugin_runs_the_scaffolded_suite(tmp_path):
     """test_plugin (ADR 0096 D3) actually subprocess-runs the with_tests suite of a
     freshly scaffolded plugin — the loop's verify step, green from birth."""
@@ -419,7 +467,7 @@ def _acp_raw(name, tmp_path, **extra):
 
 def test_resolve_coder_degrades_honestly(monkeypatch, tmp_path):
     """develop_plugin's delegate resolution (ADR 0096 D5): no roster / wrong name /
-    wrong type / ambiguity each name the fix instead of guessing."""
+    wrong type each name the fix instead of guessing; an explicit pick still wins."""
     import plugins.delegates as delegates_mod
 
     mod = _load_devkit_module(tmp_path)
@@ -440,10 +488,44 @@ def test_resolve_coder_degrades_honestly(monkeypatch, tmp_path):
         "_load_delegates_config",
         lambda: [_acp_raw("proto", tmp_path), _acp_raw("opus", tmp_path)],
     )
-    d, err = mod._resolve_coder(None)
-    assert d is None and "multiple acp delegates" in err
     d, err = mod._resolve_coder({"coder": "opus"})
     assert err is None and d.name == "opus"
+
+
+def test_resolve_coder_multi_default_picks_instead_of_refusing(monkeypatch, tmp_path, caplog):
+    """Several acp delegates + no plugin_devkit.coder must default-pick (a
+    `sonnet`/`claude-code`-named delegate, else first alphabetically) and log the
+    choice — the old refusal text reached the MODEL, which fell back to hand-writing
+    the plugin inline, defeating the heavy-build lane."""
+    import logging
+
+    import plugins.delegates as delegates_mod
+
+    mod = _load_devkit_module(tmp_path)
+
+    # No conventional name → first alphabetically ("opus" < "proto").
+    monkeypatch.setattr(
+        delegates_mod,
+        "_load_delegates_config",
+        lambda: [_acp_raw("proto", tmp_path), _acp_raw("opus", tmp_path)],
+    )
+    with caplog.at_level(logging.INFO, logger="protoagent.plugins.plugin_devkit"):
+        d, err = mod._resolve_coder(None)
+    assert err is None and d.name == "opus"
+    assert any("defaulting to 'opus'" in r.message for r in caplog.records)
+
+    # A conventionally named coder beats alphabetical order.
+    monkeypatch.setattr(
+        delegates_mod,
+        "_load_delegates_config",
+        lambda: [_acp_raw("aardvark", tmp_path), _acp_raw("zeta-sonnet", tmp_path)],
+    )
+    d, err = mod._resolve_coder(None)
+    assert err is None and d.name == "zeta-sonnet"
+
+    # The explicit config pick still overrides the heuristic.
+    d, err = mod._resolve_coder({"coder": "aardvark"})
+    assert err is None and d.name == "aardvark"
 
 
 class _FakeAcpAdapter:
@@ -476,7 +558,9 @@ class _FakeAcpAdapter:
 def test_develop_plugin_dispatches_scoped_and_rejoins_the_spine(monkeypatch, tmp_path):
     """develop_plugin (ADR 0096 D5): the coder is dispatched with a per-call scoped
     copy (workdir = the plugin dir, manage_git off, fresh session, teardown), then
-    the host re-joins the spine at test (+ reload when live)."""
+    the host re-joins the spine at test (+ reload when live). No BackgroundManager
+    wired here → the inline degrade path (the ADR 0050 fallback), so the whole
+    spine runs in the call."""
     import plugins.delegates as delegates_mod
     from plugins.delegates import adapters as adapters_mod
     from runtime.state import STATE
@@ -492,6 +576,7 @@ def test_develop_plugin_dispatches_scoped_and_rejoins_the_spine(monkeypatch, tmp
     fake = _FakeAcpAdapter()
     monkeypatch.setitem(adapters_mod.ADAPTERS, "acp", fake)
     monkeypatch.setattr(STATE, "graph", None, raising=False)
+    monkeypatch.setattr(STATE, "background_mgr", None, raising=False)
 
     dev = mod._build_develop_tool({"target_dir": str(out_root)})
     out = _run(dev.ainvoke({"plugin_id": "coded-up", "instructions": "add a frobnicate tool"}))
@@ -505,6 +590,62 @@ def test_develop_plugin_dispatches_scoped_and_rejoins_the_spine(monkeypatch, tmp
     assert "done: implemented the feature" in out
     assert "— test_plugin —" in out  # re-joined the spine at *test*
     assert "reload skipped (no live agent)" in out
+
+
+class _FakeBgManager:
+    """Records spawn_work calls WITHOUT running the work — the test asserts the
+    detach happened, then awaits the captured coroutine itself to see the spine."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def spawn_work(self, *, origin_session, kind, description, work, detail="", **kw):
+        self.calls.append(
+            {"origin_session": origin_session, "kind": kind, "description": description, "detail": detail, "work": work}
+        )
+        return "job-dev42"
+
+
+def test_develop_plugin_backgrounds_through_the_manager(monkeypatch, tmp_path):
+    """develop_plugin with a BackgroundManager wired (ADR 0050): the call returns a
+    job handle IMMEDIATELY — no coder dispatch inline — and the queued work, when it
+    runs, does the coder dispatch AND still re-joins the spine at test (+ reload)."""
+    import plugins.delegates as delegates_mod
+    from plugins.delegates import adapters as adapters_mod
+    from runtime.state import STATE
+
+    mod = _load_devkit_module(tmp_path)
+    out_root = tmp_path / "out"
+    out_root.mkdir()
+    scaffold = mod._build_scaffold_tool({"target_dir": str(out_root)})
+    _run(scaffold.ainvoke({"name": "Bg Built", "enable": False}))
+
+    monkeypatch.setattr(delegates_mod, "_load_delegates_config", lambda: [_acp_raw("proto", tmp_path)])
+    fake = _FakeAcpAdapter()
+    monkeypatch.setitem(adapters_mod.ADAPTERS, "acp", fake)
+    monkeypatch.setattr(STATE, "graph", None, raising=False)
+    mgr = _FakeBgManager()
+    monkeypatch.setattr(STATE, "background_mgr", mgr, raising=False)
+
+    dev = mod._build_develop_tool({"target_dir": str(out_root)})
+    out = _run(dev.ainvoke({"plugin_id": "bg-built", "instructions": "add a frobnicate tool"}))
+
+    # Returned immediately with the handle — the coder was NOT dispatched inline.
+    assert "job-dev42" in out and "END my turn" in out
+    assert "delegate" not in fake.calls
+    assert len(mgr.calls) == 1
+    call = mgr.calls[0]
+    assert call["kind"] == "develop"
+    assert "proto" in call["description"] and "bg-built" in call["description"]
+    assert call["detail"] == "add a frobnicate tool"
+
+    # The queued work, when awaited, dispatches the coder and re-joins the spine.
+    result = _run(call["work"]())
+    assert fake.calls["forgot"] and fake.calls["torn"]
+    assert fake.calls["delegate"].workdir == str(out_root / "bg-built")
+    assert "done: implemented the feature" in result
+    assert "— test_plugin —" in result
+    assert "reload skipped (no live agent)" in result
 
 
 def test_develop_plugin_without_delegate_names_the_fix(monkeypatch, tmp_path):
@@ -733,7 +874,9 @@ def test_update_plugin_tool_routes_bundles_to_update_bundle(monkeypatch):
     async def fake_update(bid, **kw):
         from types import SimpleNamespace
 
-        return SimpleNamespace(install=_install_result(installed_ids=["a", "b"]), removed_members=["dead"], retire_error=None)
+        return SimpleNamespace(
+            install=_install_result(installed_ids=["a", "b"]), removed_members=["dead"], retire_error=None
+        )
 
     monkeypatch.setattr(op, "update_bundle", fake_update)
     out = _run(mod.update_plugin.ainvoke({"plugin_id": "stacky"}))
@@ -888,7 +1031,9 @@ def test_live_apply_guards_a_raising_reload(monkeypatch):
 
     monkeypatch.setattr(STATE, "graph", object(), raising=False)
     monkeypatch.setattr(STATE, "plugin_meta", [{"id": "demo", "loaded": True}], raising=False)
-    monkeypatch.setattr(STATE, "graph_config", types.SimpleNamespace(plugins_enabled=["demo"], plugins_disabled=[]), raising=False)
+    monkeypatch.setattr(
+        STATE, "graph_config", types.SimpleNamespace(plugins_enabled=["demo"], plugins_disabled=[]), raising=False
+    )
 
     fake = types.ModuleType("server.agent_init")
 
@@ -923,3 +1068,100 @@ def test_ops_applier_guards_a_raising_reload(monkeypatch):
     applier = mod._ops_applier()
     ok, msgs = applier(None)
     assert ok is False and any("reload exploded" in str(m) for m in msgs)
+
+
+# ── skill frontmatter gate (#reddit incident): execution + verification ────────
+
+GOOD_SKILL = "---\nname: greeter\ndescription: Say hello when asked.\n---\n\n# Greeter\nSay hi.\n"
+BAD_SKILL = "# Greeter\nSay hi — no frontmatter at all.\n"
+
+
+def test_write_file_refuses_a_skill_the_loader_would_skip(tmp_path):
+    """Execution-side gate: a frontmatter-less SKILL.md is refused AT WRITE TIME with
+    the loader's own reasons (graph.skills.loader.skill_md_problems — single source,
+    not a mirror), so the silent skills-never-load failure can't be authored."""
+    mod = _load_devkit_module(tmp_path)
+    out_root = tmp_path / "plugins"
+    out_root.mkdir()
+    _run(mod._build_scaffold_tool({"target_dir": str(out_root)}).ainvoke({"name": "Sk", "enable": False}))
+    tools = {t.name: t for t in mod._build_file_tools({"target_dir": str(out_root)})}
+
+    out = tools["plugin_write_file"].invoke(
+        {"plugin_id": "sk", "path": "skills/greeter/SKILL.md", "content": BAD_SKILL}
+    )
+    assert "✗" in out and "SKIPPED by the skills loader" in out and "frontmatter" in out
+    assert not (out_root / "sk" / "skills" / "greeter" / "SKILL.md").exists()  # refused = not written
+
+    ok = tools["plugin_write_file"].invoke(
+        {"plugin_id": "sk", "path": "skills/greeter/SKILL.md", "content": GOOD_SKILL}
+    )
+    assert ok.startswith("✓")
+    # OUTSIDE skills/ the loader may never read it — write succeeds with an
+    # advisory instead of a false refusal (fixtures/vendored copies stay writable).
+    noted = tools["plugin_write_file"].invoke({"plugin_id": "sk", "path": "fixtures/SKILL.md", "content": BAD_SKILL})
+    assert noted.startswith("✓") and "frontmatter problems" in noted
+    assert (out_root / "sk" / "fixtures" / "SKILL.md").exists()
+    # a non-skill markdown file is untouched by the gate
+    assert (
+        tools["plugin_write_file"]
+        .invoke({"plugin_id": "sk", "path": "notes.md", "content": "# no frontmatter"})
+        .startswith("✓")
+    )
+
+
+def test_verify_plugin_lints_skills_before_pytest(tmp_path, monkeypatch):
+    """Verification-side gate: _verify_plugin (test_plugin + develop_plugin's re-join)
+    fails loudly on a skill the loader would skip — naming the file — instead of
+    letting a green pytest suite hide a skill that never loads."""
+    mod = _load_devkit_module(tmp_path)
+    pdir = tmp_path / "p"
+    (pdir / "skills" / "broken").mkdir(parents=True)
+    (pdir / "skills" / "broken" / "SKILL.md").write_text(BAD_SKILL)
+    (pdir / "skills" / "fine").mkdir(parents=True)
+    (pdir / "skills" / "fine" / "SKILL.md").write_text(GOOD_SKILL)
+    monkeypatch.setattr(mod, "_run_pytest", lambda p: "✓ 3 passed")
+
+    out = mod._verify_plugin(pdir)
+    assert out.startswith("✗ skill lint")
+    assert "skills/broken/SKILL.md" in out and "frontmatter" in out
+    assert "skills/fine" not in out  # only the broken one is named
+    assert "✓ 3 passed" in out  # pytest still runs and reports
+
+    # nested grouping folders are discovered recursively, like the loader
+    (pdir / "skills" / "group" / "deep").mkdir(parents=True)
+    (pdir / "skills" / "group" / "deep" / "SKILL.md").write_text(BAD_SKILL)
+    assert "skills/group/deep/SKILL.md" in mod._verify_plugin(pdir)
+
+    # outside skills/: advisory note, never a ✗ failure (fixture/vendored copies)
+    (pdir / "fixtures").mkdir()
+    (pdir / "fixtures" / "SKILL.md").write_text(BAD_SKILL)
+    (pdir / "skills" / "broken" / "SKILL.md").write_text(GOOD_SKILL)
+    (pdir / "skills" / "group" / "deep" / "SKILL.md").write_text(GOOD_SKILL)
+    out = mod._verify_plugin(pdir)
+    assert not out.startswith("✗") and "note: SKILL.md outside skills/" in out
+    assert "fixtures/SKILL.md" in out and "✓ 3 passed" in out
+
+    (pdir / "fixtures" / "SKILL.md").write_text(GOOD_SKILL)
+    assert mod._verify_plugin(pdir) == "✓ 3 passed"  # clean lint adds nothing
+
+
+def test_skill_md_problems_is_the_loader_contract(tmp_path):
+    """The validator and the loader agree BY EXECUTION, not just construction:
+    for every case, problems == [] exactly when parse_skill_md returns a skill."""
+    from graph.skills.loader import parse_skill_md, skill_md_problems
+
+    cases = [
+        GOOD_SKILL,
+        BAD_SKILL,
+        "---\nname: x\n---\nbody",  # missing description
+        "---\n- not\n- a\n- mapping\n---\nbody",  # frontmatter not a mapping
+        "---\nname: [unclosed\n---\nbody",  # YAML error
+        "---\nname: ok\ndescription: fine\nslash: go\n---\nbody",  # extras are fine
+    ]
+    for i, text in enumerate(cases):
+        f = tmp_path / f"case{i}" / "SKILL.md"
+        f.parent.mkdir()
+        f.write_text(text, encoding="utf-8")
+        problems = skill_md_problems(text)
+        parsed = parse_skill_md(f)
+        assert (parsed is not None) == (problems == []), (i, problems, parsed)

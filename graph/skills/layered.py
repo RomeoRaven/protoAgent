@@ -29,14 +29,28 @@ class LayeredSkillsIndex:
 
     # ── read: the always-on index — commons ∪ private, de-duped (private wins) ──
     def skill_summaries(self, limit: int | None = None) -> list[dict]:
-        """Union the two tiers' lightweight ``{name, description, slash}`` index,
-        de-duped by name (private shadows commons), then cap at ``limit``. Ordering
-        follows each backend (most-recently-used first); private entries lead."""
+        """Union the two tiers' lightweight summary index, de-duped by name
+        (private shadows commons), RE-SORTED on the backends' own key
+        (``last_used DESC, confidence DESC, name ASC``), then capped at ``limit``.
+
+        The re-sort is load-bearing (#2867): each backend sorts internally, but a
+        dict union is insertion-ordered — capping that let the commons tier's head
+        win every slot regardless of recency (and a private skill shadowing a
+        commons name inherited the COMMONS position)."""
         merged: dict[str, dict] = {}
-        for backend in (self._commons, self._private):  # private listed last → wins
+        for backend in (self._commons, self._private):  # private listed last → wins the VALUE
             for rec in backend.skill_summaries():
                 merged[rec["name"]] = rec
         rows = list(merged.values())
+        # Two stable passes: name ASC first, then the primary key DESC — the
+        # stable second pass preserves name order within equal primaries. (A
+        # single reversed composite with a negated-codepoint name key inverted
+        # the tiebreak for prefix pairs — "ab" sorted before "a".)
+        rows.sort(key=lambda r: str(r.get("name") or ""))
+        rows.sort(
+            key=lambda r: (str(r.get("last_used") or ""), float(r.get("confidence") or 0.0)),
+            reverse=True,
+        )
         return rows[:limit] if limit is not None else rows
 
     def discoverable_count(self) -> int:

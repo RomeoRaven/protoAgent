@@ -18,7 +18,8 @@ import { buildGoalSetBody, goalFormPayload } from "./goalForm";
 import { buildWatchCreateBody, watchFormPayload } from "./watchForm";
 import type { VerifierCatalog } from "../lib/types";
 import { modelChoices, modelFormPayload, modelPickerData, resolveModelArg, type ModelPickerData } from "./modelForm";
-import { promptNoteMarkdown } from "./promptView";
+import { openPromptViewer } from "./PromptViewer";
+import { historyLine, promptNoteMarkdown } from "./promptView";
 import { perfNoteMarkdown } from "./perfView";
 import { trajectoryNoteMarkdown } from "./trajectoryView";
 
@@ -170,27 +171,43 @@ registerSlashCommand({
   usage: "/prompt",
   run: (ctx) => {
     if (!ctx.sessionId) return false; // no session → fall through
-    // Honest framing (#2243): this is the prompt AS OF the last captured call —
-    // a true "next call" preview would need speculative retrieval (P3). The
-    // fetch is a local read, so no optimistic pending note (unlike /btw).
+    const sessionId = ctx.sessionId;
+    // Same surface as the message row's View prompt: when the latest captured
+    // call names its owning turn, open the FULL dialog (tabs, budget bars,
+    // history breakdown) — one prompt surface, not a second-class inline note.
+    // The note remains the degrade path: capture off, nothing captured yet, or
+    // a pre-task_id server (skew) — and there the #2843 history line rides
+    // along, raced against a 3s cap since request() has no timeout and a HUNG
+    // breakdown must not stall the note.
     void api
-      .promptLast(ctx.sessionId)
-      .then((res) => {
+      .promptLast(sessionId)
+      .then(async (res) => {
+        if (res.enabled && res.call?.task_id) {
+          openPromptViewer(res.call.task_id, sessionId);
+          return;
+        }
+        const bd = await Promise.race([
+          api.promptBreakdown(sessionId).catch(() => null),
+          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000)),
+        ]);
+        const history = bd?.found && bd.breakdown ? `\n\n${historyLine(bd.breakdown)}` : "";
         if (!res.enabled) {
           ctx.noteToThread(
-            "Prompt capture is off — enable `prompts.capture` in Settings ▸ Telemetry to record what each model call receives.",
+            "Prompt capture is off — enable `prompts.capture` in Settings ▸ Telemetry to record what each model call receives." +
+              history,
             { tone: "warning" },
           );
           return;
         }
         if (!res.call) {
           ctx.noteToThread(
-            "Nothing captured for this session yet — send a message first, then `/prompt` shows what the model received.",
+            "Nothing captured for this session yet — send a message first, then `/prompt` shows what the model received." +
+              history,
             { tone: "info" },
           );
           return;
         }
-        ctx.noteToThread(promptNoteMarkdown(res.call), { tone: "info" });
+        ctx.noteToThread(promptNoteMarkdown(res.call) + history, { tone: "info" });
       })
       .catch((e) => {
         ctx.noteToThread(`Prompt fetch failed — ${errMsg(e)}`, { tone: "danger" });

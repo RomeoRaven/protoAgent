@@ -777,3 +777,78 @@ async def test_a_failed_step_is_still_timed():
     res = await execute_workflow(_fanout_recipe(1), {}, run_step=run_step, max_concurrency=2)
     assert res["failed"]
     assert "s0" in res["timings"]  # you especially want to know how long a failure took
+
+
+# ── inputs-shape canonicalization (#2834) ─────────────────────────────────────
+# get() hands recipes verbatim to the Studio's edit loader, so every authored
+# shape must canonicalize to [{name, required, default?}] at the boundary.
+
+
+def test_registry_canonicalizes_mapping_inputs(tmp_path):
+    (tmp_path / "m.yaml").write_text(
+        "name: mapped\ninputs:\n  topic:\n    required: true\n    default: cats\n  tone:\n",
+        encoding="utf-8",
+    )
+    reg = WorkflowRegistry([str(tmp_path)])
+    got = reg.get("mapped")
+    assert got is not None
+    assert got["inputs"] == [
+        {"name": "topic", "required": True, "default": "cats"},
+        {"name": "tone", "required": False},
+    ]
+    # list() (the Studio catalog) sees them too — the mapping shape used to
+    # silently produce an empty inputs list here.
+    summary = next(r for r in reg.list() if r["name"] == "mapped")
+    assert [i["name"] for i in summary["inputs"]] == ["topic", "tone"]
+
+
+def test_registry_junk_inputs_degrade_to_empty(tmp_path):
+    (tmp_path / "j.yaml").write_text("name: junky\ninputs: just-a-string\n", encoding="utf-8")
+    reg = WorkflowRegistry([str(tmp_path)])
+    assert reg.get("junky")["inputs"] == []
+
+
+def test_registry_list_inputs_stay_canonical_and_nameless_drop(tmp_path):
+    (tmp_path / "l.yaml").write_text(
+        "name: listy\ninputs:\n  - name: topic\n    required: 1\n  - {required: true}\n  - not-a-dict\n",
+        encoding="utf-8",
+    )
+    reg = WorkflowRegistry([str(tmp_path)])
+    assert reg.get("listy")["inputs"] == [{"name": "topic", "required": True}]
+
+
+def test_registry_save_canonicalizes_inputs_on_disk(tmp_path):
+    reg = WorkflowRegistry([str(tmp_path)], writable_dir=str(tmp_path))
+    reg.save({"name": "saved", "inputs": {"topic": {"default": "x"}}, "steps": []})
+    import yaml as _yaml
+
+    on_disk = _yaml.safe_load((tmp_path / "saved.yaml").read_text(encoding="utf-8"))
+    assert on_disk["inputs"] == [{"name": "topic", "required": False, "default": "x"}]
+    assert reg.get("saved")["inputs"] == on_disk["inputs"]
+
+
+def test_canonicalization_preserves_annotations(tmp_path):
+    # Shape normalizes; vocabulary survives — type/description are the run
+    # form's field hints and an agent's semantic contract for the input.
+    (tmp_path / "a.yaml").write_text(
+        "name: annotated\ninputs:\n  fields:\n    type: object\n    description: form fields\n    required: true\n",
+        encoding="utf-8",
+    )
+    reg = WorkflowRegistry([str(tmp_path)])
+    row = reg.get("annotated")["inputs"][0]
+    assert row == {"name": "fields", "type": "object", "description": "form fields", "required": True}
+    # list() (the run form's source) carries them too
+    assert next(r for r in reg.list() if r["name"] == "annotated")["inputs"][0]["description"] == "form fields"
+
+
+def test_render_template_substitutes_structured_values_as_json():
+    from plugins.workflows.engine import render_template
+
+    out = render_template(
+        "fill: {{inputs.fields}} · from {{steps.prev.output}}",
+        {"fields": {"name": "Alice", "n": 2}},
+        {"prev": ["a", "b"]},
+    )
+    assert '{"name": "Alice", "n": 2}' in out
+    assert '["a", "b"]' in out
+    assert "'" not in out  # never Python repr
