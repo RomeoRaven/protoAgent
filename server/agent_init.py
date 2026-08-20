@@ -269,6 +269,7 @@ def _init_langgraph_agent(headless_setup: bool = False):
     STATE.plugin_tool_owner = _plugins.tool_plugins
     STATE.plugin_workflow_dirs = _plugins.workflow_dirs
     STATE.plugin_a2a_skills = _plugins.a2a_skills  # A2A card skills (#570)
+    STATE.plugin_a2a_handlers = _plugins.a2a_handlers  # deterministic skill ingress
     STATE.plugin_chat_commands = _plugins.chat_commands  # user-only /<name> control commands
     STATE.thread_id_resolver = _plugins.thread_id_resolver  # thread_id seam (#571)
     # A plugin may provide the knowledge backend (ADR 0031) — swap it in now (the
@@ -2277,6 +2278,7 @@ def _reload_langgraph_agent() -> tuple[bool, str]:
         # only holds once this list actually updates).
         STATE.thread_id_resolver = new_plugins.thread_id_resolver
         STATE.plugin_a2a_skills = new_plugins.a2a_skills
+        STATE.plugin_a2a_handlers = getattr(new_plugins, "a2a_handlers", {})
         STATE.plugin_workflow_dirs = new_plugins.workflow_dirs
         # Swapping STATE alone refreshes only the structured finalizer's view — the
         # SERVED card (route + SDK handler) was built once at boot and closed over.

@@ -93,6 +93,10 @@ def _cache_key(spec: dict) -> tuple:
         # for everyone (QA panel on #2145; env itself had the same latent gap).
         tuple(sorted((spec.get("env") or {}).items())),
         tuple(sorted(spec.get("env_remove") or ())),  # sorted: order-insensitive identity
+        # Optional caller-owned conversation discriminator. Empty preserves the
+        # historical one-client/session-per-launch signature; Room supplies a
+        # stable (agent, room, thread) key to isolate durable ACP context.
+        str(spec.get("conversation_key") or ""),
     )
 
 
@@ -173,6 +177,28 @@ async def evict_client(spec: dict) -> bool:
     except Exception:  # noqa: BLE001 — teardown is best-effort
         log.warning("[coding_agent/%s] close during evict failed", spec.get("name"), exc_info=True)
     return True
+
+
+async def evict_clients(spec: dict) -> bool:
+    """Terminate every cached conversation variant for one delegate spec.
+
+    ``conversation_key`` is the final cache-key element. Delegate removal has the
+    base saved config, not every Room thread key, so match the stable launch and
+    policy prefix and close only those clients. Idempotent and best-effort.
+    """
+    base = _cache_key({**spec, "conversation_key": ""})[:-1]
+    clients = []
+    for key in list(_CLIENTS):
+        if key[:-1] == base:
+            client = _CLIENTS.pop(key, None)
+            if client is not None:
+                clients.append(client)
+    for client in clients:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            log.warning("[coding_agent/%s] close during multi-evict failed", spec.get("name"), exc_info=True)
+    return bool(clients)
 
 
 async def forget_session(spec: dict) -> bool:

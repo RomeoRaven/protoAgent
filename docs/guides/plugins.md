@@ -116,6 +116,7 @@ a fork adds any of them as a plugin, never editing the core `server/` package:
 | `register_skill_dir(path)` | A `SKILL.md` directory (procedural memory) | graph build |
 | `register_workflow_dir(path)` | A directory of `*.yaml` workflow recipes | workflow-registry build |
 | `register_a2a_skill(spec)` | An A2A **card** skill (what the card advertises; optional structured output) | agent-card build |
+| `register_a2a_handler(skill_id, handler)` | Deterministic ingress for one A2A card skill. `handler(RequestContext) → list[Part]`; it runs before the model/tool loop while core retains durable task/status/artifact handling. The same plugin must own the advertised skill; collisions are first-wins | each matching A2A request; hot-reload aware |
 | `register_router(router, prefix=None)` | A FastAPI `APIRouter` | **mounted once** at init (default prefix `/plugins/<id>`) |
 | `register_surface(start, stop=None, name=None, reload=None)` | A background surface (a Discord-style gateway) | `start` in startup, `stop` in shutdown, `reload(cfg)` on config save |
 | `register_subagent(config)` | A `SubagentConfig` (a delegate) | added to `SUBAGENT_REGISTRY` |
@@ -133,15 +134,26 @@ a fork adds any of them as a plugin, never editing the core `server/` package:
 | `save_media(data, mime, meta=None)` | Persist a generated binary artifact (image/audio/video) into the **core media store** (#1929) → `MediaRef {id, url, path, mime}`. Embed `ref.url` in the tool's returned markdown (`![alt](url)`) and the console renders it inline — no plugin route needed. The URL carries a per-file HMAC signature so it works under a bearer gate; `media.public` / `media.retention_days` (core config) control exposure and pruning; broadcasts `media.saved` on the bus. Inbound is bridged too (#1969): chat image attachments are auto-saved at turn entry (except incognito) and named by media id in a `[attached-image refs]` note, so a tool that accepts media-id refs works on user attachments directly | any time (typically inside a tool) |
 
 ```python
+from a2a.types import Part
+
+async def greet_request(context):
+    return [Part(text=f"Hello: {context.get_user_input()}")]
+
 def register(registry):
     registry.register_tool(hello)
     registry.register_a2a_skill({"id": "greet", "name": "Greet", "description": "..."})
+    registry.register_a2a_handler("greet", greet_request)
     registry.register_router(_build_router())        # → GET /plugins/<id>/...
     registry.register_surface(_start, stop=_stop, name="my-surface")
     registry.register_subagent(_build_subagent())    # delegate via task/task_batch
     registry.register_mcp_server(_server_factory)    # a managed MCP server (e.g. an OAuth-gated surface)
     registry.register_thread_id_resolver(lambda md, sid: f"proj:{md.get('project')}:{sid}")
 ```
+
+The normal A2A HTTP authentication/origin gate still runs before a deterministic
+handler. A handler owns application-level validation and may return only A2A
+`Part` objects; raising fails the durable A2A task and never falls through to the
+model loop.
 
 #### Surfaces that resume their work across reloads {#surface-resume}
 

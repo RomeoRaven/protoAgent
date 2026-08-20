@@ -1106,6 +1106,7 @@ def _main():
             structured_finalizer=_structured_finalizer,
             context_meta_provider=_context_meta,
             stall_timeout_provider=_stall_timeout,
+            a2a_handler_provider=lambda: STATE.plugin_a2a_handlers,
         ),
         task_store=task_store,
         agent_card=a2a_card,

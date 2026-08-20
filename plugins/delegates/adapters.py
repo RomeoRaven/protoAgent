@@ -122,6 +122,7 @@ class Delegate:
     permissions: str = "auto"
     allow_kinds: list[str] = field(default_factory=list)
     deny_kinds: list[str] = field(default_factory=list)
+    conversation_key: str = ""  # per-call ACP session discriminator; never persisted in delegate config
     confirm: bool = False
     # acp managed git (ADR 0076): the framework owns branch/commit/push/PR; the
     # coder edits files only. Off by default — non-worktree setups keep the old
@@ -942,6 +943,7 @@ class AcpAdapter(Adapter):
             "permissions": d.permissions,
             "allow_kinds": d.allow_kinds,
             "deny_kinds": d.deny_kinds,
+            "conversation_key": d.conversation_key,
         }
 
     async def dispatch(
@@ -1032,9 +1034,9 @@ class AcpAdapter(Adapter):
         is reaped rather than left running — a plain cache ``pop`` forgets the
         handle but leaves the process alive. Returns True if a live client was
         closed; no-op (False) if none was started. Idempotent."""
-        from plugins.coding_agent import evict_client
+        from plugins.coding_agent import evict_clients
 
-        return await evict_client(self._spec(d))
+        return await evict_clients(self._spec(d))
 
     async def forget_session(self, d: Delegate) -> bool:
         """Forget this delegate's persisted ACP session so the next ``dispatch``

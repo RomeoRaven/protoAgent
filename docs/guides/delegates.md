@@ -14,6 +14,26 @@ This unifies what used to be three separate things — `peer_consult` (a2a),
 `code_with` (acp), and "no way to ask another model" — into one hot-swappable
 roster.
 
+### Programmatic dispatch from a plugin
+
+A server-side plugin can use the host service instead of importing the delegates
+plugin or ACP client internals:
+
+```python
+invoke = registry.host.invoke_delegate
+if invoke is None:
+    raise RuntimeError("no delegates configured")
+reply = await invoke("coder", "Review this room thread", "room:ao:thread-42")
+```
+
+The third argument is an optional ACP conversation key. It isolates the cached
+client and persisted ACP session for that stable conversation while preserving
+the configured delegate's command, workdir, secrets, and permission policy. A
+conversation key is refused for non-ACP delegates rather than silently ignored.
+Removing an ACP delegate closes every cached conversation variant for its exact
+launch/policy definition. The service is cleared on reload when no delegates
+remain, so a plugin cannot call a stale roster.
+
 Manage delegates three ways: the **console panel** (Workspace settings ▸
 Delegates), a **REST API**, or **config** — all hot-swappable (changes apply on
 the next turn, no restart). See [ADR 0025](/adr/0025-unified-delegate-registry-and-panel).

@@ -18,7 +18,7 @@ import sys
 import pytest
 
 import plugins.coding_agent as P
-from plugins.coding_agent import _make_permission
+from plugins.coding_agent import _cache_key, _make_permission, _session_id_path
 from plugins.coding_agent import acp_client
 from plugins.coding_agent.acp_client import (
     AcpClient,
@@ -960,6 +960,63 @@ def test_policy_custom_allow_deny_kinds():
 
 
 # ── client cache eviction / teardown ──────────────────────────────────────────
+
+
+def test_conversation_key_isolates_client_cache_and_persisted_session(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("infra.paths.instance_paths", lambda: SimpleNamespace(store=lambda _name: tmp_path))
+    base = {
+        "name": "hermes",
+        "command": "hermes-acp",
+        "args": [],
+        "workdir": "/srv/hub",
+        "permissions": "readonly",
+        "allow_kinds": [],
+        "deny_kinds": [],
+        "env": {},
+        "env_remove": [],
+    }
+    thread_a = {**base, "conversation_key": "room:ao:thread-a"}
+    thread_b = {**base, "conversation_key": "room:ao:thread-b"}
+
+    assert _cache_key(base) == _cache_key({**base, "conversation_key": ""})
+    assert _cache_key(thread_a) != _cache_key(thread_b)
+    assert _session_id_path(thread_a) != _session_id_path(thread_b)
+
+
+async def test_evict_clients_closes_every_conversation_variant_only():
+    base = {
+        "name": "hermes",
+        "command": "hermes-acp",
+        "args": [],
+        "workdir": "/srv/hub",
+        "permissions": "readonly",
+        "allow_kinds": [],
+        "deny_kinds": [],
+        "env": {},
+        "env_remove": [],
+    }
+    other = {**base, "name": "pla"}
+
+    class _FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    a, b, unrelated = _FakeClient(), _FakeClient(), _FakeClient()
+    P._CLIENTS[_cache_key({**base, "conversation_key": "room:ao:a"})] = a
+    P._CLIENTS[_cache_key({**base, "conversation_key": "room:ao:b"})] = b
+    P._CLIENTS[_cache_key({**other, "conversation_key": "room:ao:a"})] = unrelated
+    try:
+        assert await P.evict_clients(base) is True
+        assert a.closed is True and b.closed is True
+        assert unrelated.closed is False
+        assert _cache_key({**other, "conversation_key": "room:ao:a"}) in P._CLIENTS
+    finally:
+        P._CLIENTS.clear()
 
 
 async def test_evict_client_pops_and_closes():
