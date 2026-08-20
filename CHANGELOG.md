@@ -15,6 +15,382 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.142.1] - 2026-08-20
+
+### Fixed
+- **The Linux desktop release builds again (#2915).** The new webview smoke test spoke only weston 10's CLI; the release runner's weston 9 rejected it (`unknown backend "headless"`) and the all-or-nothing manifest design held the whole v0.142.0 desktop release. The smoke now version-gates its weston invocation, so both dialects boot the compositor.
+
+## [0.142.0] - 2026-08-20
+
+### Added
+- **The desktop app ships for Linux — `.AppImage` and `.deb` are on the download page (#2866).**
+  The Linux build compiled on every release but sat behind a notify-me signup pending a real
+  test of it. Tested: it runs clean on a normal desktop session, Wayland or X11. What held it
+  up was a WebKitGTK 2.52 crash that only fires where accelerated compositing can't initialize
+  — a bare `Xvfb`, some container/CI setups, X-forwarding or VNC without DRI3 — where the web
+  process sends `EnterAcceleratedCompositingMode`, the UI process never built a backing store,
+  and `AcceleratedBackingStore::update()` dereferences null ([WebKit #321683](https://bugs.webkit.org/show_bug.cgi?id=321683),
+  patch proposed upstream, not landed). Not our bundle: v0.132.0, v0.139.0
+  and v0.140.0 all crash identically on WebKitGTK 2.52.3 and are all clean on 2.44.0. On a
+  headless box, run the server directly (`python -m server --ui console`) and use the browser
+  console; `apps/desktop/README.md` has the detail, including why the webview can't be
+  smoke-tested under `xvfb-run` in CI.
+
+- **CI renders the desktop app now, and the marketing site builds on PRs (#2878).** Two blind
+  spots, both found the hard way. (1) Nothing ever rendered the webview — `live_smoke.py --bin`
+  boots the frozen sidecar only — so an app that died seconds after the console painted shipped
+  green through six launches (#2866). `scripts/desktop_webview_smoke.sh` now boots the bundled
+  AppImage against a real GL compositor (weston headless + Mesa llvmpipe; no GPU or DRI device
+  needed, so a stock hosted runner can do it), waits for `/app` to serve, and soaks to catch the
+  crash that lands *after* first paint. Wired into `desktop-build.yml`'s Linux leg. Don't run it
+  under `xvfb-run`: on a machine whose EGL loader can select a GPU vendor driver that's the
+  default outcome, and the smoke fails for reasons unrelated to the build.
+  (2) `sites/marketing` was only ever built by the deploy workflow on push to main, so a broken
+  download page or lockfile took main and the live site down together instead of failing the PR
+  — `marketing-check.yml` now builds it on any PR that touches it and asserts the page links a
+  real installer for all three platforms.
+
+- **Expose fleet autostart in Settings UI (#2880).** The "Box runtime" chip on the Fleet
+  panel now includes the `fleet.autostart` field, so operators can declare which members
+  start on boot without editing YAML.
+
+- **Archetype repos have a registry.** `config/plugin-directory.yaml` gains an `archetype_repos:` section listing the published archetype repos, and a guard test cross-checks the shipped archetype catalog against it — a renamed or retired repo now fails CI instead of drifting through docs and examples.
+
+### Changed
+- **"Stack" is retired — archetype is the one product noun (ADR 0100 amendment).** A *bundle* is the mechanism (how a pinned plugin set installs); an *archetype* is who an agent starts as (persona + optional bundle); a published bundle repo shipping an `archetype:` block is an *archetype repo*, named `<name>-archetype`. The published repos were renamed (`cowork-archetype`, `social-archetype`, `project-manager-archetype`, `design-system-archetype`, `portfolio-manager-archetype`, `product-archetype`) — GitHub redirects keep existing pins and old install URLs working, and the shipped archetype catalog now points at the new names.
+
+### Fixed
+- **The download page no longer offers Android and ChromeOS an x86_64 desktop binary (#2866).**
+  Both match `/linux/` in the user-agent, so the OS sniffer classified them as Linux. That was
+  harmless while Linux had no build to hand out; now that it does, they fall to the
+  unknown-platform block instead. The page also refuses to build unless the resolved release
+  carries the Linux installers, the same guarantee the macOS and Windows links already had
+  (#2514) — a visible download link can't 404.
+
+- **Turn telemetry includes subagent model calls (#2872).** The `task` tool now propagates each subagent's model, token usage, and cost into the parent turn's telemetry, so per-turn cost reporting no longer undercounts delegated work.
+
+- **The marketing site deploys from its lockfile again (#2875).** `sites/marketing/package-lock.json`
+  was missing `react`, `react-dom` and `scheduler` — `@protolabsai/ui` declares them as peer
+  dependencies, npm auto-installs peers, and the lockfile was never regenerated after that. Nobody
+  noticed because `marketing-deploy.yml` ran `npm install`, which silently re-resolves rather than
+  failing; the cost was that two deploys of identical source could ship different transitive
+  versions, and `npm ci` was broken for anyone working on the site locally. The lockfile is now
+  complete (98 entries added — the peers plus the platform-optional esbuild/sharp binaries — with
+  **zero** existing versions changed) and the workflow installs with `npm ci`, so what deploys is
+  what's locked. npm 11 is pinned once up front for both the marketing and docs installs.
+
+- **Plugins see the live host config at register time on cold boot
+  (#2877).** The lazy host fields (`HOST.config`, `HOST.apply_settings`)
+  are now wired before plugin loading — previously a plugin that captured
+  `registry.host.config` in `register()` silently got nothing on a fresh
+  boot while working after a console hot-enable, so it broke on the next
+  app restart (the promptlab playground incident).
+
+- **Fix flaky Windows test for workflow run ordering (#2883).** Added a monotonic sequence tie-breaker to `WorkflowRunStore.recent()` so same-tick `updated_at` values sort deterministically.
+
+- **The Artifact panel works again on bearer-gated instances (#2884).** Since
+  the shell moved out of the inline view HTML into a real `shell.js` (#2822),
+  every auth-gated instance — the whole desktop fleet — silently 401'd the
+  script (a `<script src>` carries no Authorization header) and every panel
+  rendered the "No artifact yet" empty state while the artifacts sat on disk
+  and every data route worked. The file is now declared public chrome like
+  the vendor modules beside it, and two regression tests guard the class:
+  every same-origin subresource a plugin view page references must be
+  auth-exempt, and the artifact chrome is asserted reachable header-less
+  through the real gate while the data routes stay gated.
+
+- **Plugin view panels surface persistent fetch failures (#2885).** The artifact panel now shows an error strip after 3+ consecutive poll failures instead of the misleading empty-state. Documented the error-vs-empty-state rule in the plugin views guide.
+
+- **`delegate_to`'s A2A poll loop speaks 1.0 now (#2892).** The GetTask poll
+  sent the v0.3 legacy `{"name": …}` param under a 1.0 version header — a 1.0
+  peer rejects it, so a delegation to any peer that answers asynchronously
+  (non-terminal task from SendMessage) could never converge. Latent because
+  protoAgent peers answer inline; real against other A2A implementations. The
+  poll now sends `{"id": …}` (pinned against the SDK proto), and a peer that
+  parks on a human-input interrupt fails fast with a legible "parked waiting
+  for operator input" error instead of burning the full poll timeout and then
+  claiming the peer was still running.
+
+- **Unknown `/commands` are refused inline instead of becoming agent turns (#2893).**
+  A chat message like `/foobar` whose token resolves to no registered slash command
+  (goal, lifecycle, plugin command, workflow, subagent, or user-facing skill) now
+  short-circuits with `Unknown command /foobar. Type / to see available commands.`
+  — in both the streaming and collected turn paths — instead of silently falling
+  through to a normal agent turn on the raw command text. Messages that merely
+  contain a `/` (paths like `/home/user/file.txt`, prose like `use uv/pip`) still
+  reach the agent unchanged.
+
+- **Delegation questions now flow back to the calling agent — and can be answered.**
+  When an A2A delegate parks on operator input (`TASK_STATE_INPUT_REQUIRED`),
+  `delegate_to` no longer fails the dispatch: it returns the delegate's question
+  together with the parked task id and instructions to resume. A new
+  `resume_task_id` parameter sends the answer back into the parked task (A2A
+  resume: `SendMessage` with the parked `taskId` + `contextId`), so agent X can
+  answer agent Y's question — or escalate it up its own chain via `ask_human`
+  first — and the delegated work continues where it stopped instead of starting
+  over. Resuming a task that already finished reports its result; resuming one
+  that is still running is refused legibly.
+
+- **Discover no longer advertises `coding_agent` as an enableable plugin.** It's a built-in library that ships through `delegates` (always on) — its catalog row carried an enable instruction that could never work. The row is now marketing-site-only, and a tightened guard test keeps any future manifest-less directory row out of the in-app catalog.
+
+- **A delegate that parks its question inline no longer gets mistaken for an answer.**
+  protoAgent peers answer `SendMessage` synchronously — a HITL park comes back inline
+  with the task already `input-required` and the question in `status.message`. The
+  dispatch's inline-text early-return handed that bare question back as if it were the
+  delegate's final reply, losing the parked task id and the resume protocol with it.
+  The park is now detected before the early-return, so the calling agent gets the
+  ⏸ question + resume handle in this (the common) shape too. Caught by a live
+  end-to-end smoke; the poll-path unit test alone missed it.
+
+- **Parallel delegations no longer corrupt each other (#2899).** Firing `delegate_to` at the same coder more than once at a time interleaved every prompt into one ACP session — each caller got doubled fragments of someone else's turn, which read as coder failure and invited wasted re-dispatches. The client now serializes turns itself: concurrent callers queue, bounded by their own timeout.
+
+- **Renamed archetype repos never double up in the new-agent picker.** Archetype
+  catalog rows can carry `bundle_aliases` (former URLs of a since-renamed bundle
+  repo); an agent that installed `cowork-stack`/`social-stack`/
+  `project-manager-stack`/`design-system-stack` before the `*-archetype` renames
+  keeps a single picker card after upgrading.
+
+- **The marketing site no longer tells you to enable `coding_agent` (or `delegates`).** Built-in library/always-on rows now render "built-in" instead of an `enable … in plugins.enabled` CTA that could never work — the app-hidden (`app: false`) directory rows carry an explicit `enable: null` through to the site overlay.
+
+## [0.141.0] - 2026-08-20
+
+### Added
+- **The Docs view can point at any folder of markdown (#2842).** A new
+  `docs.root` config (also in the plugin's Settings) redirects the bundled
+  Docs plugin — reader view, ⌘K search, and the `docs_search`/`docs_read`
+  agent tools — at an operator-chosen directory tree of `.md` files:
+  runbooks, a team wiki, project notes, anything. Custom trees group by
+  top-level directory (no Diátaxis assumed), hidden directories are skipped,
+  and a symlink escaping the root is not a doc. Empty `root` keeps today's
+  bundled protoAgent docs byte-for-byte; a bad path falls back loudly instead
+  of losing the Docs view to a typo.
+
+- **`scripts/context_audit.py` — one command for "why is this thread at
+  121k" (#2844).** Sizes a chat thread's checkpoint into honest categories
+  (assistant text, tool args counted exactly once, tool results, injected
+  memory frames) and joins telemetry to expose the fixed per-call overhead
+  no checkpoint contains. Backed by `graph/message_blocks.py`, the now-
+  canonical message walk — `content` already contains the `tool_use`
+  blocks, and summing it with `tool_calls` double-counts.
+
+- **The prompt viewer explains the whole window (#2847).** `/prompt` and the
+  View-prompt dialog now include the conversation-history breakdown from the
+  #2844 context audit — categories, top tool-arg producers, honest "(as of
+  now)" framing — via a new cheap `GET /api/prompts/breakdown` that works
+  even with prompt capture off.
+
+- **The plugin devkit enforces the SKILL.md contract (#2854).** A
+  frontmatter-less skill file is now refused at write time with the
+  loader's own reasons, and `test_plugin`/`develop_plugin` lint every
+  skill before pytest — a green suite can no longer ship skills that
+  silently never load. Backed by `graph.skills.loader.skill_md_problems`,
+  the loader's contract as a reusable validator.
+
+- **A turn now provably survives the operator walking away (#2857, Swap &
+  Resume S0).** Characterization tests pin the server-owned-turn contract: an
+  A2A streaming turn whose SSE consumer disconnects mid-flight (agent switch,
+  reload, dropped connection) keeps running to completion, and the tool frames
+  it emits while nobody is watching land in the durable task history — the
+  ground the reattach work builds on. No behavior change; the contract was
+  true but untested.
+
+- **Switching agents (or reloading) mid-turn now reattaches to the live turn
+  (#2858, Swap & Resume S1).** The console calls A2A `tasks/resubscribe` on
+  return — the primitive was served and fleet-proxied all along, just never
+  called — replaying the durable task snapshot (every tool card, reasoning
+  step, and text the agent produced while nobody was watching) and then
+  streaming the live tail like a normal turn. A cold agent behind the fleet
+  proxy is retried with backoff instead of freezing the bubble forever on the
+  first 409, a turn that ended while detached replays once and finalizes, and
+  the reconcile ceiling now covers the proxy's full 600s turn budget instead
+  of two minutes.
+
+- **Your half-written message survives an agent switch (#2860, Swap & Resume
+  S3).** The composer draft and any queued mid-turn steers persist per session
+  (per tab, per agent) and come back after a swap or reload; a draft or ready
+  attachments prompt before the page unloads instead of vanishing silently —
+  while a merely-streaming turn never blocks navigation, because turns are
+  server-owned and reattach on return. Scroll position is remembered too:
+  returning to a transcript you'd scrolled back through restores your place,
+  and near-bottom keeps the default pin-to-latest.
+
+- **A session's chat history is finally readable server-side (#2865, ADR 0104,
+  Swap & Resume S5).** `GET /api/chat/sessions/{id}/turns` serves the durable
+  A2A task store's record of the session — every turn's status, artifacts, and
+  per-frame history (tool calls, HITL prompts) in the same wire shapes the
+  console's stream dispatcher already replays, in-flight turns included.
+  Until now the rendered history lived only in one browser's localStorage; a
+  second device saw an empty chat for a session the server knew everything
+  about. The console keeps localStorage as its primary store — this is the
+  recovery and multi-device substrate.
+
+### Changed
+- **The workflow builder becomes "Outline & Focus" (#2835).** Authoring was one
+  flat form — the recipe's shape and its prompts interleaved in a single
+  column. Now the outline (step cards with live validation dots, the
+  parallelism lanes, workflow/inputs/output entries) sits beside a focus
+  editor where the selected step's prompt fills the pane, `depends_on` is a
+  row of toggle pills, chips insert at the cursor, and inputs get a real
+  editor for the typed-input contract (type, description, default). Server
+  validation lands on the card that's wrong instead of a list at the bottom.
+  Panel-sized via container query: narrow panels get a horizontal outline
+  strip above the editor.
+
+- **Builder flow polish — reorder, duplicate, Save & test (#2839, S3 of the
+  Outline & Focus redesign).** Step cards drag-reorder by their grip handle: a
+  strict linear chain is re-threaded so execution order follows the new visual
+  order, while any other DAG keeps its `depends_on` untouched (the lanes stay
+  the truth). The focused step gains a Duplicate action (unique `-copy` id,
+  focus follows the clone), and "Save & test" saves the recipe and lands on
+  the run form with it selected and its input defaults seeded — the tightest
+  author-iterate loop.
+
+- **The workflow builder is a node-and-edge DAG canvas (#2846).** Steps are
+  nodes (validation dot, gate marker, subagent badge), `depends_on` is a real
+  edge you drag to create (cycle attempts refused) or delete to remove, and
+  node positions persist on the recipe — the n8n/ComfyUI shape, because a
+  graph you can see is the easiest to understand. Selecting a node opens the
+  editor beside the canvas; variable insertion became a grouped picker
+  offering inputs and **upstream** step outputs only (a non-ancestor's output
+  renders empty at run time, so the old chip wall was offering a mistake).
+  Includes the interim outline-era improvements: Save & test, duplicate step,
+  typed-input editing, per-step live validation.
+
+- **Workflows is opt-in again (#2848).** v0.140.0 shipped the plugin enabled
+  by default; that default is reverted — the engine, tools, and Studio load
+  only when an operator adds `workflows` to `plugins.enabled`, as before.
+  Nothing else from the GA batch changes. **Migration:** an instance that
+  updated through v0.140.0 and wants to keep workflows needs
+  `plugins.enabled: [workflows]` after this release.
+
+- **The console stops lying about busy agents after a swap (#2859, Swap &
+  Resume S2).** Sessions whose last assistant message is still streaming with
+  a durable task id come back **active and locked** on load — every such tab
+  reattaches (not just the focused one), the composer stays locked, and Stop
+  stays visible, so a returning operator can't accidentally fire a second
+  concurrent turn into a session whose first turn is still running. The event
+  bus's replay cursor now survives navigation too (per-agent, per-tab), so
+  retained topics — an approval request raised while you were away, a
+  background completion — replay on return instead of vanishing with the page.
+
+- **Swapping agents can't kill a working agent, and abandoned streams unwind
+  (#2862, Swap & Resume S4).** The warm-cap's LRU-eviction grace now defaults
+  to five minutes — and the hub refreshes a member's recency on every turn
+  start through the proxy, so the grace window tracks agents that are
+  *working*, not just ones the operator clicked (rapid A→B→A switching could
+  previously evict A mid-turn; `grace_seconds: 0` restores pure LRU). Proxied
+  SSE streams gain a 30s comment keepalive: a stream whose viewer walked away
+  now unwinds within one keepalive period instead of parking on the member
+  until its next write. The plugin-views guide documents the proxy's 20s read
+  lane (and the SSE/WS exemptions) for plugin authors.
+
+- **`/prompt` opens the prompt dialog (#2863).** The slash command now
+  opens the same full viewer the message row's View prompt action opens —
+  tabs, budget bars, history breakdown — instead of an inline note; the
+  note remains only as the degrade path when nothing is captured.
+
+### Fixed
+- **A mapping-authored `inputs:` no longer breaks the Studio (#2834).** Recipes
+  written with the natural YAML shape — `inputs: {topic: {required: true}}` —
+  crashed the builder's edit loader (taking the whole Studio view with it) and
+  silently emptied `{{inputs.x}}` validation, because `get()` handed the raw
+  YAML through. The registry now canonicalizes inputs to the documented
+  `[{name, required, default?}]` at load and save (so files converge on the
+  canonical shape), and the builder normalizes defensively so an unexpected
+  shape can never blank the surface again.
+
+- **Fs tools see mid-turn project registrations (#2836).** The fenced filesystem tools resolved their project registry from a snapshot captured at graph build, so a project registered by `onboard_project` stayed invisible until the next turn. The tool closures now resolve the registry through the live `HOST.config` seam on every call — `list_projects`, `list_dir`, `read_file`, `find_files`, and `search_files` see a just-onboarded project on the same turn, and `onboard_project` itself merges against the live registry, so a second onboarding in one turn no longer drops the first. Both live reads are guarded: an unwired, raising, or `None`-returning seam falls back to the build-time config instead of failing the tool call.
+
+- **`develop_plugin` no longer blocks the chat turn — and no longer refuses a
+  multi-delegate roster (#2838).** The ACP coder dispatch used to run inline for
+  up to 15 minutes with nothing visible; it now runs as a detached background
+  job (ADR 0050) — the tool returns a job handle immediately and the coder +
+  `test_plugin` + reload report drains back automatically on a later turn (the
+  spine is preserved; lean/CLI contexts without a manager still fall back to
+  the inline path). And with several `acp` delegates configured and
+  `plugin_devkit.coder` unset, `_resolve_coder` now default-picks one (a
+  `sonnet`/`claude-code`-named delegate, else the first alphabetically) and
+  logs the choice, instead of returning an operator-addressed refusal that
+  pushed the model into hand-writing the plugin inline.
+
+- **`plugin_read_file` paginates by line (#2840).** The devkit read tool now
+  takes optional `offset` (1-based line) and `limit` (max lines), matching the
+  core `read_file` addressing from #2709: a small file still comes back whole
+  in one call, and a truncated result names the next offset to continue from —
+  so build loops re-read just the region they're editing instead of burning
+  the full read cap after every write.
+
+- **fetch_url strips page chrome from HTML (#2841).** `_extract_text_from_html` now decomposes banner `<header>` elements while keeping article/section headers — a header survives inside `<main>`/`<article>`/`<section>`/`<aside>`, and on pages without those wrappers only banner-position (direct child of `<body>`) or nav-wrapping headers are treated as chrome, so a title/byline `<header>` nested in a plain `<div>` is preserved. It also strips ARIA-landmark chrome (`role="navigation"`, `"banner"`, `"contentinfo"`) and `sidebar`/`menu`/`breadcrumb` widgets by exact class token (`menu-item`/`sidebar-open` survive); pages without `<main>`/`<article>` fall back to `role="main"` and then the dominant `<div>` by text (never narrowing past a kept `<header>`/`<h1>`) before the whole `<body>` — so div-soup pages (Reddit-style) no longer drag global nav and sidebars into context. The no-bs4 regex fallback is unchanged.
+
+- **Web E2E's Playwright apt install waits for the dpkg lock (#2845).** The
+  runner's unattended-upgrades kept winning an apt-lock race against
+  `playwright install`, flaking 2 PRs in 2 days with exit 100 ("Could not get
+  lock"). The install step now drops `DPkg::Lock::Timeout "120"` into
+  `apt.conf.d` — the only channel that reaches the apt-get calls Playwright
+  runs internally — and primes the package lists with an explicit lock-wait
+  `apt-get update` before the retry loop, so stragglers are waited out instead
+  of failing the attempt instantly.
+
+- **Subagents declaring `tools: []` now run as text-only transforms** instead of
+  being refused with "No tools available". A declared-empty toolset is a
+  deliberate design (edit/summarize/classify passes — including model-pinned
+  passes against gateway lanes that reject tools-bearing requests); tools that
+  were declared but resolve to none still return the actionable error.
+
+- **The Web E2E job stops fighting apt (#2864).** It now runs in the
+  pinned Playwright container image — browsers and system deps
+  preinstalled, zero apt at runtime — retiring the lock-contention flake
+  that failed five runs in two days, with a guard that names the exact
+  tag bump whenever `@playwright/test` moves.
+
+- **`skills.top_k: 0` means "list none" again (#2869).** The #2868
+  identities-never-drop index would still emit every skill name when the
+  operator turned the index off entirely — off now means off.
+
+- **The desktop updater can no longer install a stale release (#2832).** The
+  update dialog could sit open while newer builds became Latest, and "Install
+  and Relaunch" would install the originally-offered version. Confirming now
+  re-checks the endpoint first: still-Latest installs the fresh object
+  (current URLs and signature), a superseded offer re-prompts against the
+  version that will actually install (never a silent swap), a withdrawn offer
+  says so, and a failed re-check installs nothing rather than gambling on a
+  stale download. Direct-to-Latest behavior and signature verification are
+  unchanged.
+
+## [0.140.0] - 2026-08-19
+
+### Added
+- **Workflow runs are now observable while they execute (#2829).** The workflows
+  plugin gains `POST /{name}/start` (validate up front, run detached, poll the
+  run record), a live per-step record (step graph snapshot, running/done/failed
+  lifecycle with timestamps and engine seconds, final envelope), run history
+  (`GET /runs/all` + `GET /runs/{run_id}`), a `POST /validate` endpoint for live
+  builder validation, background resume with an up-front precheck, and
+  terminal-run retention (`max_runs`, default 200). Grounds the Studio's live
+  run timeline; the sync run route and `run_workflow` tool are unchanged.
+
+### Changed
+- **The Studio actually shows a workflow run happening (#2830).** Run starts a
+  detached run and watches it live — per-step status with durations, outputs
+  expanding as they land, an inline gate card for `gate: human` pauses, and a
+  History list that reopens any past run in the same timeline. The builder can
+  now EDIT an existing recipe, toggle operator gates, set input defaults, insert
+  `{{…}}` template refs from chips, and shows the server's validation errors
+  live while authoring; the recipe's parallelism renders as DAG lanes.
+
+- **Workflows is GA — the plugin ships enabled by default (#2831).** The engine,
+  the `run_workflow`/`save_workflow` tools, and the Studio console surface now
+  light up out of the box instead of requiring `plugins.enabled: [workflows]`.
+  Opting out is `plugins.disabled: [workflows]`.
+
+### Fixed
+- **The chat model dropdown no longer needs a Settings visit to fill in
+  (#2828).** The composer mounts once for the app's lifetime, so its boot-time
+  settings-schema fetch could race the server (graph still compiling, provider
+  probes empty) and the menu then sat frozen on a one-model fallback until
+  Settings ▸ Model happened to refetch the shared cache. The menu now refetches
+  on open whenever the cached schema is stale or carries no model options.
+
 ## [0.139.0] - 2026-08-18
 
 ### Added

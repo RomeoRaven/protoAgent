@@ -402,8 +402,71 @@ export type SecretsTestResult = {
 export type WorkflowSummary = {
   name: string;
   description: string;
-  inputs: { name: string; required: boolean; default?: unknown }[];
-  steps: { id: string; subagent: string; depends_on: string[] }[];
+  inputs: { name: string; required: boolean; default?: unknown; type?: string; description?: string }[];
+  steps: { id: string; subagent: string; depends_on: string[]; gate?: string }[];
+};
+
+// The FULL recipe document (GET /{name}/recipe) — what the builder loads to EDIT:
+// prompts, output template, gates. `/list` is the summary shape above.
+export type WorkflowRecipe = {
+  name: string;
+  description?: string;
+  version?: number;
+  inputs?: { name: string; required?: boolean; default?: unknown; type?: string; description?: string }[];
+  steps: {
+    id: string;
+    subagent: string;
+    prompt: string;
+    depends_on?: string[] | string;
+    gate?: string;
+    timeout?: number;
+    /** Builder canvas position — unmanaged authoring metadata, engine-inert. */
+    ui?: { x: number; y: number };
+  }[];
+  output?: string;
+  max_concurrency?: number;
+};
+
+export type WorkflowRunStatus = "running" | "done" | "failed" | "paused";
+
+export type WorkflowStepMeta = {
+  status?: "running" | "done" | "failed";
+  started_at?: string;
+  finished_at?: string;
+  seconds?: number;
+};
+
+// One run's durable record (GET /runs/{run_id}) — the Studio polls this while a
+// detached run executes (POST /{name}/start) and reads it back as history. `steps`
+// is the recipe's graph at start time, so the timeline renders even after the
+// recipe is edited or deleted.
+export type WorkflowRunRecord = {
+  run_id: string;
+  recipe_name: string;
+  inputs: Record<string, unknown>;
+  steps: { id: string; subagent: string; depends_on: string[]; gate?: string }[];
+  step_outputs: Record<string, string>;
+  step_meta: Record<string, WorkflowStepMeta>;
+  status: WorkflowRunStatus;
+  pending_step: string | null;
+  created_at?: string;
+  updated_at?: string;
+  output?: string;
+  failed?: string[];
+  degraded?: string[];
+};
+
+// History summaries (GET /runs/all) — every recorded run, newest first.
+export type WorkflowRunSummary = {
+  run_id: string;
+  recipe_name: string;
+  status: WorkflowRunStatus;
+  pending_step?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  steps_total: number;
+  steps_done: number;
+  failed: string[];
 };
 
 export type WorkflowRunResult = {
@@ -1230,6 +1293,9 @@ export type PromptSection = {
 };
 export type PromptCall = {
   call_index: number;
+  // The owning A2A turn — "" on the /preview synthesis and pre-#2388 subagent
+  // rows; optional for skew with servers predating the /prompt-dialog change.
+  task_id?: string;
   ts: string;
   model: string;
   // wire_differs/wire (#2527): what the call ACTUALLY carried when a provider
@@ -1245,6 +1311,18 @@ export type PromptCall = {
   // #2527 — provider delivery note on the preview (how the text ships on this wire).
   delivery?: string;
   usage: PromptCallUsage;
+};
+
+// The /api/prompts/breakdown payload (#2843): what a session's HISTORY is made
+// of — checkpoint-sized categories (tool args counted exactly once), per-tool
+// totals, and the biggest single blocks. Token figures are chars//4 estimates.
+export type PromptBreakdown = {
+  total_est_tokens: number;
+  message_count: number;
+  categories: Record<string, number>;
+  tool_call_args: Record<string, number>;
+  tool_results: Record<string, { est_tokens: number; calls: number }>;
+  top_blocks: { est_tokens: number; kind: string; preview: string }[];
 };
 
 // The /api/prompts/{task_id} payload (#2388 P3: subagents + prev are additive;
@@ -1327,7 +1405,7 @@ export type FleetStatus = { agents: FleetAgent[] };
 export type DiscoveredAgent = { name: string; url: string; host: string; port: number };
 
 export type Archetype = {
-  id: string; // "basic"/"custom", or a bundle id e.g. "product-stack"
+  id: string; // "basic"/"custom", or a bundle id e.g. "project-manager-archetype"
   label: string;
   icon: string; // lucide-react icon name
   blurb: string;

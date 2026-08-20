@@ -158,12 +158,21 @@ def _build_middleware(
     # is active, so skills work even on a KB-less agent (the store is None-tolerant).
     _skills_index = skills_index if config.skills_enabled else None
     if (config.knowledge_middleware and knowledge_store) or _skills_index is not None:
+        # ~2% of the model window as CHARS (tokens*4) for the skills index —
+        # Codex-style ceiling; 8KB when no window is reported (#2867).
+        try:
+            from graph.model_window import context_window_for
+
+            _skills_window = context_window_for(config)
+        except Exception:  # noqa: BLE001 — no profile → the 8KB fallback
+            _skills_window = None
         middleware.append(
             KnowledgeMiddleware(
                 knowledge_store if config.knowledge_middleware else None,
                 top_k=config.knowledge_top_k,
                 skills_index=_skills_index,
                 skills_top_k=config.skills_top_k,
+                skills_index_chars=int(_skills_window * 0.02 * 4) if _skills_window else 8192,
                 inject_namespaces=config.knowledge_inject_namespaces,
                 inject_min_trust=config.knowledge_inject_min_trust,
             )
@@ -402,6 +411,72 @@ def _subagent_tools(sub_config, tool_map: dict) -> list:
     return [tool_map[name] for name in sub_config.tools if name in tool_map and name not in HITL_TOOL_NAMES]
 
 
+def _extract_subagent_usage(messages, *, subagent_type: str, fallback_model: str = "") -> list[dict]:
+    """Per-model-call usage rows from a finished sub-graph's message list (#2872).
+
+    One row per ``AIMessage`` carrying ``usage_metadata`` (LangChain stamps it on
+    every model reply; ``stream_usage=True`` in graph/llm.py guarantees it on
+    streamed calls too), in the shape the executor's turn accumulator already
+    sums — ``{input_tokens, output_tokens, cache_read_input_tokens,
+    cache_creation_input_tokens, cost_usd, model}`` — plus a ``subagent_type``
+    tag so the accumulator can keep delegated calls out of the LEAD thread's
+    context-window fill while still billing their spend. The model is the
+    per-reply routed name when the gateway reports one, else ``fallback_model``
+    (the pinned/aux resolution) — so a model-pinned subagent attributes to ITS
+    model, not the lead's. Never raises: telemetry must never break a delegation.
+    """
+    from observability import pricing
+
+    rows: list[dict] = []
+    for msg in messages:
+        try:
+            if not isinstance(msg, AIMessage):
+                continue
+            usage = getattr(msg, "usage_metadata", None)
+            if not isinstance(usage, dict) or not usage:
+                continue
+            details = usage.get("input_token_details") or {}
+            row = {
+                "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                "output_tokens": int(usage.get("output_tokens", 0) or 0),
+                "cache_read_input_tokens": int(details.get("cache_read", 0) or 0),
+                "cache_creation_input_tokens": int(details.get("cache_creation", 0) or 0),
+            }
+            model = (getattr(msg, "response_metadata", None) or {}).get("model_name") or fallback_model or "model"
+            row["cost_usd"] = pricing.cost_usd(model, row)
+            row["model"] = model
+            row["subagent_type"] = subagent_type
+            rows.append(row)
+        except Exception:  # noqa: BLE001 — a malformed message must not kill the delegation
+            continue
+    return rows
+
+
+async def _emit_subagent_usage(usage_rows: list[dict]) -> None:
+    """Surface a delegation's collected usage rows onto the parent turn's stream (#2872).
+
+    Dispatched from the ``task``/``task_batch`` TOOL BODY as custom ``usage``
+    events: the tool body runs under the lead graph's own callback context, so
+    ``astream_events`` surfaces them reliably — unlike the sub-graph's model
+    events, whose contextvar-propagated callbacks don't survive every delegation
+    path. ``_run_turn_stream`` translates each into the same ``("usage", …)``
+    frame the executor already accumulates, so the turn's models list, token
+    sums, and cost_usd include delegated work. Best-effort: no run context
+    (unit tests, the manual console runner) is not an error.
+    """
+    if not usage_rows:
+        return
+    try:
+        from langchain_core.callbacks import adispatch_custom_event
+
+        for row in usage_rows:
+            await adispatch_custom_event("usage", dict(row))
+    except Exception:  # noqa: BLE001 — telemetry must never break a turn
+        import logging
+
+        logging.getLogger(__name__).debug("[subagent] usage rows not dispatched to the turn stream", exc_info=True)
+
+
 async def _run_subagent(
     *,
     config,
@@ -412,6 +487,7 @@ async def _run_subagent(
     subagent_type: str,
     truncate: int | None = None,
     parent_task_id: str | None = None,
+    usage_sink: list[dict] | None = None,
 ) -> str:
     """Run a single subagent delegation and return its output text.
 
@@ -421,6 +497,10 @@ async def _run_subagent(
     ``parent_task_id`` is the delegating ``task``/``task_batch`` tool-call id; when
     set, every event the subagent emits is tagged with it so the console can nest
     the subagent's own tool cards under the delegation card.
+    ``usage_sink`` (when given) receives one usage row per model call the
+    sub-graph made — extended IN PLACE as soon as the sub-graph settles, so rows
+    already collected survive a later failure — letting the callers bill
+    delegated work to the parent turn's telemetry (#2872).
     """
     sub_config = SUBAGENT_REGISTRY.get(subagent_type)
     if not sub_config:
@@ -436,8 +516,15 @@ async def _run_subagent(
         prompt = sub_config.default_prompt
 
     sub_tools = _subagent_tools(sub_config, tool_map)
-    if not sub_tools:
+    if not sub_tools and getattr(sub_config, "tools", None):
+        # The subagent DECLARED tools and none resolved — a misconfiguration
+        # (denylisted / not bound on this instance), not a text-only design.
         return f"Error: No tools available for subagent '{subagent_type}'."
+    # A subagent whose config declares tools=[] is a deliberate TEXT-ONLY
+    # transform (edit/summarize/classify passes) — legal, and load-bearing for
+    # model-pinned passes whose backing lane rejects tools-bearing requests
+    # (e.g. a creative-tuned vLLM lane with supports_function_calling: false).
+    # The agent below runs with an empty toolset: one model call, text out.
 
     # Subagent model: per-subagent override → routing.aux_model → main model.
     sub_model = _resolve_aux_model(config, getattr(sub_config, "model", ""))
@@ -561,6 +648,21 @@ async def _run_subagent(
                 hard_stop = True
 
         messages = result.get("messages", [])
+
+        # Bill the delegation's model calls to the parent turn (#2872): the
+        # sub-graph is its own `create_agent`, so its usage never reliably reaches
+        # the parent executor's accumulator through the stream. Each AIMessage in
+        # the final state carries its call's `usage_metadata` — extract rows NOW,
+        # in place, so a GraphRecursionError salvage still bills and rows survive
+        # any failure below.
+        if usage_sink is not None:
+            usage_sink.extend(
+                _extract_subagent_usage(
+                    messages,
+                    subagent_type=subagent_type,
+                    fallback_model=sub_model or getattr(config, "model_name", ""),
+                )
+            )
 
         # The delegation's answer is the subagent's last AIMessage with content —
         # not "any message with content" (which could surface a raw tool dump) and
@@ -801,6 +903,11 @@ def _build_task_tools(config: LangGraphConfig, all_tools: list[BaseTool], backgr
                 "continue with other work in the meantime."
             )
 
+        # Delegated model-call usage rows, billed to the parent turn's telemetry
+        # (#2872). `_run_subagent` extends the sink in place, so rows collected
+        # before a late failure still bill.
+        usage_rows: list[dict] = []
+
         # Auto-background (ADR 0051): a foreground delegation that overruns the budget
         # transparently detaches so it can't freeze the turn. Off unless BACKGROUND_AUTO_S>0.
         auto_s = _auto_background_seconds()
@@ -815,10 +922,12 @@ def _build_task_tools(config: LangGraphConfig, all_tools: list[BaseTool], backgr
                     subagent_type=subagent_type,
                     truncate=None,
                     parent_task_id=tool_call_id,
+                    usage_sink=usage_rows,
                 )
             )
             done, _pending = await asyncio.wait({inline}, timeout=auto_s)
             if inline in done:
+                await _emit_subagent_usage(usage_rows)
                 try:
                     return inline.result()
                 except SubagentError as e:
@@ -858,6 +967,7 @@ def _build_task_tools(config: LangGraphConfig, all_tools: list[BaseTool], backgr
                 subagent_type=subagent_type,
                 truncate=None,
                 parent_task_id=tool_call_id,
+                usage_sink=usage_rows,
             )
         )
         delegations.register(session_id, tool_call_id, deleg, label=description)
@@ -886,6 +996,10 @@ def _build_task_tools(config: LangGraphConfig, all_tools: list[BaseTool], backgr
             )
         finally:
             delegations.unregister(session_id, tool_call_id)
+            # Bill delegated model calls to the parent turn (#2872). No-op (no
+            # await) when the sink is empty — incl. the CancelledError re-raise
+            # path, where the cancelled sub-graph never reached extraction.
+            await _emit_subagent_usage(usage_rows)
 
     @tool
     async def task_batch(
@@ -973,6 +1087,10 @@ def _build_task_tools(config: LangGraphConfig, all_tools: list[BaseTool], backgr
             )
 
         sem = asyncio.Semaphore(max_concurrency)
+        # One shared sink across the fan-out (#2872): appends from concurrent
+        # delegations are safe (single event loop), and a failed task's rows —
+        # extended in place before the failure — still bill.
+        usage_rows: list[dict] = []
 
         async def _one(spec: dict) -> str:
             if not isinstance(spec, dict):
@@ -992,12 +1110,14 @@ def _build_task_tools(config: LangGraphConfig, all_tools: list[BaseTool], backgr
                         subagent_type=spec.get("subagent_type", "researcher"),
                         truncate=truncate,
                         parent_task_id=tool_call_id,
+                        usage_sink=usage_rows,
                     )
                 except SubagentError as e:
                     # One failed delegation is reported inline; the batch goes on.
                     return f"Error: {e}"
 
         results = await asyncio.gather(*(_one(s) for s in tasks), return_exceptions=True)
+        await _emit_subagent_usage(usage_rows)
 
         parts = []
         for i, res in enumerate(results, start=1):
@@ -1253,9 +1373,7 @@ def create_agent_graph(
     # so it can run compose_context(record=False) speculatively. Stamped like bound_tools —
     # consumers read what's BOUND rather than re-deriving and drifting.
     agent.system_prompt_parts = list(prompt_parts)
-    agent.knowledge_middleware = next(
-        (m for m in middleware if m.__class__.__name__ == "KnowledgeMiddleware"), None
-    )
+    agent.knowledge_middleware = next((m for m in middleware if m.__class__.__name__ == "KnowledgeMiddleware"), None)
     return agent
 
 

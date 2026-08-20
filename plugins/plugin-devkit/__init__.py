@@ -19,16 +19,21 @@ agent-facing half + the live-enable that needs the running graph.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re as _re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Annotated, Any
 
 from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
 
 from graph.plugins import scaffold
 from graph.subagents.config import SubagentConfig
+
+log = logging.getLogger("protoagent.plugins.plugin_devkit")
 
 # Captured at register() so the scaffold tools can broadcast on the event bus (ADR 0039) —
 # the devkit dogfoods its own lesson.
@@ -309,7 +314,7 @@ def _build_scaffold_bundle_tool(config: dict | None):
         enabled: list[str] | None = None,
     ) -> str:
         """Scaffold a plugin BUNDLE (ADR 0040) — a ``protoagent.bundle.yaml`` that
-        names a set of plugins to install + enable together (like the PM stack).
+        names a set of plugins to install + enable together (like the Project Manager archetype).
 
         ``members`` is a list of ``{id, url, ref}`` (a git plugin) or
         ``{id, builtin: true}`` (one that ships with protoAgent); omit it for a
@@ -366,10 +371,18 @@ def _build_file_tools(config: dict | None) -> list:
         return f"{pdir}:\n" + "\n".join(rows)
 
     @tool
-    def plugin_read_file(plugin_id: str, path: str) -> str:
+    def plugin_read_file(plugin_id: str, path: str, offset: int = 1, limit: int | None = None) -> str:
         """Read a file inside a plugin's dir (relative path, e.g. ``__init__.py``).
         This is how you inspect a plugin you're iterating on — pair with
-        ``plugin_write_file`` + ``reload_plugins``."""
+        ``plugin_write_file`` + ``reload_plugins``.
+
+        ``offset``/``limit`` are LINE numbers (``offset=1`` is the first line):
+        the result is up to ``limit`` lines starting at ``offset``, the same
+        addressing as the core ``read_file``. Leave both at their defaults and
+        a file that fits the read cap comes back whole in one call, exactly as
+        before. A truncated result names the next offset to pass, so in a
+        build loop you re-read just the region you're editing instead of the
+        whole file after every write."""
         try:
             pdir = _plugin_dir(plugin_id, target_dir)
             target = _resolve_member(pdir, path)
@@ -378,9 +391,46 @@ def _build_file_tools(config: dict | None) -> list:
         if not target.is_file():
             return f"✗ no file {path!r} in {plugin_id!r} — plugin_list_files shows what's there"
         text = target.read_text(errors="replace")
-        if len(text) > _READ_CAP:
-            return text[:_READ_CAP] + f"\n… ✂ truncated ({len(text)} chars total)"
-        return text
+        offset = max(1, offset)
+        explicit_limit = None if limit is None else max(1, limit)
+        lines = text.splitlines(keepends=True)
+        total = len(lines)
+        # offset=1 must stay valid for an empty file (total=0) — `max(total, 1)`
+        # keeps that floor without letting a larger offset slip past the check.
+        if offset > max(total, 1):
+            return f"✗ offset {offset} is past the end of {path!r} ({total} lines)"
+        start = offset - 1
+        wanted = lines[start:] if explicit_limit is None else lines[start : start + explicit_limit]
+        # Char safety net independent of `limit` — always include at least one
+        # line (cut short if it alone blows the cap) so a pathologically long
+        # single line still makes progress instead of returning nothing.
+        selected: list[str] = []
+        chars = 0
+        line_truncated = False
+        for ln in wanted:
+            if selected and chars + len(ln) > _READ_CAP:
+                break
+            if not selected and len(ln) > _READ_CAP:
+                selected.append(ln[:_READ_CAP])
+                line_truncated = True
+                break
+            selected.append(ln)
+            chars += len(ln)
+        returned = len(selected)
+        chunk = "".join(selected)
+        reached_eof = (start + returned) >= total
+        if offset == 1 and reached_eof and not line_truncated:
+            return chunk  # the common case, unchanged: the whole (small) file in one call
+        end_line = offset + returned - 1
+        note = f"\n… ✂ (showing lines {offset}-{end_line} of {total}"
+        if line_truncated:
+            note += f"; line {offset} is longer than {_READ_CAP} chars and was cut short"
+            if not reached_eof:
+                note += f"; call again with offset={end_line + 1} for the rest of the file"
+        elif not reached_eof:
+            note += f"; call again with offset={end_line + 1} for more"
+        note += ")"
+        return chunk + note
 
     @tool
     def plugin_write_file(plugin_id: str, path: str, content: str) -> str:
@@ -394,11 +444,35 @@ def _build_file_tools(config: dict | None) -> list:
             return f"✗ {e}"
         if len(content) > _WRITE_CAP:
             return f"✗ content too large ({len(content)} chars > {_WRITE_CAP}) — split the file"
+        # Execution-side skill gate: a SKILL.md the loader would SKIP is never worth
+        # writing — the failure is silent at load time (a warning in a log nobody
+        # reads), so refuse HERE with the loader's own reasons and let the author fix
+        # the frontmatter. Validated by the loader's single-source contract, not a mirror.
+        # Skill gate, scoped like _lint_skills: a SKILL.md under the conventional
+        # skills/ root that the loader would SKIP is refused (the failure is silent
+        # at load time); one elsewhere only loads if register_skill_dir names its
+        # root, so it writes with an advisory instead of a false refusal.
+        skill_note = ""
+        if target.name == "SKILL.md":
+            from graph.skills.loader import skill_md_problems
+
+            problems = skill_md_problems(content)
+            if problems:
+                rel = Path(path)
+                if rel.parts and rel.parts[0] == "skills":
+                    return (
+                        f"✗ {path} would be SKIPPED by the skills loader — not written. "
+                        f"Fix and re-write: {'; '.join(problems)}"
+                    )
+                skill_note = (
+                    " (note: this SKILL.md has frontmatter problems and would be skipped "
+                    f"if its root is registered as a skill dir: {'; '.join(problems)})"
+                )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return (
             f"✓ wrote {path} ({len(content)} chars) — call reload_plugins to make it live, "
-            f"test_plugin({plugin_id!r}) to run its suite"
+            f"test_plugin({plugin_id!r}) to run its suite" + skill_note
         )
 
     return [plugin_list_files, plugin_read_file, plugin_write_file]
@@ -428,6 +502,54 @@ def _test_interpreter() -> tuple[str | None, str | None]:
     if err:
         return None, err
     return pytest_interpreter()
+
+
+def _lint_skills(pdir: Path) -> str | None:
+    """Verification-side skill gate. Every ``SKILL.md`` under the conventional
+    ``skills/`` root — RECURSIVELY, matching the loader's ``**/SKILL.md``
+    discovery — must satisfy the loader's contract, or the plugin ships skills
+    that silently never load (the reddit-plugin failure: two frontmatter-less
+    skills, skipped with only a boot-log warning). A ``SKILL.md`` OUTSIDE
+    ``skills/`` only loads if ``register_skill_dir`` names its root — a thing
+    this static lint can't know — so problems there are ADVISORY notes, never
+    failures (a fixture or vendored copy must not fail the dev commands with a
+    verdict the loader would never issue). Returns the report, or ``None``."""
+    from graph.skills.loader import skill_md_problems
+
+    problems: list[str] = []
+    advisories: list[str] = []
+    for f in sorted(pdir.glob("**/SKILL.md")):
+        rel = f.relative_to(pdir).as_posix()
+        bucket = problems if rel.startswith("skills/") else advisories
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            bucket.append(f"{rel}: unreadable ({exc})")
+            continue
+        for p in skill_md_problems(text):
+            bucket.append(f"{rel}: {p}")
+    lines: list[str] = []
+    if problems:
+        lines.append(
+            "✗ skill lint: "
+            + str(len(problems))
+            + " problem(s) — these skills would NEVER load:\n"
+            + "\n".join(f"  - {p}" for p in problems)
+        )
+    if advisories:
+        lines.append(
+            "note: SKILL.md outside skills/ with frontmatter problems (loads only if "
+            "register_skill_dir names its root):\n" + "\n".join(f"  - {p}" for p in advisories)
+        )
+    return "\n".join(lines) if lines else None
+
+
+def _verify_plugin(pdir: Path) -> str:
+    """The verify step: skill lint FIRST (a broken skill fails fast and loudly),
+    then the pytest suite. One string, ✗-prefixed when anything failed."""
+    lint = _lint_skills(pdir)
+    out = _run_pytest(pdir)
+    return f"{lint}\n{out}" if lint else out
 
 
 def _run_pytest(pdir: Path) -> str:
@@ -501,7 +623,7 @@ def _build_test_tool(config: dict | None):
             pdir = _plugin_dir(plugin_id, target_dir)
         except ValueError as e:
             return f"✗ {e}"
-        return await asyncio.to_thread(_run_pytest, pdir)
+        return await asyncio.to_thread(_verify_plugin, pdir)
 
     return test_plugin
 
@@ -520,7 +642,9 @@ _DEVELOP_PROMPT = """You are implementing a protoAgent plugin. Your working dire
 directory — edit ONLY files inside it. The contract: `protoagent.plugin.yaml` is the
 manifest (data, read without importing); `__init__.py` exposes `register(registry)`
 (registry.register_tool / register_subagent / register_router / emit); `skills/` and
-`workflows/` are auto-discovered data. Keep it the smallest change that satisfies the
+`workflows/` are auto-discovered data. Every `skills/<name>/SKILL.md` MUST start with
+a `---` YAML frontmatter block carrying non-empty `name:` and `description:` — the
+loader silently skips the skill without it, and the host's verify step fails on it. Keep it the smallest change that satisfies the
 task. Write or update tests under `tests/` when the plugin has a suite. Do NOT run
 git, do NOT create commits or PRs, do NOT touch anything outside this directory —
 the host runs the tests and reloads the plugin after you finish.
@@ -529,11 +653,21 @@ Task:
 {instructions}"""
 
 
+# Default-pick preference when several acp delegates are configured and
+# `plugin_devkit.coder` is unset: a conventionally named coder wins (substring match,
+# in this order), else the first alphabetically. Documented in the tool docstring.
+_PREFERRED_CODERS = ("sonnet", "claude-code", "claude")
+
+
 def _resolve_coder(config: dict | None):
     """``(delegate, error)`` — the ACP coding delegate develop_plugin dispatches to.
     ``plugin_devkit.coder`` names one; otherwise the sole configured acp delegate
-    wins; anything else is an actionable error, mirroring the delegates plugin's own
-    degrade posture (no roster → say what to configure, don't guess)."""
+    wins, and with SEVERAL configured we default-pick one (``_PREFERRED_CODERS``
+    substring, else first alphabetically) and log the choice — the old "set
+    plugin_devkit.coder" refusal was operator guidance delivered to the MODEL, which
+    then hand-wrote the plugin inline, defeating the heavy-build lane. Only a truly
+    empty roster (or a bad explicit pick) is an error, mirroring the delegates
+    plugin's degrade posture (no roster → say what to configure, don't guess)."""
     try:
         from plugins.delegates import _load_delegates_config
         from plugins.delegates.registry import DelegateRegistry
@@ -549,31 +683,107 @@ def _resolve_coder(config: dict | None):
         if d.type != "acp":
             return None, f"{want!r} is type {d.type!r} — develop_plugin needs an `acp` coding delegate"
         return d, None
-    acp = [d for d in (reg.get(n) for n in reg.names()) if d is not None and d.type == "acp"]
-    if len(acp) == 1:
-        return acp[0], None
+    acp = sorted(
+        (d for d in (reg.get(n) for n in reg.names()) if d is not None and d.type == "acp"),
+        key=lambda d: d.name,
+    )
     if not acp:
         return None, (
             "no `acp` coding delegate configured — add one under `delegates:` "
             "(docs/guides/coding-agents.md) or set plugin_devkit.coder"
         )
-    return None, f"multiple acp delegates ({', '.join(d.name for d in acp)}) — set plugin_devkit.coder to pick one"
+    if len(acp) == 1:
+        return acp[0], None
+    pick = next((d for pref in _PREFERRED_CODERS for d in acp if pref in d.name.lower()), acp[0])
+    log.info(
+        "[plugin-devkit] multiple acp delegates (%s) and plugin_devkit.coder unset — defaulting to %r "
+        "(set plugin_devkit.coder to override)",
+        ", ".join(d.name for d in acp),
+        pick.name,
+    )
+    return pick, None
+
+
+async def _develop_and_verify(coder, adapter, scoped, prompt: str, timeout: float, plugin_id: str, pdir: Path) -> str:
+    """The coder dispatch + the spine re-join at *test* (D5): verify, then hot-swap.
+
+    This is the body of a develop_plugin job — it runs DETACHED under the background
+    manager when one is wired (ADR 0050) and inline only in the lean/CLI/test
+    fallback, so a 15-minute coder run never holds a chat turn open either way."""
+    from plugins.delegates.adapters import DelegateError
+
+    try:
+        await adapter.forget_session(scoped)  # fresh session — no stale memory of prior runs
+    except Exception:  # noqa: BLE001 — best-effort; a stale session must not block the build
+        pass
+    try:
+        reply = await asyncio.wait_for(adapter.dispatch(scoped, prompt, timeout=timeout), timeout)
+    except asyncio.TimeoutError:
+        return f"✗ coder timed out after {int(timeout)}s — split the task or raise the delegate's timeout_s"
+    except DelegateError as e:
+        return f"✗ coder dispatch failed: {e}"
+    finally:
+        try:
+            await adapter.teardown(scoped)  # reap the workdir-scoped subprocess
+        except Exception:  # noqa: BLE001 — never let teardown mask the result
+            pass
+
+    reply = (reply or "").strip()
+    if len(reply) > _CODER_REPLY_CAP:
+        reply = reply[:_CODER_REPLY_CAP] + " … ✂"
+    lines = [f"✓ coder ({coder.name}) finished on {plugin_id!r}:", reply or "(no reply text)", ""]
+
+    # Re-join the spine at *test* (D5): verify, then hot-swap.
+    lines.append("— test_plugin —")
+    lines.append(await asyncio.to_thread(_verify_plugin, pdir))
+
+    from runtime.state import STATE
+
+    if getattr(STATE, "graph", None) is None:
+        lines.append("— reload skipped (no live agent) — call enable_plugin when running")
+        return "\n".join(lines)
+    meta = _plugin_meta(plugin_id)
+    if meta is not None and meta.get("enabled"):
+        from server.agent_init import _apply_settings_changes
+
+        ok, msgs = await asyncio.to_thread(_apply_settings_changes)  # D9: off the loop
+        fresh = _plugin_meta(plugin_id)
+        if not ok:
+            lines.append(f"— reload failed: {'; '.join(msgs)}")
+        elif fresh is not None and not fresh.get("loaded"):
+            lines.append(f"— reloaded, but it FAILED to load: {_failure_detail(fresh)}")
+        elif fresh is not None and (warn := _zero_contribution_warning(fresh)):
+            lines.append(f"— reloaded, but {warn}")
+        else:
+            summary = _contribution_summary(fresh) if fresh else ""
+            lines.append(
+                "— reloaded: the coder's changes are live on the next turn" + (f" ({summary})" if summary else "")
+            )
+    else:
+        lines.append(f"— not enabled yet: call enable_plugin({plugin_id!r}) to load it live")
+    return "\n".join(lines)
 
 
 def _build_develop_tool(config: dict | None):
     target_dir = (config or {}).get("target_dir") or None
 
     @tool
-    async def develop_plugin(plugin_id: str, instructions: str) -> str:
+    async def develop_plugin(plugin_id: str, instructions: str, state: Annotated[Any, InjectedState] = None) -> str:
         """Hand a plugin's implementation to the configured ACP coding delegate — the
         heavy-build lane of the loop. The coder works directly in the plugin dir
         (scoped: fresh session, git lifecycle off), then the host automatically runs
         ``test_plugin`` and ``reload_plugins`` and reports all three results.
 
+        The build runs as a DETACHED background job (ADR 0050): you get a job handle
+        back immediately, and the full coder + test + reload report is delivered to
+        you automatically on a later turn. **After dispatching, END YOUR TURN** — do
+        not wait, poll, or hand-write the plugin yourself in the meantime.
+
         Use for substantial changes (multi-file logic, a real feature); for small
         edits prefer ``plugin_write_file`` yourself. Requires an ``acp`` delegate
-        (docs/guides/coding-agents.md); ``plugin_devkit.coder`` picks one when
-        several are configured."""
+        (docs/guides/coding-agents.md); with several configured,
+        ``plugin_devkit.coder`` names the pick, otherwise one is chosen for you
+        (a `sonnet`/`claude-code`-named delegate, else the first alphabetically)."""
         import dataclasses
 
         try:
@@ -586,7 +796,7 @@ def _build_develop_tool(config: dict | None):
         if coder is None:
             return f"✗ {err}"
 
-        from plugins.delegates.adapters import ADAPTERS, DelegateError
+        from plugins.delegates.adapters import ADAPTERS
 
         adapter = ADAPTERS["acp"]
         # The projectBoard dispatch pattern: a per-call scoped copy (registry
@@ -598,56 +808,43 @@ def _build_develop_tool(config: dict | None):
         scoped = dataclasses.replace(coder, **overrides)
         timeout = float(getattr(coder, "timeout_s", 0) or _DEVELOP_TIMEOUT_S)
         prompt = _DEVELOP_PROMPT.format(instructions=instructions.strip())
+
+        async def _work() -> str:
+            return await _develop_and_verify(coder, adapter, scoped, prompt, timeout, plugin_id, pdir)
+
         try:
-            await adapter.forget_session(scoped)  # fresh session — no stale memory of prior runs
-        except Exception:  # noqa: BLE001 — best-effort; a stale session must not block the build
-            pass
+            from runtime.state import STATE
+
+            mgr = getattr(STATE, "background_mgr", None)
+        except Exception:  # noqa: BLE001 — no runtime state (e.g. a unit test) → inline
+            mgr = None
+        if mgr is None:
+            # Lean/CLI/test context — the delegate_to degrade posture (ADR 0050):
+            # no manager to detach into, so inline is never worse than before.
+            return await _work()
+
         try:
-            reply = await asyncio.wait_for(adapter.dispatch(scoped, prompt, timeout=timeout), timeout)
-        except asyncio.TimeoutError:
-            return f"✗ coder timed out after {int(timeout)}s — split the task or raise the delegate's timeout_s"
-        except DelegateError as e:
-            return f"✗ coder dispatch failed: {e}"
-        finally:
-            try:
-                await adapter.teardown(scoped)  # reap the workdir-scoped subprocess
-            except Exception:  # noqa: BLE001 — never let teardown mask the result
-                pass
+            from tools.lg_tools import _session_id_from
 
-        reply = (reply or "").strip()
-        if len(reply) > _CODER_REPLY_CAP:
-            reply = reply[:_CODER_REPLY_CAP] + " … ✂"
-        lines = [f"✓ coder ({coder.name}) finished on {plugin_id!r}:", reply or "(no reply text)", ""]
-
-        # Re-join the spine at *test* (D5): verify, then hot-swap.
-        lines.append("— test_plugin —")
-        lines.append(await asyncio.to_thread(_run_pytest, pdir))
-
-        from runtime.state import STATE
-
-        if getattr(STATE, "graph", None) is None:
-            lines.append("— reload skipped (no live agent) — call enable_plugin when running")
-            return "\n".join(lines)
-        meta = _plugin_meta(plugin_id)
-        if meta is not None and meta.get("enabled"):
-            from server.agent_init import _apply_settings_changes
-
-            ok, msgs = await asyncio.to_thread(_apply_settings_changes)  # D9: off the loop
-            fresh = _plugin_meta(plugin_id)
-            if not ok:
-                lines.append(f"— reload failed: {'; '.join(msgs)}")
-            elif fresh is not None and not fresh.get("loaded"):
-                lines.append(f"— reloaded, but it FAILED to load: {_failure_detail(fresh)}")
-            elif fresh is not None and (warn := _zero_contribution_warning(fresh)):
-                lines.append(f"— reloaded, but {warn}")
-            else:
-                summary = _contribution_summary(fresh) if fresh else ""
-                lines.append(
-                    "— reloaded: the coder's changes are live on the next turn" + (f" ({summary})" if summary else "")
-                )
-        else:
-            lines.append(f"— not enabled yet: call enable_plugin({plugin_id!r}) to load it live")
-        return "\n".join(lines)
+            # Injected graph state, not the tracing contextvar (empty in a tool
+            # body) — the session id is what the completion drains back to.
+            session = _session_id_from(state) or ""
+        except Exception:  # noqa: BLE001 — best-effort; job still runs, drain is degraded
+            session = ""
+        snippet = " ".join(instructions.split())[:80]
+        job_id = await mgr.spawn_work(
+            origin_session=session,
+            kind="develop",
+            description=f"develop_plugin → {coder.name} on {plugin_id!r}: {snippet}",
+            detail=instructions.strip(),
+            work=_work,
+        )
+        return (
+            f"✓ handed {plugin_id!r} to coder {coder.name!r} as background job `{job_id}`. It runs "
+            f"detached — the coder + test_plugin + reload report comes back to me automatically on a "
+            f"later turn, so I should END my turn now and NOT wait, poll, or hand-write the plugin "
+            f"myself. In-flight jobs are listed in the background panel (GET /api/background)."
+        )
 
     return develop_plugin
 
@@ -821,10 +1018,14 @@ async def install_plugin(url: str, ref: str = "", activate: bool = True) -> str:
         return f"✗ install failed: {exc}"
     live = applier is not None
     s = res.summary
-    what = f"bundle {s['bundle']} ({len(s.get('installed') or [])} member(s))" if "bundle" in s else s.get("id", "plugin")
+    what = (
+        f"bundle {s['bundle']} ({len(s.get('installed') or [])} member(s))" if "bundle" in s else s.get("id", "plugin")
+    )
     lines = [f"✓ installed {what}"]
     if res.enabled:
-        lines.append(f"  enabled + live: {', '.join(res.enabled)}" if res.reloaded else f"  enabled: {', '.join(res.enabled)}")
+        lines.append(
+            f"  enabled + live: {', '.join(res.enabled)}" if res.reloaded else f"  enabled: {', '.join(res.enabled)}"
+        )
     elif res.enable_error:
         # The enable-reload FAILED (enabled=[] + enable_error set) — saying "fetched
         # only (activate=False)" here contradicted the ⚠ line below and misinformed
@@ -1000,7 +1201,9 @@ async def verify_bundle(url: str) -> str:
     arch = peek.get("archetype") or {}
     unknown = sorted(set(arch) - _ARCHETYPE_KEYS) if arch else []
     if unknown:
-        lines.append(f"  ⚠ archetype: unknown key(s): {', '.join(unknown)} — known: {', '.join(sorted(_ARCHETYPE_KEYS))}")
+        lines.append(
+            f"  ⚠ archetype: unknown key(s): {', '.join(unknown)} — known: {', '.join(sorted(_ARCHETYPE_KEYS))}"
+        )
     if arch and not arch.get("label"):
         lines.append("  ⚠ archetype: no label — the block won't register in the new-agent picker")
     return "\n".join(lines)
@@ -1325,7 +1528,7 @@ def _build_guide_router():
           <h2>From the CLI</h2>
           <ul>
             <li><code>python -m server plugin new "My Plugin" --view --skill</code> — scaffold from the shell</li>
-            <li><code>python -m server plugin new-bundle "My Stack" --member id=url@ref --builtin delegates</code></li>
+            <li><code>python -m server plugin new-bundle "My Archetype" --member id=url@ref --builtin delegates</code></li>
           </ul>
           <h2>The plugin contract</h2>
           <ul>

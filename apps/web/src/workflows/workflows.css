@@ -12,12 +12,93 @@
   margin: 4px 12px;
 }
 
-/* Workflow builder (Sprint C) — author a recipe in the console. */
+/* Workflow builder — "Outline & Focus": the workflow's shape as cards on the
+   left, a focused editor for the selected entry on the right. Sized by the
+   PANEL (container query), not the viewport — below 48rem the outline becomes
+   a horizontal strip above the editor. */
 .workflow-builder {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 0 12px;
+  container-type: inline-size;
+  container-name: builder;
+}
+
+.workflow-builder > .panel-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--pl-color-bg);
+  border-top: 1px solid var(--pl-color-border);
+  padding: 8px 0;
+  margin-top: 0;
+}
+
+.builder-focus {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.builder-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.builder-dot-ok {
+  background: var(--pl-color-success, #57b880);
+}
+
+.builder-dot-err {
+  background: var(--pl-color-error, #d8635b);
+}
+
+.builder-step-head {
+  flex-wrap: wrap;
+}
+
+.builder-step-head > * {
+  min-width: 0;
+}
+
+.builder-step-head input {
+  flex: 1 1 130px;
+}
+
+.builder-step-head .checkbox-field {
+  flex: 0 0 auto;
+}
+
+.builder-input-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--pl-color-border);
+  border-radius: var(--pl-radius);
+  padding: 8px;
+  min-width: 0;
+}
+
+.builder-input-card .builder-row {
+  flex-wrap: wrap;
+}
+
+.builder-input-card .builder-row input {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.builder-row-2 input {
+  flex: 1;
+}
+
+.builder-chip-on {
+  border-color: var(--pl-color-accent);
+  color: var(--pl-color-accent);
 }
 
 .builder-section {
@@ -229,4 +310,547 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+/* DAG lanes — dependency depth as columns; steps sharing a column run in parallel. */
+.workflow-lanes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 12px;
+  padding: 10px;
+  border: 1px solid var(--pl-color-border);
+  border-radius: var(--pl-radius);
+  background: var(--pl-color-bg-raised, #111114);
+  overflow-x: auto;
+}
+
+.workflow-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
+}
+
+.workflow-lane + .workflow-lane {
+  margin-left: 18px;
+  position: relative;
+}
+
+.workflow-lane + .workflow-lane::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 50%;
+  width: 10px;
+  border-top: 1px solid var(--pl-color-border-strong, var(--pl-color-border));
+}
+
+.lane-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--pl-color-border);
+  border-radius: 999px;
+  font-family: var(--pl-font-mono);
+  font-size: 11px;
+  color: var(--pl-color-fg-muted);
+  background: var(--pl-color-bg);
+  white-space: nowrap;
+}
+
+.lane-chip svg {
+  color: var(--pl-color-fg-subtle);
+}
+
+.lane-chip-running {
+  border-color: var(--pl-color-accent, #7c8cff);
+  color: var(--pl-color-fg);
+}
+
+.lane-chip-done {
+  color: var(--pl-color-status-success, #46a758);
+  border-color: color-mix(in srgb, var(--pl-color-status-success, #46a758) 40%, transparent);
+}
+
+.lane-chip-failed {
+  color: var(--pl-color-status-error, #e5484d);
+  border-color: color-mix(in srgb, var(--pl-color-status-error, #e5484d) 40%, transparent);
+}
+
+.lane-chip-gated {
+  color: var(--pl-color-status-warning, #ffb224);
+  border-color: color-mix(in srgb, var(--pl-color-status-warning, #ffb224) 40%, transparent);
+}
+
+/* Run timeline — the live (and historical) per-step view of one run. */
+.run-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--pl-color-border);
+}
+
+.run-timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px;
+  font-size: 13px;
+}
+
+.run-timeline-head svg {
+  color: var(--pl-color-accent, #7c8cff);
+}
+
+.run-timeline-head > :last-child {
+  margin-left: auto;
+}
+
+.run-timeline-when {
+  color: var(--pl-color-fg-subtle);
+  font-size: 11px;
+}
+
+.run-status {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--pl-color-border);
+  color: var(--pl-color-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.run-status-running {
+  color: var(--pl-color-accent, #7c8cff);
+  border-color: color-mix(in srgb, var(--pl-color-accent, #7c8cff) 45%, transparent);
+}
+
+.run-status-done {
+  color: var(--pl-color-status-success, #46a758);
+  border-color: color-mix(in srgb, var(--pl-color-status-success, #46a758) 45%, transparent);
+}
+
+.run-status-failed {
+  color: var(--pl-color-status-error, #e5484d);
+  border-color: color-mix(in srgb, var(--pl-color-status-error, #e5484d) 45%, transparent);
+}
+
+.run-status-paused {
+  color: var(--pl-color-status-warning, #ffb224);
+  border-color: color-mix(in srgb, var(--pl-color-status-warning, #ffb224) 45%, transparent);
+}
+
+.run-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 12px;
+}
+
+.run-step {
+  border: 1px solid var(--pl-color-border);
+  border-radius: var(--pl-radius);
+  background: var(--pl-color-bg-raised, #111114);
+}
+
+.run-step summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.run-step summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-step .output-block {
+  margin: 0 10px 10px;
+}
+
+.run-step-time {
+  margin-left: auto;
+  color: var(--pl-color-fg-subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-step-chevron {
+  color: var(--pl-color-fg-subtle);
+}
+
+.run-step-gate-mark {
+  color: var(--pl-color-status-warning, #ffb224);
+}
+
+.run-step-queued {
+  color: var(--pl-color-fg-subtle);
+}
+
+.run-step-running {
+  color: var(--pl-color-accent, #7c8cff);
+}
+
+.run-step-done {
+  color: var(--pl-color-status-success, #46a758);
+}
+
+.run-step-failed {
+  color: var(--pl-color-status-error, #e5484d);
+}
+
+.run-step-gated {
+  color: var(--pl-color-status-warning, #ffb224);
+}
+
+.run-gate {
+  border-color: color-mix(in srgb, var(--pl-color-status-warning, #ffb224) 40%, transparent);
+}
+
+.run-gate-loading {
+  margin: 0;
+  color: var(--pl-color-fg-subtle);
+  font-size: 12px;
+}
+
+.run-degraded {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 12px;
+  color: var(--pl-color-status-warning, #ffb224);
+  font-size: 12px;
+}
+
+/* Recipe picker row — select + edit/delete side by side. */
+.workflow-picker {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.workflow-picker .field {
+  flex: 1;
+}
+
+.workflow-picker-actions {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 2px;
+}
+
+/* Run history — collapsed list of past runs; a row opens it in the timeline. */
+.run-history {
+  margin: 8px 12px 12px;
+}
+
+.run-history summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--pl-color-fg-muted);
+  font-size: 12px;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.run-history summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.run-history-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--pl-radius);
+  background: none;
+  color: var(--pl-color-fg);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-history-row:hover {
+  background: var(--pl-color-bg-hover, var(--pl-color-bg-raised));
+}
+
+.run-history-row-active {
+  border-color: var(--pl-color-border);
+  background: var(--pl-color-bg-raised, #111114);
+}
+
+.run-history-steps {
+  color: var(--pl-color-fg-muted);
+  font-size: 11.5px;
+}
+
+.run-history-when {
+  margin-left: auto;
+  color: var(--pl-color-fg-subtle);
+  font-size: 11px;
+}
+
+/* Builder — template-ref chips + live validation. */
+.builder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.builder-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--pl-color-border);
+  border-radius: 999px;
+  background: var(--pl-color-bg);
+  color: var(--pl-color-fg-muted);
+  font-family: var(--pl-font-mono);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.builder-chip:hover {
+  color: var(--pl-color-fg);
+  border-color: var(--pl-color-border-strong, var(--pl-color-border));
+}
+
+.builder-errors {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--pl-color-status-warning, #ffb224) 40%, transparent);
+  border-radius: var(--pl-radius);
+  color: var(--pl-color-status-warning, #ffb224);
+  font-size: 12px;
+}
+
+.builder-errors svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.builder-errors ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+/* The DS DropdownSelect trigger defaults to width:100%; as a flex sibling it
+   squeezed the step-id input to nothing. Share the row instead. */
+.builder-row > .pl-input {
+  flex: 1 1 40%;
+  min-width: 110px;
+}
+
+.builder-row > .pl-dropselect {
+  width: auto;
+  flex: 1 1 40%;
+  min-width: 140px;
+}
+
+.builder-row > .pl-checkbox {
+  flex: none;
+}
+
+
+/* The prompt is the work surface — it absorbs the pane's slack height. */
+.builder-prompt-box {
+  flex: 1;
+  display: flex;
+  min-height: 200px;
+}
+
+.builder-prompt-box .builder-prompt {
+  flex: 1;
+  height: 100%;
+  min-height: 200px;
+}
+
+/* ── DAG canvas (node-and-edge builder) ───────────────────────────────────── */
+.builder-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.builder-toolbar-spacer {
+  flex: 1;
+}
+
+.builder-toolchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--pl-color-border);
+  border-radius: 999px;
+  background: var(--pl-color-bg);
+  color: var(--pl-color-fg-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.builder-toolchip-on {
+  border-color: var(--pl-color-accent);
+  color: var(--pl-color-fg);
+}
+
+.builder-toolchip-bad {
+  border-color: var(--pl-color-error, #d8635b);
+}
+
+/* Mobile-first: canvas on top, editor below; side-by-side once the PANEL is
+   wide enough (container query — the viewport lies inside the rail/proxy). */
+.builder-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dag-canvas {
+  height: 340px;
+  min-width: 0;
+  border: 1px solid var(--pl-color-border);
+  border-radius: var(--pl-radius);
+  overflow: hidden;
+  background: var(--pl-color-bg-inset, var(--pl-color-bg));
+}
+
+.builder-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+@container builder (min-width: 48rem) {
+  .builder-stage {
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .dag-canvas {
+    flex: 1;
+    height: auto;
+    min-height: 440px;
+  }
+  .builder-editor {
+    flex: 0 0 400px;
+    width: 400px;
+    max-width: 400px;
+    overflow: hidden auto;
+  }
+}
+
+/* nodes — DS tokens over React Flow's defaults */
+.dag-node {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 150px;
+  max-width: 200px;
+  padding: 7px 10px;
+  border: 1px solid var(--pl-color-border);
+  border-radius: var(--pl-radius);
+  background: var(--pl-color-bg);
+  color: var(--pl-color-fg);
+  font-size: 12px;
+}
+
+.dag-node-sel {
+  border-color: var(--pl-color-accent);
+  box-shadow: 0 0 0 1px var(--pl-color-accent);
+}
+
+.dag-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dag-node-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dag-node-sub {
+  display: flex;
+  min-width: 0;
+}
+
+.dag-handle {
+  width: 9px;
+  height: 9px;
+  background: var(--pl-color-accent);
+  border: 2px solid var(--pl-color-bg);
+}
+
+.dag-canvas .react-flow__background {
+  background: transparent;
+}
+
+.dag-canvas .react-flow__edge-path {
+  stroke: var(--pl-color-border-strong, var(--pl-color-fg-subtle));
+  stroke-width: 1.5;
+}
+
+.dag-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--pl-color-accent);
+}
+
+.dag-canvas .react-flow__controls {
+  background: var(--pl-color-bg);
+  border: 1px solid var(--pl-color-border);
+  border-radius: var(--pl-radius);
+  box-shadow: none;
+}
+
+.dag-canvas .react-flow__controls-button {
+  background: var(--pl-color-bg);
+  border-bottom: 1px solid var(--pl-color-border);
+}
+
+.dag-canvas .react-flow__controls-button svg {
+  fill: var(--pl-color-fg-muted);
+}
+
+.builder-insert-row {
+  display: flex;
+}
+
+.builder-menu-label {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pl-color-fg-subtle);
 }
