@@ -5,7 +5,7 @@ import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { AgentRoom, AgentRoomMention } from "../lib/types";
 
-export function AgentRoomMode({ room }: { room: AgentRoom }) {
+export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; fullHeight?: boolean }) {
   const [draft, setDraft] = useState("");
   const messages = useInfiniteQuery({
     queryKey: ["agent-room", room.id, "messages"],
@@ -63,7 +63,7 @@ export function AgentRoomMode({ room }: { room: AgentRoom }) {
   };
 
   return (
-    <div className="flr flr--agent-room">
+    <div className={`flr flr--agent-room${fullHeight ? " flr--full-height" : ""}`}>
       <div className="flr__cols">
         <div className="flr__col flr__roster">
           <div className="flr__colhead">

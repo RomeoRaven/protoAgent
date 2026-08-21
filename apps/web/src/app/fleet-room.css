@@ -31,6 +31,9 @@
 .flr--agent-room {
   container-type: inline-size;
 }
+.flr--agent-room.flr--full-height {
+  height: 100%;
+}
 .flr--agent-room .flr__cols {
   grid-template-columns: minmax(0, 25%) minmax(0, 1fr);
 }

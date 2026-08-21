@@ -377,6 +377,10 @@ test("⌘K → Fleet Room uses the canonical backend without broadcasting", asyn
   const room = page.locator(".flr");
 
   await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
+  const paletteRoomBounds = await room.boundingBox();
+  expect(paletteRoomBounds).not.toBeNull();
+  await expect(room).not.toHaveClass(/flr--full-height/);
+  expect(paletteRoomBounds!.height).toBeLessThanOrEqual(480);
   await expect(room).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(page.getByText(/DM a member/)).toHaveCount(0);
   await expect(page.getByText(/address in composer/)).toHaveCount(0);
@@ -414,6 +418,12 @@ test("Rooms rail icon opens the canonical Room without the command palette", asy
   expect(conversation).not.toBeNull();
   expect(roster!.width / columns!.width).toBeLessThanOrEqual(0.251);
   expect(conversation!.width / columns!.width).toBeGreaterThanOrEqual(0.749);
+
+  const roomBounds = await room.boundingBox();
+  const panelBounds = await page.locator(".pl-appshell__col--left").boundingBox();
+  expect(roomBounds).not.toBeNull();
+  expect(panelBounds).not.toBeNull();
+  expect(roomBounds!.height / panelBounds!.height).toBeGreaterThanOrEqual(0.95);
 
   await page.setViewportSize({ width: 900, height: 700 });
   await expect(room.locator(".flr__roster .flr__count")).toBeHidden();
