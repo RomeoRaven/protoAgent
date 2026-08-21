@@ -393,6 +393,31 @@ test("⌘K → Fleet Room uses the canonical backend without broadcasting", asyn
   await expect(page.getByPlaceholder(/Message (ava|roxy)/i)).toHaveCount(0);
 });
 
+test("Rooms rail icon opens the canonical Room without the command palette", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "native-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+
+  const rooms = page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true });
+  await expect(rooms).toBeVisible();
+  await rooms.click();
+
+  await expect(page.locator(".pl-cmdk-overlay")).toHaveCount(0);
+  const room = page.locator(".flr");
+  await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
+  await expect(room.getByText("Welcome to the shared room", { exact: true })).toBeVisible();
+});
+
+test("Rooms rail surface fails closed when no Room backend is installed", async ({ page }) => {
+  await page.goto("/app/", { waitUntil: "load" });
+
+  await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
+
+  const unavailable = page.getByRole("alert");
+  await expect(unavailable).toContainText("Rooms unavailable");
+  await expect(unavailable).toContainText("Install and enable an Agent Room backend");
+  await expect(page.locator(".flr__composer")).toHaveCount(0);
+});
+
 test("⌘K → an installed backend with no canonical room pauses messaging", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "empty-room" });
   await page.goto("/app/", { waitUntil: "load" });

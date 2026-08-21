@@ -397,6 +397,33 @@ function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (sl
   return <LegacyFleetRoom ctx={ctx} onOpenAgent={onOpenAgent} />;
 }
 
+/** Native rail surface for the canonical shared Room. Unlike the legacy Fleet Room
+ * palette fallback, this surface never broadcasts when the Room backend is absent. */
+export function RoomsSurface() {
+  const rooms = useQuery({
+    queryKey: ["agent-room", "rooms"],
+    queryFn: () => api.agentRoomList(),
+    retry: false,
+    staleTime: 15_000,
+  });
+  const canonical = rooms.data?.rooms[0];
+  if (rooms.isLoading) {
+    return (
+      <div className="flr flr-room__unavailable" role="status">
+        <h2>Loading Rooms…</h2>
+        <p>Checking for the canonical Agent Room backend.</p>
+      </div>
+    );
+  }
+  if (canonical) return <AgentRoomMode room={canonical} />;
+  return (
+    <div className="flr flr-room__unavailable" role="alert">
+      <h2>Rooms unavailable</h2>
+      <p>Install and enable an Agent Room backend to use this shared conversation surface.</p>
+    </div>
+  );
+}
+
 function FleetRoomFooter() {
   const rooms = useQuery({
     queryKey: ["agent-room", "rooms"],
