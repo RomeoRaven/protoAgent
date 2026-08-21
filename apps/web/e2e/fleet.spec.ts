@@ -405,6 +405,19 @@ test("Rooms rail icon opens the canonical Room without the command palette", asy
   const room = page.locator(".flr");
   await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
   await expect(room.getByText("Welcome to the shared room", { exact: true })).toBeVisible();
+
+  const columns = await room.locator(".flr__cols").boundingBox();
+  const roster = await room.locator(".flr__roster").boundingBox();
+  const conversation = await room.locator(".flr-room").boundingBox();
+  expect(columns).not.toBeNull();
+  expect(roster).not.toBeNull();
+  expect(conversation).not.toBeNull();
+  expect(roster!.width / columns!.width).toBeLessThanOrEqual(0.251);
+  expect(conversation!.width / columns!.width).toBeGreaterThanOrEqual(0.749);
+
+  await page.setViewportSize({ width: 900, height: 700 });
+  await expect(room.locator(".flr__roster .flr__count")).toBeHidden();
+  await expect(room.getByRole("list", { name: "Room members" }).getByText("Dennis", { exact: true })).toBeVisible();
 });
 
 test("Rooms rail surface fails closed when no Room backend is installed", async ({ page }) => {
