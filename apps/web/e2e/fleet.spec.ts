@@ -364,6 +364,25 @@ test("⌘K → Fleet Room: presence, DM a member (the wired chat), broadcast", a
   await expect(page.locator(".pl-toast", { hasText: /Broadcast to \d+ member/ })).toBeVisible();
 });
 
+test("⌘K → Fleet Room uses the canonical backend without broadcasting", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "native-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await openFleetRoom(page);
+  const room = page.locator(".flr");
+
+  await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
+  await expect(room.getByText("Welcome to the shared room", { exact: true })).toBeVisible();
+  await expect(room.getByRole("list", { name: "Room members" }).getByText("Dennis", { exact: true })).toBeVisible();
+  await expect(room.getByRole("list", { name: "Room members" }).getByText("PC1", { exact: true })).toBeVisible();
+
+  await room.getByRole("textbox", { name: "Room message" }).fill("Status update");
+  await room.getByRole("button", { name: "Post message" }).click();
+
+  await expect(room.getByText("Status update", { exact: true })).toBeVisible();
+  await expect(page.locator(".pl-toast", { hasText: /Broadcast to/ })).toHaveCount(0);
+  await expect(page.getByPlaceholder(/Message (ava|roxy)/i)).toHaveCount(0);
+});
+
 test("⌘K → Fleet Room shows the roster + live activity feed side by side", async ({ page }) => {
   await page.goto("/app/", { waitUntil: "load" });
   await openFleetRoom(page);
