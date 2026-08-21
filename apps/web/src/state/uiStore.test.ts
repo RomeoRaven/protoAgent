@@ -191,30 +191,31 @@ describe("reconcilePluginViews", () => {
 // so a layout saved before a surface existed silently drops its icon. reconcileCoreSurfaces
 // restores it on its default dock — replacing the per-surface v9-style migrations.
 describe("reconcileCoreSurfaces", () => {
-  const CORE = ["chat", "work", "knowledge"];
+  const CORE = ["chat", "rooms", "work", "knowledge"];
 
   it("re-adds a CORE surface missing from a persisted railOrder to its default dock", () => {
     useUI.setState({ railOrder: { left: ["chat", "plugins"], right: ["work"], bottom: [], hidden: [] } });
     useUI.getState().reconcileCoreSurfaces(CORE);
+    expect(useUI.getState().railOrder.left).toContain("rooms"); // a newly-shipped core surface self-heals too
     expect(useUI.getState().railOrder.left).toContain("knowledge"); // restored on its default (left)
   });
 
   it("is a no-op (same ref, no write) when every core surface is already placed", () => {
-    useUI.setState({ railOrder: { left: ["chat", "knowledge"], right: ["work"], bottom: [], hidden: [] } });
+    useUI.setState({ railOrder: { left: ["chat", "rooms", "knowledge"], right: ["work"], bottom: [], hidden: [] } });
     const before = useUI.getState().railOrder;
     useUI.getState().reconcileCoreSurfaces(CORE);
     expect(useUI.getState().railOrder).toBe(before);
   });
 
   it("respects a surface the operator moved to another dock — no duplicate", () => {
-    useUI.setState({ railOrder: { left: ["chat"], right: ["work", "knowledge"], bottom: [], hidden: [] } });
+    useUI.setState({ railOrder: { left: ["chat", "rooms"], right: ["work", "knowledge"], bottom: [], hidden: [] } });
     useUI.getState().reconcileCoreSurfaces(CORE);
     expect(useUI.getState().railOrder.left).not.toContain("knowledge");
     expect(useUI.getState().railOrder.right).toContain("knowledge"); // left where the operator put it
   });
 
   it("does NOT re-add a core surface the operator hid (hidden counts as placed)", () => {
-    useUI.setState({ railOrder: { left: ["chat"], right: ["work"], bottom: [], hidden: ["knowledge"] } });
+    useUI.setState({ railOrder: { left: ["chat", "rooms"], right: ["work"], bottom: [], hidden: ["knowledge"] } });
     useUI.getState().reconcileCoreSurfaces(CORE);
     expect(useUI.getState().railOrder.left).not.toContain("knowledge");
     expect(useUI.getState().railOrder.hidden).toEqual(["knowledge"]); // stays hidden, not resurrected

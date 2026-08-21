@@ -134,9 +134,10 @@ import { applyNavIntent, openView, usePaletteRegistry } from "./usePaletteRegist
 import type { NavIntent } from "./usePaletteRegistry";
 import { PaletteChat } from "./PaletteChat";
 import { CORE_SURFACES } from "./coreSurfaces";
+import { RoomsSurface } from "./FleetRoom";
 import { listen } from "../lib/desktop";
 
-// Consolidated nav (heavy grouping): four rail surfaces, each grouped one
+// Consolidated nav (heavy grouping): core rail surfaces, each grouped one
 // fanning out to sub-views via an in-surface segmented control.
 // Core surfaces are the fixed literals; plugin views (ADR 0026) add dynamic
 // surfaces keyed `plugin:<pluginId>:<viewId>`. The `(string & {})` keeps literal
@@ -634,6 +635,8 @@ export function App() {
 
   function renderSurface(id: string): ReactNode {
     switch (id) {
+      case "rooms":
+        return <RoomsSurface />;
       // The Work hub (2026-06) folds Goals + Tasks(Tasks) + Schedule into one right-rail
       // surface (Overview + tabs). It owns those three panels now — no standalone surfaces.
       case "work":
