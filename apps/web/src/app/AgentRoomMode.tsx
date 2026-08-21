@@ -3,7 +3,7 @@ import { Send } from "lucide-react";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
-import type { AgentRoom } from "../lib/types";
+import type { AgentRoom, AgentRoomMention } from "../lib/types";
 
 export function AgentRoomMode({ room }: { room: AgentRoom }) {
   const [draft, setDraft] = useState("");
@@ -23,6 +23,15 @@ export function AgentRoomMode({ room }: { room: AgentRoom }) {
     () => (messages.data?.pages.flatMap((page) => page.result.messages) ?? []).sort((a, b) => a.sequence - b.sequence),
     [messages.data],
   );
+  const mentionsBySource = useMemo(() => {
+    const grouped = new Map<string, AgentRoomMention[]>();
+    for (const mention of messages.data?.pages.flatMap((page) => page.result.mentions ?? []) ?? []) {
+      const current = grouped.get(mention.source_message_id) ?? [];
+      current.push(mention);
+      grouped.set(mention.source_message_id, current);
+    }
+    return grouped;
+  }, [messages.data]);
   const names = useMemo(
     () => new Map((members.data?.result.members ?? []).map((member) => [member.principal, member.display_name])),
     [members.data],
@@ -85,15 +94,26 @@ export function AgentRoomMode({ room }: { room: AgentRoom }) {
             {!messages.isLoading && !messages.error && ordered.length === 0 && (
               <div className="flr-room__state">No messages yet. Post the first update below.</div>
             )}
-            {ordered.map((message) => (
-              <article className="flr-room__message" key={message.id}>
+            {ordered.map((message) => {
+              const delivery = mentionsBySource.get(message.id) ?? [];
+              return <article className="flr-room__message" key={message.id}>
                 <header>
                   <strong>{names.get(message.author_principal) ?? message.author_principal}</strong>
                   <span>#{message.sequence}</span>
                 </header>
                 <p>{message.body}</p>
-              </article>
-            ))}
+                {delivery.length > 0 && (
+                  <ul className="flr-room__mentions" aria-label={`Mention delivery for message ${message.sequence}`}>
+                    {delivery.map((mention) => (
+                      <li className={`is-${mention.status}`} key={mention.id}>
+                        {names.get(mention.target_principal) ?? mention.target_principal} · {mention.status}
+                        {mention.error ? ` · ${mention.error}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </article>;
+            })}
           </div>
         </div>
       </div>

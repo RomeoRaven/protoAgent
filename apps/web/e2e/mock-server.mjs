@@ -185,7 +185,13 @@ function agentRoomFor(req) {
   const scope = req.headers["x-e2e-agent-room"];
   if (!scope) return null;
   if (!agentRoomScopes.has(scope)) {
-    const messages = scope === "paged-room"
+    const messages = scope === "mention-status-room"
+      ? [
+          { id: "status-msg-1", room_id: "ao", sequence: 1, client_message_id: "status-1", author_principal: "dennis", author_kind: "human", body: "@Hermes start", thread_id: "status-msg-1", reply_to_message_id: null, created_at: "2026-08-21T20:00:00Z" },
+          { id: "status-msg-2", room_id: "ao", sequence: 2, client_message_id: "status-2", author_principal: "hermes", author_kind: "agent", body: "handoff @Headroom", thread_id: "status-msg-1", reply_to_message_id: "status-msg-1", created_at: "2026-08-21T20:00:01Z" },
+          { id: "status-msg-3", room_id: "ao", sequence: 3, client_message_id: "status-3", author_principal: "headroom", author_kind: "agent", body: "done @Hermes", thread_id: "status-msg-1", reply_to_message_id: "status-msg-2", created_at: "2026-08-21T20:00:02Z" },
+        ]
+      : scope === "paged-room"
       ? Array.from({ length: 105 }, (_, index) => ({
           id: `room-msg-${index + 1}`, room_id: "ao", sequence: index + 1,
           client_message_id: `seed-${index + 1}`, author_principal: "dennis",
@@ -200,11 +206,21 @@ function agentRoomFor(req) {
             thread_id: "room-msg-1", reply_to_message_id: null, created_at: "2026-08-20T20:00:00Z",
           },
         ];
+    const mentions = scope === "mention-status-room" ? [
+      { id: "status-mention-1", room_id: "ao", source_message_id: "status-msg-1", target_principal: "hermes", token: "@Hermes", status: "completed", parent_mention_id: null, origin_message_id: "status-msg-1", origin_chain: ["hermes"], hop_count: 0, position: 0, reply_message_id: "status-msg-2", error: null, created_at: "2026-08-21T20:00:00Z", updated_at: "2026-08-21T20:00:01Z" },
+      { id: "status-mention-2", room_id: "ao", source_message_id: "status-msg-2", target_principal: "headroom", token: "@Headroom", status: "completed", parent_mention_id: "status-mention-1", origin_message_id: "status-msg-1", origin_chain: ["hermes", "headroom"], hop_count: 1, position: 8, reply_message_id: "status-msg-3", error: null, created_at: "2026-08-21T20:00:01Z", updated_at: "2026-08-21T20:00:02Z" },
+      { id: "status-mention-3", room_id: "ao", source_message_id: "status-msg-3", target_principal: "hermes", token: "@Hermes", status: "blocked", parent_mention_id: "status-mention-2", origin_message_id: "status-msg-1", origin_chain: ["hermes", "headroom", "hermes"], hop_count: 2, position: 5, reply_message_id: null, error: "mention cycle blocked", created_at: "2026-08-21T20:00:02Z", updated_at: "2026-08-21T20:00:02Z" },
+    ] : [];
     agentRoomScopes.set(scope, {
       sequence: messages.length,
       cursor: 0,
       messages,
-      members: [
+      mentions,
+      members: scope === "mention-status-room" ? [
+        { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true },
+        { principal: "hermes", kind: "agent", display_name: "Hermes", role: "member", mention_token: "@Hermes", host: "s1", can_post: true, can_mention: true },
+        { principal: "headroom", kind: "agent", display_name: "Headroom", role: "member", mention_token: "@Headroom", host: "s1", can_post: true, can_mention: true },
+      ] : [
         { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true },
         { principal: "pc1", kind: "host", display_name: "PC1", role: "member", mention_token: "@PC1", host: "pc1", can_post: true, can_mention: false },
       ],
@@ -803,7 +819,9 @@ const server = createServer(async (req, res) => {
         const remaining = room.messages.filter((message) => message.sequence > after);
         const limit = Math.min(Number(url.searchParams.get("limit") || 100), 100);
         const messages = remaining.slice(0, limit);
-        return sendJson(res, { contract_version: "1", operation: "room.sync", result: { messages, next_sequence: messages.at(-1)?.sequence ?? after, has_more: remaining.length > messages.length } });
+        const messageIds = new Set(messages.map((message) => message.id));
+        const mentions = room.mentions.filter((mention) => messageIds.has(mention.source_message_id));
+        return sendJson(res, { contract_version: "1", operation: "room.sync", result: { messages, mentions, next_sequence: messages.at(-1)?.sequence ?? after, has_more: remaining.length > messages.length } });
       }
       if (room && pathname === "/api/plugins/agent-room/rooms/ao/members") {
         return sendJson(res, { contract_version: "1", operation: "room.members", result: { members: room.members } });

@@ -1388,6 +1388,23 @@ export type AgentRoomMessage = {
   reply_to_message_id: string | null;
   created_at: string;
 };
+export type AgentRoomMention = {
+  id: string;
+  room_id: string;
+  source_message_id: string;
+  target_principal: string;
+  token: string;
+  status: string;
+  parent_mention_id: string | null;
+  origin_message_id: string;
+  origin_chain: string[];
+  hop_count: number;
+  position: number;
+  reply_message_id: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
 export type AgentRoomMember = {
   principal: string;
   kind: string;

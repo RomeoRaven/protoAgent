@@ -8,6 +8,7 @@ import type {
   AgentRoomEnvelope,
   AgentRoomMember,
   AgentRoomMessage,
+  AgentRoomMention,
   AgentConfig,
   Archetype,
   ArchetypePreview,
@@ -1882,7 +1883,7 @@ export const api = {
     return request<{ contract_version: "1"; rooms: AgentRoom[] }>("/api/plugins/agent-room/rooms");
   },
   agentRoomSync(roomId: string, after = 0, limit = 100) {
-    return request<AgentRoomEnvelope<{ messages: AgentRoomMessage[]; next_sequence: number; has_more: boolean }>>(
+    return request<AgentRoomEnvelope<{ messages: AgentRoomMessage[]; mentions?: AgentRoomMention[]; next_sequence: number; has_more: boolean }>>(
       `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/messages?after=${after}&limit=${limit}`,
     );
   },
