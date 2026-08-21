@@ -25,6 +25,31 @@
 .flr__roster {
   border-right: 1px solid var(--pl-color-border);
 }
+
+/* The canonical Room is conversation-first: membership is supporting context,
+ * never the dominant column. Keep Fleet Room's roster/activity balance unchanged. */
+.flr--agent-room {
+  container-type: inline-size;
+}
+.flr--agent-room .flr__cols {
+  grid-template-columns: minmax(0, 25%) minmax(0, 1fr);
+}
+.flr--agent-room .flr__col {
+  min-width: 0;
+}
+@container (max-width: 640px) {
+  .flr--agent-room .flr__roster .flr__count,
+  .flr--agent-room .flr__roster .flr__meta {
+    display: none;
+  }
+  .flr--agent-room .flr__roster .flr__colhead {
+    padding-inline: 10px;
+  }
+  .flr--agent-room .flr__roster .flr__member {
+    gap: 7px;
+    padding-inline: 8px;
+  }
+}
 .flr__colhead {
   display: flex;
   align-items: center;

@@ -63,7 +63,7 @@ export function AgentRoomMode({ room }: { room: AgentRoom }) {
   };
 
   return (
-    <div className="flr">
+    <div className="flr flr--agent-room">
       <div className="flr__cols">
         <div className="flr__col flr__roster">
           <div className="flr__colhead">
