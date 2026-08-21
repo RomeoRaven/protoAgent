@@ -415,7 +415,7 @@ export function RoomsSurface() {
       </div>
     );
   }
-  if (canonical) return <AgentRoomMode room={canonical} />;
+  if (canonical) return <AgentRoomMode room={canonical} fullHeight />;
   return (
     <div className="flr flr-room__unavailable" role="alert">
       <h2>Rooms unavailable</h2>
