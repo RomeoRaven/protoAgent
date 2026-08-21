@@ -393,6 +393,26 @@ test("⌘K → Fleet Room uses the canonical backend without broadcasting", asyn
   await expect(page.getByPlaceholder(/Message (ava|roxy)/i)).toHaveCount(0);
 });
 
+test("⌘K → an installed backend with no canonical room pauses messaging", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "empty-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await openFleetRoom(page);
+
+  await expect(page.getByRole("alert")).toContainText("Room backend unavailable");
+  await expect(page.locator(".flr__composer")).toHaveCount(0);
+  await expect(page.getByText(/Shared room unavailable · messaging paused/)).toBeVisible();
+});
+
+test("⌘K → canonical Room follows bounded sync pages", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "paged-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await openFleetRoom(page);
+
+  const room = page.locator(".flr");
+  await expect(room.getByText("page message 105", { exact: true })).toBeVisible();
+  await expect(room.locator(".flr-room__message")).toHaveCount(105);
+});
+
 test("⌘K → Fleet Room shows the roster + live activity feed side by side", async ({ page }) => {
   await page.goto("/app/", { waitUntil: "load" });
   await openFleetRoom(page);

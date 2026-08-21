@@ -185,16 +185,25 @@ function agentRoomFor(req) {
   const scope = req.headers["x-e2e-agent-room"];
   if (!scope) return null;
   if (!agentRoomScopes.has(scope)) {
+    const messages = scope === "paged-room"
+      ? Array.from({ length: 105 }, (_, index) => ({
+          id: `room-msg-${index + 1}`, room_id: "ao", sequence: index + 1,
+          client_message_id: `seed-${index + 1}`, author_principal: "dennis",
+          author_kind: "human", body: `page message ${index + 1}`,
+          thread_id: `room-msg-${index + 1}`, reply_to_message_id: null,
+          created_at: "2026-08-20T20:00:00Z",
+        }))
+      : [
+          {
+            id: "room-msg-1", room_id: "ao", sequence: 1, client_message_id: "seed-1",
+            author_principal: "dennis", author_kind: "human", body: "Welcome to the shared room",
+            thread_id: "room-msg-1", reply_to_message_id: null, created_at: "2026-08-20T20:00:00Z",
+          },
+        ];
     agentRoomScopes.set(scope, {
-      sequence: 1,
+      sequence: messages.length,
       cursor: 0,
-      messages: [
-        {
-          id: "room-msg-1", room_id: "ao", sequence: 1, client_message_id: "seed-1",
-          author_principal: "dennis", author_kind: "human", body: "Welcome to the shared room",
-          thread_id: "room-msg-1", reply_to_message_id: null, created_at: "2026-08-20T20:00:00Z",
-        },
-      ],
+      messages,
       members: [
         { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true },
         { principal: "pc1", kind: "host", display_name: "PC1", role: "member", mention_token: "@PC1", host: "pc1", can_post: true, can_mention: false },
@@ -784,12 +793,17 @@ const server = createServer(async (req, res) => {
       }
       const room = agentRoomFor(req);
       if (room && pathname === "/api/plugins/agent-room/rooms") {
-        return sendJson(res, { contract_version: "1", rooms: [{ id: "ao", name: "Agent Organization", created_at: "2026-08-20T20:00:00Z" }] });
+        const rooms = req.headers["x-e2e-agent-room"] === "empty-room"
+          ? []
+          : [{ id: "ao", name: "Agent Organization", created_at: "2026-08-20T20:00:00Z" }];
+        return sendJson(res, { contract_version: "1", rooms });
       }
       if (room && pathname === "/api/plugins/agent-room/rooms/ao/messages") {
         const after = Number(url.searchParams.get("after") || 0);
-        const messages = room.messages.filter((message) => message.sequence > after);
-        return sendJson(res, { contract_version: "1", operation: "room.sync", result: { messages, next_sequence: messages.at(-1)?.sequence ?? after, has_more: false } });
+        const remaining = room.messages.filter((message) => message.sequence > after);
+        const limit = Math.min(Number(url.searchParams.get("limit") || 100), 100);
+        const messages = remaining.slice(0, limit);
+        return sendJson(res, { contract_version: "1", operation: "room.sync", result: { messages, next_sequence: messages.at(-1)?.sequence ?? after, has_more: remaining.length > messages.length } });
       }
       if (room && pathname === "/api/plugins/agent-room/rooms/ao/members") {
         return sendJson(res, { contract_version: "1", operation: "room.members", result: { members: room.members } });

@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Send } from "lucide-react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
 import type { AgentRoom } from "../lib/types";
 
 export function AgentRoomMode({ room }: { room: AgentRoom }) {
   const [draft, setDraft] = useState("");
-  const messages = useQuery({
+  const messages = useInfiniteQuery({
     queryKey: ["agent-room", room.id, "messages"],
-    queryFn: () => api.agentRoomSync(room.id, 0, 200),
+    queryFn: ({ pageParam }) => api.agentRoomSync(room.id, pageParam, 100),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.result.has_more ? lastPage.result.next_sequence : undefined,
     refetchInterval: 2_000,
   });
   const members = useQuery({
@@ -18,7 +20,7 @@ export function AgentRoomMode({ room }: { room: AgentRoom }) {
     refetchInterval: 15_000,
   });
   const ordered = useMemo(
-    () => [...(messages.data?.result.messages ?? [])].sort((a, b) => a.sequence - b.sequence),
+    () => (messages.data?.pages.flatMap((page) => page.result.messages) ?? []).sort((a, b) => a.sequence - b.sequence),
     [messages.data],
   );
   const names = useMemo(
@@ -36,6 +38,10 @@ export function AgentRoomMode({ room }: { room: AgentRoom }) {
       await messages.refetch();
     },
   });
+
+  useEffect(() => {
+    if (messages.hasNextPage && !messages.isFetchingNextPage) void messages.fetchNextPage();
+  }, [messages.hasNextPage, messages.isFetchingNextPage, messages.fetchNextPage]);
 
   const latest = ordered.length ? ordered[ordered.length - 1].sequence : 0;
   useEffect(() => {

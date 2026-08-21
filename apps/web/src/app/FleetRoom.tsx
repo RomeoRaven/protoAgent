@@ -385,7 +385,8 @@ function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (sl
     );
   }
   if (canonical) return <AgentRoomMode room={canonical} />;
-  if (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404)) {
+  const emptyBackend = rooms.isSuccess && rooms.data.rooms.length === 0;
+  if (emptyBackend || (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404))) {
     return (
       <div className="flr flr-room__unavailable" role="alert">
         <h2>Room backend unavailable</h2>
@@ -413,7 +414,8 @@ function FleetRoomFooter() {
       </span>
     );
   }
-  if (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404)) {
+  const emptyBackend = rooms.isSuccess && rooms.data.rooms.length === 0;
+  if (emptyBackend || (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404))) {
     return <span className="flr__hint">Shared room unavailable · messaging paused</span>;
   }
   return (
