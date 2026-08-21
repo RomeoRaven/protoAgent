@@ -4,6 +4,10 @@ import type {
   SnapshotReview,
   AcpAgent,
   ActivityHistory,
+  AgentRoom,
+  AgentRoomEnvelope,
+  AgentRoomMember,
+  AgentRoomMessage,
   AgentConfig,
   Archetype,
   ArchetypePreview,
@@ -1873,6 +1877,31 @@ export const api = {
   },
   fleetDown() {
     return request<{ ok: boolean; stopped: string[] }>("/api/fleet/down", { method: "POST" });
+  },
+  agentRoomList() {
+    return request<{ contract_version: "1"; rooms: AgentRoom[] }>("/api/plugins/agent-room/rooms");
+  },
+  agentRoomSync(roomId: string, after = 0, limit = 100) {
+    return request<AgentRoomEnvelope<{ messages: AgentRoomMessage[]; next_sequence: number; has_more: boolean }>>(
+      `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/messages?after=${after}&limit=${limit}`,
+    );
+  },
+  agentRoomMembers(roomId: string) {
+    return request<AgentRoomEnvelope<{ members: AgentRoomMember[] }>>(
+      `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/members`,
+    );
+  },
+  agentRoomPost(roomId: string, body: { client_message_id: string; body: string }) {
+    return request<AgentRoomEnvelope<{ created: boolean; message: AgentRoomMessage }>>(
+      `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/post`,
+      { method: "POST", body },
+    );
+  },
+  agentRoomAck(roomId: string, sequence: number) {
+    return request<AgentRoomEnvelope<{ room_id: string; principal: string; last_sequence: number }>>(
+      `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/ack`,
+      { method: "POST", body: { sequence } },
+    );
   },
   // Fire a one-shot message at a specific fleet member (Fleet Room broadcast). Goes to the
   // member's A2A endpoint through the hub proxy (/agents/<slug>/a2a) — NOT /api/chat —

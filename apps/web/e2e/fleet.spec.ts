@@ -364,6 +364,55 @@ test("⌘K → Fleet Room: presence, DM a member (the wired chat), broadcast", a
   await expect(page.locator(".pl-toast", { hasText: /Broadcast to \d+ member/ })).toBeVisible();
 });
 
+test("⌘K → Fleet Room uses the canonical backend without broadcasting", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "native-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await page.keyboard.press("ControlOrMeta+k");
+  const palette = page.locator(".pl-cmdk__panel");
+  await palette.locator(".pl-cmdk-commands__input").fill("Fleet Room");
+  const command = palette.getByRole("option", { name: "Fleet Room" });
+  await expect(command).not.toContainText(/broadcast/);
+  await command.click();
+  await expect(page.locator(".pl-cmdk__title")).toHaveText("Fleet");
+  const room = page.locator(".flr");
+
+  await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
+  await expect(room).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByText(/DM a member/)).toHaveCount(0);
+  await expect(page.getByText(/address in composer/)).toHaveCount(0);
+  await expect(page.getByText(/broadcast/)).toHaveCount(0);
+  await expect(room.getByText("Welcome to the shared room", { exact: true })).toBeVisible();
+  await expect(room.getByRole("list", { name: "Room members" }).getByText("Dennis", { exact: true })).toBeVisible();
+  await expect(room.getByRole("list", { name: "Room members" }).getByText("PC1", { exact: true })).toBeVisible();
+
+  await room.getByRole("textbox", { name: "Room message" }).fill("Status update");
+  await room.getByRole("button", { name: "Post message" }).click();
+
+  await expect(room.getByText("Status update", { exact: true })).toBeVisible();
+  await expect(page.locator(".pl-toast", { hasText: /Broadcast to/ })).toHaveCount(0);
+  await expect(page.getByPlaceholder(/Message (ava|roxy)/i)).toHaveCount(0);
+});
+
+test("⌘K → an installed backend with no canonical room pauses messaging", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "empty-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await openFleetRoom(page);
+
+  await expect(page.getByRole("alert")).toContainText("Room backend unavailable");
+  await expect(page.locator(".flr__composer")).toHaveCount(0);
+  await expect(page.getByText(/Shared room unavailable · messaging paused/)).toBeVisible();
+});
+
+test("⌘K → canonical Room follows bounded sync pages", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "paged-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await openFleetRoom(page);
+
+  const room = page.locator(".flr");
+  await expect(room.getByText("page message 105", { exact: true })).toBeVisible();
+  await expect(room.locator(".flr-room__message")).toHaveCount(105);
+});
+
 test("⌘K → Fleet Room shows the roster + live activity feed side by side", async ({ page }) => {
   await page.goto("/app/", { waitUntil: "load" });
   await openFleetRoom(page);

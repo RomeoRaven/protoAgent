@@ -285,7 +285,7 @@ export function usePaletteRegistry(
       {
         id: "fleet-room",
         label: "Fleet Room",
-        hint: fleetGate ? "host instance only" : "members · DM · broadcast",
+        hint: fleetGate ? "host instance only" : "members · shared conversation",
         disabled: !!fleetGate,
         group: "Agents",
         keywords: [

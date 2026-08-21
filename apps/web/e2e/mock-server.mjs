@@ -178,6 +178,41 @@ function fleetFor(req) {
   return fleetScopes.get(scope);
 }
 
+// Opt-in canonical Agent Room backend. Existing Fleet Room specs omit this
+// header and continue to exercise the shipped fallback unchanged.
+const agentRoomScopes = new Map();
+function agentRoomFor(req) {
+  const scope = req.headers["x-e2e-agent-room"];
+  if (!scope) return null;
+  if (!agentRoomScopes.has(scope)) {
+    const messages = scope === "paged-room"
+      ? Array.from({ length: 105 }, (_, index) => ({
+          id: `room-msg-${index + 1}`, room_id: "ao", sequence: index + 1,
+          client_message_id: `seed-${index + 1}`, author_principal: "dennis",
+          author_kind: "human", body: `page message ${index + 1}`,
+          thread_id: `room-msg-${index + 1}`, reply_to_message_id: null,
+          created_at: "2026-08-20T20:00:00Z",
+        }))
+      : [
+          {
+            id: "room-msg-1", room_id: "ao", sequence: 1, client_message_id: "seed-1",
+            author_principal: "dennis", author_kind: "human", body: "Welcome to the shared room",
+            thread_id: "room-msg-1", reply_to_message_id: null, created_at: "2026-08-20T20:00:00Z",
+          },
+        ];
+    agentRoomScopes.set(scope, {
+      sequence: messages.length,
+      cursor: 0,
+      messages,
+      members: [
+        { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true },
+        { principal: "pc1", kind: "host", display_name: "PC1", role: "member", mention_token: "@PC1", host: "pc1", can_post: true, can_mention: false },
+      ],
+    });
+  }
+  return agentRoomScopes.get(scope);
+}
+
 // The MCP roster needs the SAME per-spec isolation, for a sharper reason: its writers
 // disagree about shape. `POST /api/mcp/servers` (catalog/inline add) APPENDS to the roster,
 // while `POST /api/__test__/mcp/layered` REPLACES it wholesale — so with one shared array
@@ -756,6 +791,23 @@ const server = createServer(async (req, res) => {
           req.headers["x-e2e-fleet-telemetry"] === "multi" ? FLEET_TELEMETRY : FLEET_TELEMETRY_SINGLE,
         );
       }
+      const room = agentRoomFor(req);
+      if (room && pathname === "/api/plugins/agent-room/rooms") {
+        const rooms = req.headers["x-e2e-agent-room"] === "empty-room"
+          ? []
+          : [{ id: "ao", name: "Agent Organization", created_at: "2026-08-20T20:00:00Z" }];
+        return sendJson(res, { contract_version: "1", rooms });
+      }
+      if (room && pathname === "/api/plugins/agent-room/rooms/ao/messages") {
+        const after = Number(url.searchParams.get("after") || 0);
+        const remaining = room.messages.filter((message) => message.sequence > after);
+        const limit = Math.min(Number(url.searchParams.get("limit") || 100), 100);
+        const messages = remaining.slice(0, limit);
+        return sendJson(res, { contract_version: "1", operation: "room.sync", result: { messages, next_sequence: messages.at(-1)?.sequence ?? after, has_more: remaining.length > messages.length } });
+      }
+      if (room && pathname === "/api/plugins/agent-room/rooms/ao/members") {
+        return sendJson(res, { contract_version: "1", operation: "room.members", result: { members: room.members } });
+      }
       const payload = handleApiGet(pathname, fleetFor(req), url.searchParams, mcpFor(req));
       if (payload !== null) return sendJson(res, payload);
       return sendJson(res, { detail: "not mocked" }, 404);
@@ -873,6 +925,22 @@ const server = createServer(async (req, res) => {
     // POST/PATCH/DELETE writes → generic ok so the UI doesn't error.
     const body = await readBody(req);
     const fleet = fleetFor(req);
+    const room = agentRoomFor(req);
+    if (room && pathname === "/api/plugins/agent-room/rooms/ao/post" && req.method === "POST") {
+      const sequence = ++room.sequence;
+      const message = {
+        id: `room-msg-${sequence}`, room_id: "ao", sequence,
+        client_message_id: String(body.client_message_id || ""), author_principal: "dennis",
+        author_kind: "human", body: String(body.body || ""), thread_id: `room-msg-${sequence}`,
+        reply_to_message_id: null, created_at: "2026-08-20T20:01:00Z",
+      };
+      room.messages.push(message);
+      return sendJson(res, { contract_version: "1", operation: "room.post", result: { created: true, message } });
+    }
+    if (room && pathname === "/api/plugins/agent-room/rooms/ao/ack" && req.method === "POST") {
+      room.cursor = Math.max(room.cursor, Number(body.sequence || 0));
+      return sendJson(res, { contract_version: "1", operation: "room.ack", result: { room_id: "ao", principal: "dennis", last_sequence: room.cursor } });
+    }
     if (pathname === "/api/__test__/fleet/reset" && req.method === "POST") {
       // Per-spec hermeticity: restore this scope's fleet to the baseline.
       fleetScopes.set(req.headers["x-e2e-fleet"] || "default", cloneFleet(FLEET));

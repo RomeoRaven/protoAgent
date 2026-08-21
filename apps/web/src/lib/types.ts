@@ -1373,6 +1373,33 @@ export type DelegateView = {
   [key: string]: unknown;
 };
 
+// Canonical Agent Room plugin contract. The native Fleet Room surface consumes
+// these when the backend is installed; otherwise its existing fleet behavior remains.
+export type AgentRoom = { id: string; name: string; created_at: string };
+export type AgentRoomMessage = {
+  id: string;
+  room_id: string;
+  sequence: number;
+  client_message_id: string;
+  author_principal: string;
+  author_kind: string;
+  body: string;
+  thread_id: string;
+  reply_to_message_id: string | null;
+  created_at: string;
+};
+export type AgentRoomMember = {
+  principal: string;
+  kind: string;
+  display_name: string;
+  role: string;
+  mention_token: string;
+  host: string;
+  can_post: boolean;
+  can_mention: boolean;
+};
+export type AgentRoomEnvelope<T> = { contract_version: "1"; operation?: string; result: T };
+
 // Fleet (ADR 0042) — many workspace agents on one host, switchable in place.
 export type FleetAgent = {
   name: string; // the [A-Za-z0-9-_] addressing handle (control plane accepts it beside `id`)

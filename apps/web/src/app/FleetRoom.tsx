@@ -17,7 +17,7 @@ import { ExternalLink, Play, Radio, Send, Square } from "lucide-react";
 import { useToast } from "@protolabsai/ui/overlays";
 import type { PaletteContext, PaletteView } from "@protolabsai/ui/command-palette";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, currentSlug } from "../lib/api";
+import { api, ApiError, currentSlug } from "../lib/api";
 import { fleetQuery, queryKeys } from "../lib/queries";
 import { errMsg } from "../lib/format";
 import type { FleetAgent } from "../lib/types";
@@ -30,6 +30,7 @@ import {
   useMemberRunning,
 } from "./FleetActivity";
 import "./fleet-room.css";
+import { AgentRoomMode } from "./AgentRoomMode";
 
 /** The routing slug for a member — the host entry is the reserved "host" (ADR 0042). */
 const slugOf = (a: FleetAgent): string => (a.host ? "host" : a.id);
@@ -46,7 +47,7 @@ function presenceOf(a: FleetAgent): { key: PresenceKey; label: string } {
 
 const clip = (s: string, n = 72): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
+function LegacyFleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
   const { data: fleet } = useQuery(fleetQuery());
   const qc = useQueryClient();
   const toast = useToast();
@@ -367,6 +368,71 @@ function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (sl
   );
 }
 
+function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
+  const rooms = useQuery({
+    queryKey: ["agent-room", "rooms"],
+    queryFn: () => api.agentRoomList(),
+    retry: false,
+    staleTime: 15_000,
+  });
+  const canonical = rooms.data?.rooms[0];
+  if (rooms.isLoading) {
+    return (
+      <div className="flr flr-room__unavailable" role="status">
+        <h2>Loading shared room…</h2>
+        <p>Checking for the canonical backend before enabling any message action.</p>
+      </div>
+    );
+  }
+  if (canonical) return <AgentRoomMode room={canonical} />;
+  const emptyBackend = rooms.isSuccess && rooms.data.rooms.length === 0;
+  if (emptyBackend || (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404))) {
+    return (
+      <div className="flr flr-room__unavailable" role="alert">
+        <h2>Room backend unavailable</h2>
+        <p>The shared room could not be loaded. Existing fleet messaging is paused so this text is not broadcast by mistake.</p>
+      </div>
+    );
+  }
+  return <LegacyFleetRoom ctx={ctx} onOpenAgent={onOpenAgent} />;
+}
+
+function FleetRoomFooter() {
+  const rooms = useQuery({
+    queryKey: ["agent-room", "rooms"],
+    queryFn: () => api.agentRoomList(),
+    retry: false,
+    staleTime: 15_000,
+  });
+  if (rooms.isLoading) return <span className="flr__hint">Checking shared room…</span>;
+  if (rooms.data?.rooms[0]) {
+    return (
+      <span className="flr__hint">
+        <span>
+          <kbd className="flr__kbd">↵</kbd> post to room · plain text wakes no agent
+        </span>
+      </span>
+    );
+  }
+  const emptyBackend = rooms.isSuccess && rooms.data.rooms.length === 0;
+  if (emptyBackend || (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404))) {
+    return <span className="flr__hint">Shared room unavailable · messaging paused</span>;
+  }
+  return (
+    <span className="flr__hint">
+      <span>
+        <kbd className="flr__kbd">click</kbd> DM a member
+      </span>
+      <span>
+        <kbd className="flr__kbd">@</kbd> address in composer
+      </span>
+      <span>
+        <kbd className="flr__kbd">↵</kbd> send · <kbd className="flr__kbd">⌘↵</kbd> broadcast
+      </span>
+    </span>
+  );
+}
+
 /** The palette view (registered by usePaletteRegistry; entered by the "Fleet Room"
  *  command). Kept as a factory so the JSX lives here and usePaletteRegistry stays .ts.
  *  `onOpenAgent` routes through the registry's nav chokepoint so it also works forwarded
@@ -376,19 +442,7 @@ export function fleetRoomView(opts: { onOpenAgent: (slug: string) => void }): Pa
     id: "fleet-room",
     title: "Fleet",
     width: 780,
-    footerHint: (
-      <span className="flr__hint">
-        <span>
-          <kbd className="flr__kbd">click</kbd> DM a member
-        </span>
-        <span>
-          <kbd className="flr__kbd">@</kbd> address in composer
-        </span>
-        <span>
-          <kbd className="flr__kbd">↵</kbd> send · <kbd className="flr__kbd">⌘↵</kbd> broadcast
-        </span>
-      </span>
-    ),
+    footerHint: <FleetRoomFooter />,
     render: (ctx) => <FleetRoom ctx={ctx} onOpenAgent={opts.onOpenAgent} />,
   };
 }
