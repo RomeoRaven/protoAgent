@@ -413,6 +413,22 @@ test("⌘K → canonical Room follows bounded sync pages", async ({ page }) => {
   await expect(room.locator(".flr-room__message")).toHaveCount(105);
 });
 
+test("⌘K → canonical Room shows mention delivery and blocked cycle state", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "mention-status-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await openFleetRoom(page);
+  const room = page.locator(".flr");
+
+  const messages = room.locator(".flr-room__message");
+  const humanSource = messages.filter({ hasText: "@Hermes start" });
+  const hermesReply = messages.filter({ hasText: "handoff @Headroom" });
+  const headroomReply = messages.filter({ hasText: "done @Hermes" });
+
+  await expect(humanSource.getByText("Hermes · completed", { exact: true })).toBeVisible();
+  await expect(hermesReply.getByText("Headroom · completed", { exact: true })).toBeVisible();
+  await expect(headroomReply.getByText("Hermes · blocked · mention cycle blocked", { exact: true })).toBeVisible();
+});
+
 test("⌘K → Fleet Room shows the roster + live activity feed side by side", async ({ page }) => {
   await page.goto("/app/", { waitUntil: "load" });
   await openFleetRoom(page);

@@ -389,6 +389,27 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.flr-room__mentions {
+  margin: 7px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  list-style: none;
+  color: var(--pl-color-fg-muted);
+  font-size: 11px;
+}
+.flr-room__mentions li {
+  border: 1px solid var(--pl-color-border);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+.flr-room__mentions li.is-blocked,
+.flr-room__mentions li.is-failed,
+.flr-room__mentions li.is-ambiguous {
+  border-color: var(--pl-color-status-error, #e5484d);
+  color: var(--pl-color-status-error, #e5484d);
+}
 .flr-room__state,
 .flr-room__post-error {
   color: var(--pl-color-fg-muted);
