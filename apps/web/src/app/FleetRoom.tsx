@@ -396,6 +396,41 @@ function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (sl
   return <LegacyFleetRoom ctx={ctx} onOpenAgent={onOpenAgent} />;
 }
 
+function FleetRoomFooter() {
+  const rooms = useQuery({
+    queryKey: ["agent-room", "rooms"],
+    queryFn: () => api.agentRoomList(),
+    retry: false,
+    staleTime: 15_000,
+  });
+  if (rooms.isLoading) return <span className="flr__hint">Checking shared room…</span>;
+  if (rooms.data?.rooms[0]) {
+    return (
+      <span className="flr__hint">
+        <span>
+          <kbd className="flr__kbd">↵</kbd> post to room · plain text wakes no agent
+        </span>
+      </span>
+    );
+  }
+  if (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404)) {
+    return <span className="flr__hint">Shared room unavailable · messaging paused</span>;
+  }
+  return (
+    <span className="flr__hint">
+      <span>
+        <kbd className="flr__kbd">click</kbd> DM a member
+      </span>
+      <span>
+        <kbd className="flr__kbd">@</kbd> address in composer
+      </span>
+      <span>
+        <kbd className="flr__kbd">↵</kbd> send · <kbd className="flr__kbd">⌘↵</kbd> broadcast
+      </span>
+    </span>
+  );
+}
+
 /** The palette view (registered by usePaletteRegistry; entered by the "Fleet Room"
  *  command). Kept as a factory so the JSX lives here and usePaletteRegistry stays .ts.
  *  `onOpenAgent` routes through the registry's nav chokepoint so it also works forwarded
@@ -405,19 +440,7 @@ export function fleetRoomView(opts: { onOpenAgent: (slug: string) => void }): Pa
     id: "fleet-room",
     title: "Fleet",
     width: 780,
-    footerHint: (
-      <span className="flr__hint">
-        <span>
-          <kbd className="flr__kbd">click</kbd> DM a member
-        </span>
-        <span>
-          <kbd className="flr__kbd">@</kbd> address in composer
-        </span>
-        <span>
-          <kbd className="flr__kbd">↵</kbd> send · <kbd className="flr__kbd">⌘↵</kbd> broadcast
-        </span>
-      </span>
-    ),
+    footerHint: <FleetRoomFooter />,
     render: (ctx) => <FleetRoom ctx={ctx} onOpenAgent={opts.onOpenAgent} />,
   };
 }

@@ -367,10 +367,20 @@ test("⌘K → Fleet Room: presence, DM a member (the wired chat), broadcast", a
 test("⌘K → Fleet Room uses the canonical backend without broadcasting", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "native-room" });
   await page.goto("/app/", { waitUntil: "load" });
-  await openFleetRoom(page);
+  await page.keyboard.press("ControlOrMeta+k");
+  const palette = page.locator(".pl-cmdk__panel");
+  await palette.locator(".pl-cmdk-commands__input").fill("Fleet Room");
+  const command = palette.getByRole("option", { name: "Fleet Room" });
+  await expect(command).not.toContainText(/broadcast/);
+  await command.click();
+  await expect(page.locator(".pl-cmdk__title")).toHaveText("Fleet");
   const room = page.locator(".flr");
 
   await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
+  await expect(room).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByText(/DM a member/)).toHaveCount(0);
+  await expect(page.getByText(/address in composer/)).toHaveCount(0);
+  await expect(page.getByText(/broadcast/)).toHaveCount(0);
   await expect(room.getByText("Welcome to the shared room", { exact: true })).toBeVisible();
   await expect(room.getByRole("list", { name: "Room members" }).getByText("Dennis", { exact: true })).toBeVisible();
   await expect(room.getByRole("list", { name: "Room members" }).getByText("PC1", { exact: true })).toBeVisible();
