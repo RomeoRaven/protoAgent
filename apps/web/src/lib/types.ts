@@ -1375,7 +1375,23 @@ export type DelegateView = {
 
 // Canonical Agent Room plugin contract. The native Fleet Room surface consumes
 // these when the backend is installed; otherwise its existing fleet behavior remains.
-export type AgentRoom = { id: string; name: string; created_at: string };
+export type AgentRoom = {
+  id: string;
+  name: string;
+  status?: "active" | "archived";
+  archived?: boolean;
+  active_from_sequence?: number;
+  latest_sequence?: number;
+  message_count?: number;
+  current_message_count?: number;
+  unread_count?: number;
+  unread_mentions?: number;
+  history_available?: boolean;
+  last_activity_at?: string;
+  created_at: string;
+  updated_at?: string;
+  archived_at?: string | null;
+};
 export type AgentRoomMessage = {
   id: string;
   room_id: string;
@@ -1416,6 +1432,23 @@ export type AgentRoomMember = {
   can_mention: boolean;
   /** True only when this member has a configured local Room dispatch target. */
   mentionable?: boolean;
+};
+export type AgentRoomSyncResult = {
+  messages: AgentRoomMessage[];
+  mentions?: AgentRoomMention[];
+  next_sequence: number;
+  has_more: boolean;
+  has_older: boolean;
+  oldest_sequence: number | null;
+  active_from_sequence: number;
+  history_available: boolean;
+  window_sequence?: number;
+};
+export type AgentRoomSearchResult = AgentRoomMessage & {
+  room_name: string;
+  room_status: "active" | "archived";
+  snippet: string;
+  earlier: boolean;
 };
 export type AgentRoomEnvelope<T> = { contract_version: "1"; operation?: string; result: T };
 

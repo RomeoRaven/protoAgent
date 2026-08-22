@@ -29,6 +29,7 @@
 /* The canonical Room is conversation-first: membership is supporting context,
  * never the dominant column. Keep Fleet Room's roster/activity balance unchanged. */
 .flr--agent-room {
+  position: relative;
   container-type: inline-size;
 }
 .flr--agent-room.flr--full-height {

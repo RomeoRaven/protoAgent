@@ -31,6 +31,7 @@ import {
 } from "./FleetActivity";
 import "./fleet-room.css";
 import { AgentRoomMode } from "./AgentRoomMode";
+import { AgentRoomControls } from "./AgentRoomControls";
 
 /** The routing slug for a member — the host entry is the reserved "host" (ADR 0042). */
 const slugOf = (a: FleetAgent): string => (a.host ? "host" : a.id);
@@ -370,7 +371,7 @@ function LegacyFleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgen
 
 function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
   const rooms = useQuery({
-    queryKey: ["agent-room", "rooms"],
+    queryKey: ["agent-room", "rooms", "active"],
     queryFn: () => api.agentRoomList(),
     retry: false,
     staleTime: 15_000,
@@ -400,13 +401,29 @@ function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (sl
 /** Native rail surface for the canonical shared Room. Unlike the legacy Fleet Room
  * palette fallback, this surface never broadcasts when the Room backend is absent. */
 export function RoomsSurface() {
+  const [selectedRoomId, setSelectedRoomId] = useState(() => globalThis.localStorage?.getItem("protoagent.agent-room.selected") ?? "");
+  const [aroundSequence, setAroundSequence] = useState<number | undefined>();
   const rooms = useQuery({
-    queryKey: ["agent-room", "rooms"],
-    queryFn: () => api.agentRoomList(),
+    queryKey: ["agent-room", "rooms", "all"],
+    queryFn: () => api.agentRoomList("all"),
     retry: false,
-    staleTime: 15_000,
+    staleTime: 2_000,
   });
-  const canonical = rooms.data?.rooms[0];
+  const available = rooms.data?.rooms ?? [];
+  const selected = available.find((room) => room.id === selectedRoomId)
+    ?? available.find((room) => (room.status ?? "active") === "active")
+    ?? available[0];
+  useEffect(() => {
+    if (selected && selected.id !== selectedRoomId) {
+      setSelectedRoomId(selected.id);
+      globalThis.localStorage?.setItem("protoagent.agent-room.selected", selected.id);
+    }
+  }, [selected?.id, selectedRoomId]);
+  const selectRoom = (roomId: string, sequence?: number) => {
+    setSelectedRoomId(roomId);
+    setAroundSequence(sequence);
+    globalThis.localStorage?.setItem("protoagent.agent-room.selected", roomId);
+  };
   if (rooms.isLoading) {
     return (
       <div className="flr flr-room__unavailable" role="status">
@@ -415,7 +432,15 @@ export function RoomsSurface() {
       </div>
     );
   }
-  if (canonical) return <AgentRoomMode room={canonical} fullHeight />;
+  if (selected) return (
+    <AgentRoomMode
+      room={selected}
+      fullHeight
+      aroundSequence={aroundSequence}
+      onReturnLatest={() => setAroundSequence(undefined)}
+      controls={selected.status != null ? <AgentRoomControls rooms={available} room={selected} onSelect={selectRoom} /> : undefined}
+    />
+  );
   return (
     <div className="flr flr-room__unavailable" role="alert">
       <h2>Rooms unavailable</h2>
@@ -426,7 +451,7 @@ export function RoomsSurface() {
 
 function FleetRoomFooter() {
   const rooms = useQuery({
-    queryKey: ["agent-room", "rooms"],
+    queryKey: ["agent-room", "rooms", "active"],
     queryFn: () => api.agentRoomList(),
     retry: false,
     staleTime: 15_000,

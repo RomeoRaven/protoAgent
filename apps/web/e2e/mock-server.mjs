@@ -211,11 +211,25 @@ function agentRoomFor(req) {
       { id: "status-mention-2", room_id: "ao", source_message_id: "status-msg-2", target_principal: "headroom", token: "@Headroom", status: "completed", parent_mention_id: "status-mention-1", origin_message_id: "status-msg-1", origin_chain: ["hermes", "headroom"], hop_count: 1, position: 8, reply_message_id: "status-msg-3", error: null, created_at: "2026-08-21T20:00:01Z", updated_at: "2026-08-21T20:00:02Z" },
       { id: "status-mention-3", room_id: "ao", source_message_id: "status-msg-3", target_principal: "hermes", token: "@Hermes", status: "blocked", parent_mention_id: "status-mention-2", origin_message_id: "status-msg-1", origin_chain: ["hermes", "headroom", "hermes"], hop_count: 2, position: 5, reply_message_id: null, error: "mention cycle blocked", created_at: "2026-08-21T20:00:02Z", updated_at: "2026-08-21T20:00:02Z" },
     ] : [];
+    if (scope === "multi-room") {
+      messages.splice(0, messages.length, {
+        id: "legacy-topic-1", room_id: "ao", sequence: 1, client_message_id: "legacy-topic-1",
+        author_principal: "dennis", author_kind: "human", body: "legacy topic history",
+        thread_id: "legacy-topic-1", reply_to_message_id: null, created_at: "2026-08-20T20:00:00Z",
+      });
+    }
     agentRoomScopes.set(scope, {
       sequence: messages.length,
+      sequences: { ao: messages.length },
       cursor: 0,
+      cursors: { ao: 0 },
       messages,
       mentions,
+      rooms: [{
+        id: "ao", name: "Agent Organization", status: "active", archived: false,
+        active_from_sequence: 1, created_at: "2026-08-20T20:00:00Z",
+        updated_at: "2026-08-20T20:00:00Z", archived_at: null,
+      }],
       members: scope === "mention-status-room" ? [
         { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true, mentionable: false },
         { principal: "hermes", kind: "agent", display_name: "Hermes", role: "member", mention_token: "@Hermes", host: "s1", can_post: true, can_mention: true, mentionable: true },
@@ -227,6 +241,29 @@ function agentRoomFor(req) {
     });
   }
   return agentRoomScopes.get(scope);
+}
+
+function agentRoomView(state, room) {
+  const messages = state.messages.filter((message) => message.room_id === room.id);
+  const latest = messages.reduce((value, message) => Math.max(value, message.sequence), 0);
+  const cursor = state.cursors[room.id] || 0;
+  const floor = Math.max(0, room.active_from_sequence - 1);
+  const threshold = Math.max(cursor, floor);
+  const messageIds = new Set(messages.filter((message) => message.sequence > threshold).map((message) => message.id));
+  return {
+    ...room,
+    latest_sequence: latest,
+    message_count: messages.length,
+    current_message_count: messages.filter((message) => message.sequence >= room.active_from_sequence).length,
+    unread_count: Math.max(0, latest - threshold),
+    unread_mentions: state.mentions.filter((mention) => mention.room_id === room.id && messageIds.has(mention.source_message_id)).length,
+    history_available: room.active_from_sequence > 1,
+    last_activity_at: messages.at(-1)?.created_at || room.updated_at,
+  };
+}
+
+function agentRoomById(state, roomId) {
+  return state.rooms.find((room) => room.id === roomId);
 }
 
 // The MCP roster needs the SAME per-spec isolation, for a sharper reason: its writers
@@ -809,21 +846,73 @@ const server = createServer(async (req, res) => {
       }
       const room = agentRoomFor(req);
       if (room && pathname === "/api/plugins/agent-room/rooms") {
+        const status = url.searchParams.get("status") || "active";
         const rooms = req.headers["x-e2e-agent-room"] === "empty-room"
           ? []
-          : [{ id: "ao", name: "Agent Organization", created_at: "2026-08-20T20:00:00Z" }];
+          : room.rooms.filter((item) => status === "all" || item.status === status).map((item) => agentRoomView(room, item));
         return sendJson(res, { contract_version: "1", rooms });
       }
-      if (room && pathname === "/api/plugins/agent-room/rooms/ao/messages") {
-        const after = Number(url.searchParams.get("after") || 0);
-        const remaining = room.messages.filter((message) => message.sequence > after);
-        const limit = Math.min(Number(url.searchParams.get("limit") || 100), 100);
-        const messages = remaining.slice(0, limit);
-        const messageIds = new Set(messages.map((message) => message.id));
-        const mentions = room.mentions.filter((mention) => messageIds.has(mention.source_message_id));
-        return sendJson(res, { contract_version: "1", operation: "room.sync", result: { messages, mentions, next_sequence: messages.at(-1)?.sequence ?? after, has_more: remaining.length > messages.length } });
+      if (room && pathname === "/api/plugins/agent-room/search") {
+        const query = (url.searchParams.get("q") || "").toLowerCase();
+        const scope = url.searchParams.get("scope") || "current";
+        const roomId = url.searchParams.get("room_id");
+        const history = url.searchParams.get("history") === "true";
+        const results = room.messages.filter((message) => {
+          const owner = agentRoomById(room, message.room_id);
+          if (!owner || !message.body.toLowerCase().includes(query)) return false;
+          if (scope === "current" && owner.id !== roomId) return false;
+          if (scope === "all" && owner.status !== "active") return false;
+          if (scope === "archived" && owner.status !== "archived") return false;
+          return history || scope === "archived" || message.sequence >= owner.active_from_sequence;
+        }).map((message) => {
+          const owner = agentRoomById(room, message.room_id);
+          return { ...message, room_name: owner.name, room_status: owner.status, snippet: message.body, earlier: message.sequence < owner.active_from_sequence };
+        });
+        return sendJson(res, { contract_version: "1", operation: "room.search", result: { results } });
       }
-      if (room && pathname === "/api/plugins/agent-room/rooms/ao/members") {
+      const roomMessagesMatch = /^\/api\/plugins\/agent-room\/rooms\/([^/]+)\/messages$/.exec(pathname);
+      if (room && roomMessagesMatch) {
+        const roomId = decodeURIComponent(roomMessagesMatch[1]);
+        const owner = agentRoomById(room, roomId);
+        if (!owner) return sendJson(res, { detail: "unknown room" }, 404);
+        const history = url.searchParams.get("history") === "true";
+        const lower = history ? 1 : owner.active_from_sequence;
+        const limit = Math.min(Number(url.searchParams.get("limit") || 50), 100);
+        const afterRaw = url.searchParams.get("after");
+        const beforeRaw = url.searchParams.get("before");
+        const aroundRaw = url.searchParams.get("around");
+        let candidates = room.messages.filter((message) => message.room_id === roomId && message.sequence >= lower);
+        let hasMore = false;
+        let hasOlder = false;
+        let windowSequence;
+        if (aroundRaw) {
+          windowSequence = Number(aroundRaw);
+          const start = Math.max(lower, windowSequence - Math.floor(limit / 2));
+          candidates = candidates.filter((message) => message.sequence >= start && message.sequence < start + limit).slice(0, limit);
+          hasOlder = candidates.length > 0 && candidates[0].sequence > lower;
+        } else if (afterRaw !== null) {
+          const after = Number(afterRaw);
+          const remaining = candidates.filter((message) => message.sequence > after);
+          candidates = remaining.slice(0, limit);
+          hasMore = remaining.length > candidates.length;
+          hasOlder = candidates.length > 0 && candidates[0].sequence > lower;
+        } else {
+          const before = beforeRaw ? Number(beforeRaw) : Number.MAX_SAFE_INTEGER;
+          const remaining = candidates.filter((message) => message.sequence < before);
+          hasOlder = remaining.length > limit;
+          candidates = remaining.slice(-limit);
+        }
+        const messageIds = new Set(candidates.map((message) => message.id));
+        const mentions = room.mentions.filter((mention) => messageIds.has(mention.source_message_id));
+        return sendJson(res, { contract_version: "1", operation: "room.sync", result: {
+          messages: candidates, mentions, next_sequence: candidates.at(-1)?.sequence ?? 0,
+          has_more: hasMore, has_older: hasOlder, oldest_sequence: candidates[0]?.sequence ?? null,
+          active_from_sequence: owner.active_from_sequence, history_available: owner.active_from_sequence > 1,
+          ...(windowSequence ? { window_sequence: windowSequence } : {}),
+        } });
+      }
+      const roomMembersMatch = /^\/api\/plugins\/agent-room\/rooms\/([^/]+)\/members$/.exec(pathname);
+      if (room && roomMembersMatch) {
         return sendJson(res, { contract_version: "1", operation: "room.members", result: { members: room.members } });
       }
       const payload = handleApiGet(pathname, fleetFor(req), url.searchParams, mcpFor(req));
@@ -944,20 +1033,58 @@ const server = createServer(async (req, res) => {
     const body = await readBody(req);
     const fleet = fleetFor(req);
     const room = agentRoomFor(req);
-    if (room && pathname === "/api/plugins/agent-room/rooms/ao/post" && req.method === "POST") {
-      const sequence = ++room.sequence;
+    if (room && pathname === "/api/plugins/agent-room/rooms" && req.method === "POST") {
+      const id = `room-${room.rooms.length + 1}`;
+      const stamp = "2026-08-22T01:00:00Z";
+      const created = { id, name: String(body.name || ""), status: "active", archived: false, active_from_sequence: 1, created_at: stamp, updated_at: stamp, archived_at: null };
+      room.rooms.push(created);
+      room.sequences[id] = 0;
+      room.cursors[id] = 0;
+      return sendJson(res, { contract_version: "1", operation: "room.create", result: { room: agentRoomView(room, created) } });
+    }
+    const roomRenameMatch = /^\/api\/plugins\/agent-room\/rooms\/([^/]+)$/.exec(pathname);
+    if (room && roomRenameMatch && req.method === "PATCH") {
+      const owner = agentRoomById(room, decodeURIComponent(roomRenameMatch[1]));
+      owner.name = String(body.name || owner.name);
+      owner.updated_at = "2026-08-22T01:00:01Z";
+      return sendJson(res, { contract_version: "1", operation: "room.rename", result: { room: agentRoomView(room, owner) } });
+    }
+    const roomLifecycleMatch = /^\/api\/plugins\/agent-room\/rooms\/([^/]+)\/(archive|restore|reset)$/.exec(pathname);
+    if (room && roomLifecycleMatch && req.method === "POST") {
+      const owner = agentRoomById(room, decodeURIComponent(roomLifecycleMatch[1]));
+      const action = roomLifecycleMatch[2];
+      if (action === "archive") {
+        owner.status = "archived"; owner.archived = true; owner.archived_at = "2026-08-22T01:00:02Z";
+      } else if (action === "restore") {
+        owner.status = "active"; owner.archived = false; owner.archived_at = null;
+      } else {
+        owner.active_from_sequence = (room.sequences[owner.id] || 0) + 1;
+      }
+      owner.updated_at = "2026-08-22T01:00:02Z";
+      return sendJson(res, { contract_version: "1", operation: `room.${action}`, result: { room: agentRoomView(room, owner) } });
+    }
+    const roomPostMatch = /^\/api\/plugins\/agent-room\/rooms\/([^/]+)\/post$/.exec(pathname);
+    if (room && roomPostMatch && req.method === "POST") {
+      const roomId = decodeURIComponent(roomPostMatch[1]);
+      const owner = agentRoomById(room, roomId);
+      if (owner.status === "archived") return sendJson(res, { detail: "archived room is read-only" }, 409);
+      const sequence = (room.sequences[roomId] || 0) + 1;
+      room.sequences[roomId] = sequence;
       const message = {
-        id: `room-msg-${sequence}`, room_id: "ao", sequence,
+        id: `${roomId}-msg-${sequence}`, room_id: roomId, sequence,
         client_message_id: String(body.client_message_id || ""), author_principal: "dennis",
-        author_kind: "human", body: String(body.body || ""), thread_id: `room-msg-${sequence}`,
-        reply_to_message_id: null, created_at: "2026-08-20T20:01:00Z",
+        author_kind: "human", body: String(body.body || ""), thread_id: `${roomId}-msg-${sequence}`,
+        reply_to_message_id: null, created_at: "2026-08-22T01:01:00Z",
       };
       room.messages.push(message);
+      owner.updated_at = message.created_at;
       return sendJson(res, { contract_version: "1", operation: "room.post", result: { created: true, message } });
     }
-    if (room && pathname === "/api/plugins/agent-room/rooms/ao/ack" && req.method === "POST") {
-      room.cursor = Math.max(room.cursor, Number(body.sequence || 0));
-      return sendJson(res, { contract_version: "1", operation: "room.ack", result: { room_id: "ao", principal: "dennis", last_sequence: room.cursor } });
+    const roomAckMatch = /^\/api\/plugins\/agent-room\/rooms\/([^/]+)\/ack$/.exec(pathname);
+    if (room && roomAckMatch && req.method === "POST") {
+      const roomId = decodeURIComponent(roomAckMatch[1]);
+      room.cursors[roomId] = Math.max(room.cursors[roomId] || 0, Number(body.sequence || 0));
+      return sendJson(res, { contract_version: "1", operation: "room.ack", result: { room_id: roomId, principal: "dennis", last_sequence: room.cursors[roomId] } });
     }
     if (pathname === "/api/__test__/fleet/reset" && req.method === "POST") {
       // Per-spec hermeticity: restore this scope's fleet to the baseline.
