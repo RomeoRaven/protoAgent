@@ -441,6 +441,33 @@ test("Rooms rail surface fails closed when no Room backend is installed", async 
   await expect(page.locator(".flr__composer")).toHaveCount(0);
 });
 
+test("PC1 client Room shows canonical history and durable offline pending posts without owner controls", async ({ page }) => {
+  await page.route("**/api/plugins/agent-room/rooms?status=all", (route) => route.fulfill({ json: {
+    contract_version: "1",
+    rooms: [{ id: "ao", name: "Agent Organization", created_at: "", latest_sequence: 15, client_mode: true, owner_online: false }],
+  } }));
+  await page.route("**/api/plugins/agent-room/rooms/ao/messages?*", (route) => route.fulfill({ json: {
+    contract_version: "1", operation: "room.sync", result: {
+      messages: [{ id: "canonical-15", room_id: "ao", sequence: 15, client_message_id: "s1-15", author_principal: "pc1", author_kind: "human", body: "Canonical from S1", thread_id: "canonical-15", reply_to_message_id: null, created_at: "2026-08-22T00:00:00Z" }],
+      mentions: [], next_sequence: 15, has_more: false, has_older: false, oldest_sequence: 15, active_from_sequence: 1, history_available: false,
+      owner_online: false,
+      pending_posts: [{ room_id: "ao", client_message_id: "pending-1", body: "Queued while S1 is offline", created_at: "2026-08-22T00:01:00Z", status: "pending" }],
+    },
+  } }));
+  await page.route("**/api/plugins/agent-room/rooms/ao/members", (route) => route.fulfill({ json: { contract_version: "1", operation: "room.members", result: { members: [{ principal: "pc1", kind: "host", display_name: "PC1", role: "member", mention_token: "@PC1", host: "pc1", can_post: true, can_mention: false, mentionable: false }] } } }));
+  await page.route("**/api/plugins/agent-room/rooms/ao/ack", (route) => route.fulfill({ json: { contract_version: "1", operation: "room.ack", result: { room_id: "ao", principal: "pc1", last_sequence: 15 } } }));
+  await page.goto("/app/", { waitUntil: "load" });
+  await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
+
+  const room = page.locator(".flr--agent-room");
+  await expect(room.getByText("Canonical from S1", { exact: true })).toBeVisible();
+  await expect(room.getByText("Queued while S1 is offline", { exact: true })).toBeVisible();
+  await expect(room.getByRole("status", { name: "Room owner status" })).toContainText("S1 Room owner offline");
+  await expect(room.getByText("Pending — will send when S1 reconnects", { exact: true })).toBeVisible();
+  await expect(room.getByRole("button", { name: "Room actions" })).toHaveCount(0);
+  await expect(room.getByRole("button", { name: "Search rooms" })).toHaveCount(0);
+});
+
 test("⌘K → an installed backend with no canonical room pauses messaging", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "empty-room" });
   await page.goto("/app/", { waitUntil: "load" });

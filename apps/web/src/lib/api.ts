@@ -1900,7 +1900,7 @@ export const api = {
     );
   },
   agentRoomPost(roomId: string, body: { client_message_id: string; body: string }) {
-    return request<AgentRoomEnvelope<{ created: boolean; message: AgentRoomMessage }>>(
+    return request<AgentRoomEnvelope<{ created: boolean; message?: AgentRoomMessage; pending?: boolean }>>(
       `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/post`,
       { method: "POST", body },
     );
