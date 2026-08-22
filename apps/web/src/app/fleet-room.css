@@ -475,6 +475,13 @@
   background: var(--pl-color-bg-subtle);
   padding: 9px 11px;
 }
+.flr-room__message.is-pending {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--pl-color-accent, #7c8cff) 8%, var(--pl-color-bg-subtle));
+}
+.flr-room__message.is-pending .flr-room__recipient-guide {
+  margin-top: 7px;
+}
 .flr-room__message header {
   display: flex;
   justify-content: space-between;

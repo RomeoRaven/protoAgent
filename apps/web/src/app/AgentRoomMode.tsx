@@ -58,6 +58,9 @@ export function AgentRoomMode({
     () => (messages.data?.pages.flatMap((page) => page.result.messages) ?? []).sort((a, b) => a.sequence - b.sequence),
     [messages.data],
   );
+  const latestPage = messages.data?.pages[messages.data.pages.length - 1];
+  const ownerOnline = latestPage?.result.owner_online ?? room.owner_online ?? true;
+  const pendingPosts = latestPage?.result.pending_posts ?? [];
   const mentionsBySource = useMemo(() => {
     const grouped = new Map<string, AgentRoomMention[]>();
     for (const mention of messages.data?.pages.flatMap((page) => page.result.mentions ?? []) ?? []) {
@@ -234,6 +237,7 @@ export function AgentRoomMode({
             <span className="flr__count">#{room.latest_sequence || latest || 0}</span>
           </div>
           <div ref={messagesRef} className="flr-room__messages">
+            {room.client_mode && !ownerOnline && <div className="flr-room__history-banner" role="status" aria-label="Room owner status">S1 Room owner offline — new posts remain pending on PC1.</div>}
             {aroundSequence && <div className="flr-room__history-banner"><span>Search result context</span><button type="button" onClick={onReturnLatest}>Return to latest</button></div>}
             {!aroundSequence && lifecycleAvailable && room.history_available && !history && <button className="flr-room__history-action" type="button" onClick={() => setHistory(true)}>Show earlier history</button>}
             {!aroundSequence && history && <button className="flr-room__history-action" type="button" onClick={() => setHistory(false)}>Show current messages</button>}
@@ -268,6 +272,11 @@ export function AgentRoomMode({
                 )}
               </article>;
             })}
+            {pendingPosts.map((pending) => <article className="flr-room__message is-pending" key={`pending:${pending.client_message_id}`}>
+              <header><strong>You</strong><span>pending</span></header>
+              <p>{pending.body}</p>
+              <div className="flr-room__recipient-guide" role="status">Pending — will send when S1 reconnects</div>
+            </article>)}
           </div>
         </div>
       </div>

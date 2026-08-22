@@ -1391,6 +1391,8 @@ export type AgentRoom = {
   created_at: string;
   updated_at?: string;
   archived_at?: string | null;
+  client_mode?: boolean;
+  owner_online?: boolean;
 };
 export type AgentRoomMessage = {
   id: string;
@@ -1443,6 +1445,15 @@ export type AgentRoomSyncResult = {
   active_from_sequence: number;
   history_available: boolean;
   window_sequence?: number;
+  owner_online?: boolean;
+  pending_posts?: AgentRoomPendingPost[];
+};
+export type AgentRoomPendingPost = {
+  room_id: string;
+  client_message_id: string;
+  body: string;
+  created_at: string;
+  status: "pending";
 };
 export type AgentRoomSearchResult = AgentRoomMessage & {
   room_name: string;
