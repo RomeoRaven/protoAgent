@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Send } from "lucide-react";
-import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
 import type { AgentRoom, AgentRoomMember, AgentRoomMention } from "../lib/types";
@@ -11,16 +11,40 @@ function tokensIn(text: string): string[] {
   return Array.from(text.matchAll(ROOM_TOKEN), (match) => match[0]);
 }
 
-export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; fullHeight?: boolean }) {
+export function AgentRoomMode({
+  room,
+  fullHeight = false,
+  controls,
+  aroundSequence,
+  onReturnLatest,
+}: {
+  room: AgentRoom;
+  fullHeight?: boolean;
+  controls?: ReactNode;
+  aroundSequence?: number;
+  onReturnLatest?: () => void;
+}) {
   const [draft, setDraft] = useState("");
+  const [history, setHistory] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [suggestionsClosed, setSuggestionsClosed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
+  const lifecycleAvailable = room.status != null;
+  const roomStatus = room.status ?? "active";
   const messages = useInfiniteQuery({
-    queryKey: ["agent-room", room.id, "messages"],
-    queryFn: ({ pageParam }) => api.agentRoomSync(room.id, pageParam, 100),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage) => lastPage.result.has_more ? lastPage.result.next_sequence : undefined,
+    queryKey: ["agent-room", room.id, "messages", room.active_from_sequence ?? 1, history, aroundSequence ?? null],
+    queryFn: ({ pageParam }) => api.agentRoomSync(room.id, !lifecycleAvailable
+      ? { after: pageParam ?? 0, limit: 100 }
+      : aroundSequence
+        ? { around: aroundSequence, limit: 21, history: true }
+        : { before: pageParam ?? undefined, limit: 50, history }),
+    initialPageParam: null as number | null,
+    getNextPageParam: (lastPage) => !lifecycleAvailable
+      ? lastPage.result.has_more ? lastPage.result.next_sequence : undefined
+      : !aroundSequence && lastPage.result.has_older
+        ? lastPage.result.oldest_sequence ?? undefined
+        : undefined,
     refetchInterval: 2_000,
   });
   const members = useQuery({
@@ -96,17 +120,20 @@ export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; f
     onSuccess: async () => {
       setDraft("");
       await messages.refetch();
+      await queryClient.invalidateQueries({ queryKey: ["agent-room", "rooms"] });
     },
   });
 
-  useEffect(() => {
-    if (messages.hasNextPage && !messages.isFetchingNextPage) void messages.fetchNextPage();
-  }, [messages.hasNextPage, messages.isFetchingNextPage, messages.fetchNextPage]);
+  useEffect(() => { setHistory(false); setDraft(""); }, [room.id]);
 
   const latest = ordered.length ? ordered[ordered.length - 1].sequence : 0;
   useEffect(() => {
-    if (latest > 0) void api.agentRoomAck(room.id, latest).catch(() => {});
-  }, [latest, room.id]);
+    if (!aroundSequence && latest > 0) {
+      void api.agentRoomAck(room.id, latest)
+        .then(() => queryClient.invalidateQueries({ queryKey: ["agent-room", "rooms"] }))
+        .catch(() => {});
+    }
+  }, [aroundSequence, latest, queryClient, room.id]);
 
   useEffect(() => setActiveSuggestion(-1), [mentionTrigger?.start, mentionTrigger?.query]);
 
@@ -156,7 +183,7 @@ export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; f
           <div className="flr__list" role="list" aria-label="Room members">
             {roomMembers.map((member) => (
               <div key={member.principal} role="listitem">
-                {member.mentionable ? (
+                {member.mentionable && roomStatus === "active" ? (
                   <button
                     className="flr__member flr-room__member-action"
                     type="button"
@@ -185,10 +212,14 @@ export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; f
 
         <div className="flr__col flr__activity flr-room">
           <div className="flr__colhead">
-            <h2>{room.name}</h2>
-            <span className="flr__count">#{latest || 0}</span>
+            {controls ? <><h2 className="flr-room__sr-only">{room.name}</h2>{controls}</> : <h2>{room.name}</h2>}
+            <span className="flr__count">#{room.latest_sequence || latest || 0}</span>
           </div>
           <div className="flr-room__messages" aria-live="polite">
+            {aroundSequence && <div className="flr-room__history-banner"><span>Search result context</span><button type="button" onClick={onReturnLatest}>Return to latest</button></div>}
+            {!aroundSequence && lifecycleAvailable && room.history_available && !history && <button className="flr-room__history-action" type="button" onClick={() => setHistory(true)}>Show earlier history</button>}
+            {!aroundSequence && history && <button className="flr-room__history-action" type="button" onClick={() => setHistory(false)}>Show current messages</button>}
+            {messages.hasNextPage && <button className="flr-room__history-action" type="button" disabled={messages.isFetchingNextPage} onClick={() => void messages.fetchNextPage()}>Load older messages</button>}
             {messages.isLoading && <div className="flr-room__state">Loading room…</div>}
             {messages.error && <div className="flr-room__state is-error">Room messages unavailable.</div>}
             {!messages.isLoading && !messages.error && ordered.length === 0 && (
@@ -218,13 +249,16 @@ export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; f
         </div>
       </div>
 
-      <div
-        className={`flr-room__recipient-guide${invalidTokens.length ? " is-error" : selectedMembers.length ? " is-notify" : ""}`}
-        role={invalidTokens.length ? "alert" : "status"}
-      >
-        {recipientGuidance}
-      </div>
-      <div className="flr__composer flr-room__composer">
+      {roomStatus === "archived" ? (
+        <div className="flr-room__recipient-guide" role="status">Archived room — restore to post</div>
+      ) : <>
+        <div
+          className={`flr-room__recipient-guide${invalidTokens.length ? " is-error" : selectedMembers.length ? " is-notify" : ""}`}
+          role={invalidTokens.length ? "alert" : "status"}
+        >
+          {recipientGuidance}
+        </div>
+        <div className="flr__composer flr-room__composer">
         <input
           ref={inputRef}
           className="flr__input"
@@ -288,7 +322,8 @@ export function AgentRoomMode({ room, fullHeight = false }: { room: AgentRoom; f
         <button className="flr__send" type="button" onClick={submit} disabled={!draft.trim() || post.isPending || invalidTokens.length > 0} aria-label="Post message">
           <Send size={15} />
         </button>
-      </div>
+        </div>
+      </>}
       {post.error && <div className="flr-room__post-error">Message was not posted. Try again.</div>}
     </div>
   );

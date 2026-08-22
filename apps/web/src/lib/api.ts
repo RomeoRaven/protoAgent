@@ -9,6 +9,8 @@ import type {
   AgentRoomMember,
   AgentRoomMessage,
   AgentRoomMention,
+  AgentRoomSearchResult,
+  AgentRoomSyncResult,
   AgentConfig,
   Archetype,
   ArchetypePreview,
@@ -1879,12 +1881,17 @@ export const api = {
   fleetDown() {
     return request<{ ok: boolean; stopped: string[] }>("/api/fleet/down", { method: "POST" });
   },
-  agentRoomList() {
-    return request<{ contract_version: "1"; rooms: AgentRoom[] }>("/api/plugins/agent-room/rooms");
+  agentRoomList(status: "active" | "archived" | "all" = "active") {
+    return request<{ contract_version: "1"; rooms: AgentRoom[] }>(`/api/plugins/agent-room/rooms?status=${status}`);
   },
-  agentRoomSync(roomId: string, after = 0, limit = 100) {
-    return request<AgentRoomEnvelope<{ messages: AgentRoomMessage[]; mentions?: AgentRoomMention[]; next_sequence: number; has_more: boolean }>>(
-      `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/messages?after=${after}&limit=${limit}`,
+  agentRoomSync(roomId: string, options: { after?: number; before?: number; around?: number; limit?: number; history?: boolean } = {}) {
+    const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.after != null) params.set("after", String(options.after));
+    if (options.before != null) params.set("before", String(options.before));
+    if (options.around != null) params.set("around", String(options.around));
+    if (options.history) params.set("history", "true");
+    return request<AgentRoomEnvelope<AgentRoomSyncResult>>(
+      `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/messages?${params}`,
     );
   },
   agentRoomMembers(roomId: string) {
@@ -1903,6 +1910,37 @@ export const api = {
       `/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/ack`,
       { method: "POST", body: { sequence } },
     );
+  },
+  agentRoomCreate(name: string) {
+    return request<AgentRoomEnvelope<{ room: AgentRoom }>>("/api/plugins/agent-room/rooms", {
+      method: "POST",
+      body: { name },
+    });
+  },
+  agentRoomRename(roomId: string, name: string) {
+    return request<AgentRoomEnvelope<{ room: AgentRoom }>>(`/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}`, {
+      method: "PATCH",
+      body: { name },
+    });
+  },
+  agentRoomArchive(roomId: string) {
+    return request<AgentRoomEnvelope<{ room: AgentRoom }>>(`/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/archive`, { method: "POST" });
+  },
+  agentRoomRestore(roomId: string) {
+    return request<AgentRoomEnvelope<{ room: AgentRoom }>>(`/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/restore`, { method: "POST" });
+  },
+  agentRoomReset(roomId: string) {
+    return request<AgentRoomEnvelope<{ room: AgentRoom }>>(`/api/plugins/agent-room/rooms/${encodeURIComponent(roomId)}/reset`, { method: "POST" });
+  },
+  agentRoomSearch(options: { query: string; scope: "current" | "all" | "archived"; roomId?: string; history?: boolean; limit?: number }) {
+    const params = new URLSearchParams({
+      q: options.query,
+      scope: options.scope,
+      limit: String(options.limit ?? 50),
+    });
+    if (options.roomId) params.set("room_id", options.roomId);
+    if (options.history) params.set("history", "true");
+    return request<AgentRoomEnvelope<{ results: AgentRoomSearchResult[] }>>(`/api/plugins/agent-room/search?${params}`);
   },
   // Fire a one-shot message at a specific fleet member (Fleet Room broadcast). Goes to the
   // member's A2A endpoint through the hub proxy (/agents/<slug>/a2a) — NOT /api/chat —
