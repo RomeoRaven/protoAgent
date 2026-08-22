@@ -72,6 +72,8 @@ class DelegateRegistry:
         item_id: str | None = None,
         raw: bool = False,
         resume_task_id: str | None = None,
+        conversation_key: str | None = None,
+        permissions: str | None = None,
     ) -> str:
         """Dispatch ``query`` to the named delegate.
 
@@ -84,10 +86,27 @@ class DelegateRegistry:
         d = self._items.get(name)
         if d is None:
             raise DelegateError(f"unknown delegate {name!r}. Configured: {', '.join(self._items) or '(none)'}.")
-        if raw and d.manage_git:
+        conversation_key = str(conversation_key or "").strip()
+        permissions = str(permissions or "").strip().lower()
+        if conversation_key and d.type != "acp":
+            raise DelegateError(
+                f"delegate {name!r} is type {d.type!r} — conversation_key only applies to acp delegates."
+            )
+        if permissions and permissions != "readonly":
+            raise DelegateError("permissions must be 'readonly' when an invocation ceiling is requested.")
+        if permissions and d.type != "acp":
+            raise DelegateError(f"delegate {name!r} is type {d.type!r} and cannot enforce a permissions ceiling.")
+        if conversation_key or permissions or (raw and d.manage_git):
             import dataclasses
 
-            d = dataclasses.replace(d, manage_git=False)
+            d = dataclasses.replace(
+                d,
+                conversation_key=conversation_key,
+                permissions_ceiling=permissions,
+                # A read-only invocation ceiling covers host-managed side effects
+                # too, not only ACP permission requests from the child.
+                manage_git=False if permissions or raw else d.manage_git,
+            )
         # Only a2a tasks can park-and-resume. Silently ignoring a resume id on any
         # other adapter would run the ANSWER as a brand-new task (for a managed-git
         # coder: a brand-new PR) — refuse instead.

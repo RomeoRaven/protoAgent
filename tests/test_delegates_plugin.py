@@ -225,16 +225,84 @@ async def test_registry_dispatch_unknown_raises():
         await reg.dispatch("nope", "hi")
 
 
+async def test_registry_conversation_key_is_acp_only_and_does_not_mutate_roster(monkeypatch):
+    reg = DelegateRegistry(
+        [
+            {"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp"},
+            {"name": "model", "type": "openai", "url": "https://g/v1", "model": "m"},
+        ]
+    )
+    before = reg.roster()
+    seen = {}
+
+    async def _dispatch(d, query, *, timeout=None, item_id=None, resume_task_id=None):
+        seen["delegate"] = d
+        return "done"
+
+    monkeypatch.setattr(ADAPTERS["acp"], "dispatch", _dispatch)
+
+    assert await reg.dispatch("coder", "go", conversation_key="thread-1") == "done"
+    assert seen["delegate"].conversation_key == "thread-1"
+    assert seen["delegate"] is not reg.get("coder")
+    assert reg.get("coder").conversation_key == ""
+    assert reg.roster() == before
+    with pytest.raises(DelegateError, match="conversation_key.*acp"):
+        await reg.dispatch("model", "go", conversation_key="thread-1")
+
+
+async def test_registry_validates_permissions_ceiling_and_refuses_unenforceable_kinds():
+    reg = DelegateRegistry(
+        [
+            {"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp"},
+            {"name": "model", "type": "openai", "url": "https://g/v1", "model": "m"},
+        ]
+    )
+    with pytest.raises(DelegateError, match="permissions.*readonly"):
+        await reg.dispatch("coder", "readonly is just prompt text", permissions="auto")
+    with pytest.raises(DelegateError, match="cannot enforce.*permissions"):
+        await reg.dispatch("model", "readonly", permissions="readonly")
+
+
+async def test_registry_applies_readonly_as_internal_acp_ceiling(monkeypatch):
+    import plugins.coding_agent as CA
+
+    seen = {}
+
+    class _StubClient:
+        last_stop_reason = None
+        _permission = None
+
+        async def prompt(self, query, timeout=None):
+            seen["query"] = query
+            return "done"
+
+    def _client_for(spec):
+        seen["spec"] = spec
+        return _StubClient()
+
+    monkeypatch.setattr(CA, "_client_for", _client_for)
+    reg = DelegateRegistry(
+        [{"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp", "manage_git": True}]
+    )
+
+    assert await reg.dispatch("coder", "ordinary prompt", permissions="readonly") == "done"
+    assert seen["query"] == "ordinary prompt"
+    assert seen["spec"]["permissions_ceiling"] == "readonly"
+    assert reg.get("coder").manage_git is True  # per-call copy; configured roster is unchanged
+
+
 # ── delegate_to tool ──────────────────────────────────────────────────────────
 
 
 def _register(delegates, monkeypatch):
     monkeypatch.setattr(P, "_load_delegates_config", lambda: delegates)
+    from graph.plugins.host import PluginHost
 
     class _Reg:
         def __init__(self):
             self.config = {}
             self.tools = []
+            self.host = PluginHost()
 
         def register_tool(self, t):
             self.tools.append(t)
@@ -255,6 +323,35 @@ def test_register_exposes_delegate_to_and_list_agents(monkeypatch):
     r = _register([{"name": "opus", "type": "openai", "url": "https://g/v1", "model": "m"}], monkeypatch)
     assert [t.name for t in r.tools] == ["delegate_to", "list_agents", "propose_delegate"]
     assert "opus" in r.tools[0].description
+
+
+async def test_register_sets_optional_invoke_delegate_and_forwards_call_options(monkeypatch):
+    r = _register([{"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp"}], monkeypatch)
+    seen = {}
+
+    async def _dispatch(self, name, query, **kwargs):
+        seen.update(name=name, query=query, **kwargs)
+        return "done"
+
+    monkeypatch.setattr(DelegateRegistry, "dispatch", _dispatch)
+
+    assert await r.host.invoke_delegate("coder", "inspect", "review-1") == "done"
+    assert seen == {
+        "name": "coder",
+        "query": "inspect",
+        "conversation_key": "review-1",
+        "permissions": "readonly",
+    }
+
+
+def test_register_always_clears_stale_invoke_delegate_when_roster_is_empty(monkeypatch):
+    r = _register([], monkeypatch)
+    r.host.invoke_delegate = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(P, "_load_delegates_config", lambda: [])
+    P.register(r)
+
+    assert r.host.invoke_delegate is None
 
 
 def test_registry_roster_shape():
@@ -575,7 +672,7 @@ async def test_acp_dispatch_reuses_client(monkeypatch):
     assert await ADAPTERS["acp"].dispatch(d, "fix the bug") == "coding done"
 
 
-async def test_acp_teardown_evicts_the_workdir_scoped_client():
+async def test_acp_teardown_evicts_every_conversation_for_the_workdir_scoped_client():
     """teardown reaps the exact cached client dispatch created — proving the
     spec/cache-key (incl. workdir) line up, so a per-call scoped workdir tears
     down its own subprocess."""
@@ -591,12 +688,14 @@ async def test_acp_teardown_evicts_the_workdir_scoped_client():
         async def close(self):
             self.closed = True
 
-    fake = _FakeClient()
-    CA._CLIENTS[CA._cache_key(spec)] = fake
+    first = _FakeClient()
+    second = _FakeClient()
+    CA._CLIENTS[CA._cache_key({**spec, "conversation_key": "one"})] = first
+    CA._CLIENTS[CA._cache_key({**spec, "conversation_key": "two"})] = second
 
     assert await ADAPTERS["acp"].teardown(d) is True
-    assert fake.closed is True
-    assert CA._cache_key(spec) not in CA._CLIENTS
+    assert first.closed is True and second.closed is True
+    assert not any(key[:-2] == CA._cache_key(spec)[:-2] for key in CA._CLIENTS)
     assert await ADAPTERS["acp"].teardown(d) is False  # idempotent
 
 

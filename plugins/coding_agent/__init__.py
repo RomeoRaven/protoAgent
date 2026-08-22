@@ -54,12 +54,16 @@ def _make_permission(spec: dict) -> Callable[[dict], str | None]:
 
     def _allowed(kind: str) -> bool:
         if policy == "readonly":
-            return kind in (allow_set or _READONLY_KINDS)
-        if policy == "allowlist":
+            allowed = kind in (allow_set or _READONLY_KINDS)
+        elif policy == "allowlist":
             if kind in (deny_set or _DEFAULT_DENY):
                 return False
-            return kind in allow_set if allow_set else True
-        return True  # auto
+            allowed = kind in allow_set if allow_set else True
+        else:
+            allowed = True  # auto
+        if spec.get("permissions_ceiling") == "readonly":
+            allowed = allowed and kind in _READONLY_KINDS
+        return allowed
 
     def resolver(params: dict) -> str | None:
         options = params.get("options") or []
@@ -93,6 +97,11 @@ def _cache_key(spec: dict) -> tuple:
         # for everyone (QA panel on #2145; env itself had the same latent gap).
         tuple(sorted((spec.get("env") or {}).items())),
         tuple(sorted(spec.get("env_remove") or ())),  # sorted: order-insensitive identity
+        # A per-invocation ceiling changes the mutable ACP permission resolver.
+        # Key it before the conversation discriminator so concurrent fenced and
+        # unrestricted turns can never share a client and overwrite each other.
+        str(spec.get("permissions_ceiling") or ""),
+        str(spec.get("conversation_key") or ""),
     )
 
 
@@ -155,7 +164,7 @@ async def close_all() -> bool:
 
 
 async def evict_client(spec: dict) -> bool:
-    """Drop the cached client for ``spec`` AND terminate its subprocess.
+    """Drop the exact cached client for ``spec`` AND terminate its subprocess.
 
     The dispatch/relaunch paths ``_CLIENTS.pop(...)`` on an ``AcpError`` only
     *forget* the handle, leaving the child to be reaped by GC. A caller that
@@ -173,6 +182,28 @@ async def evict_client(spec: dict) -> bool:
     except Exception:  # noqa: BLE001 — teardown is best-effort
         log.warning("[coding_agent/%s] close during evict failed", spec.get("name"), exc_info=True)
     return True
+
+
+async def evict_clients(spec: dict) -> bool:
+    """Terminate every cached conversation variant for one configured delegate.
+
+    A delegate removal has the base configuration, not each per-call
+    ``conversation_key``. Match the stable launch/policy prefix and leave every
+    unrelated delegate untouched. Idempotent and best-effort.
+    """
+    base = _cache_key({**spec, "permissions_ceiling": "", "conversation_key": ""})[:-2]
+    clients = []
+    for key in list(_CLIENTS):
+        if key[:-2] == base:
+            client = _CLIENTS.pop(key, None)
+            if client is not None:
+                clients.append(client)
+    for client in clients:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            log.warning("[coding_agent/%s] close during multi-evict failed", spec.get("name"), exc_info=True)
+    return bool(clients)
 
 
 async def forget_session(spec: dict) -> bool:

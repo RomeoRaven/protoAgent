@@ -36,6 +36,10 @@ class PluginHost:
     # that need it should feature-detect (``inspect.signature``) and refuse to
     # run unfenced on an older host.
     invoke: Optional[Callable[..., Awaitable[str]]] = None
+    # async (name, prompt, conversation_key=None, *, permissions="readonly") -> str —
+    # invoke a configured delegate without reaching into its plugin package. The
+    # default host-enforced ceiling makes an ordinary plugin invocation read-only.
+    invoke_delegate: Optional[Callable[..., Awaitable[str]]] = None
     # (event: str, data: dict) -> None — publish to the server→client event bus.
     publish: Optional[Callable[[str, dict], Any]] = None
     # () -> subscription — subscribe to the event bus (e.g. return-address delivery).
