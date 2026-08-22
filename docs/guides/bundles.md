@@ -36,6 +36,10 @@ mcp:                             # MCP servers to seed, catalog-shaped (#2011)
       - { key: token, env: GITHUB_MCP_TOKEN, required: true, secret: true }
 secrets:                         # standalone secrets to prompt for / seed (#2041)
   - { key: acme_api_key, label: "Acme API key", secret: true }
+config_inputs:                   # Configure-step prompts at create time (#2934)
+  - { key: my_board.repo,  label: "Repo this board manages", type: path, required: true, project: true }
+  - { key: my_board.coder, label: "Coder delegate",          type: delegate, required: true }
+  - { key: my_board.loop,  label: "Start the loop now",      type: boolean, default: false }
 archetype:                       # optional: appear in the new-agent picker (ADR 0100)
   label: My Archetype
   icon: Boxes
@@ -47,6 +51,31 @@ Every member is installed exactly as a direct install would be — allowlist-che
 SHA-pinned in `plugins.lock` — and the bundle itself is recorded in the lock's
 `bundles:` section (that row powers provenance chips, the update check, and uninstall).
 Unknown `archetype:` keys warn at install rather than vanishing.
+
+**`config_inputs:`** are the questions the Setup Wizard / New Agent panel asks *before*
+the agent exists, written into its config at the declared dotted keys (`type`:
+`string` · `path` · `delegate` · `boolean`). `required: true` is a hard gate — a create
+(or a host install) with a required answer missing is refused with the prompt's label,
+rather than shipping an agent that boots green and fails at first use. A `delegate`
+answer does more than write the name: the picked delegate's entry is **copied from
+the host into the new member's own registry**, because a member resolves delegates
+from its own config (ADR 0025 — the Host layer of the settings cascade can't carry the
+`delegates:` list, ADR 0047). It is a one-time **snapshot**: a later host edit (rotated
+key, new `command`/`workdir`) does not propagate. The copy needs the host config
+(`inherit_config: true`, the default); a required delegate answer the host doesn't
+have — or can't be copied because inheritance is off — refuses the create rather than
+shipping a member with a name and no entry. A `path` input flagged `project: true`
+makes the answered checkout a **managed project** — an ADR 0095 `projects:` entry
+(with its GitHub `owner/name` parsed from the `origin` remote; read-only unless
+`onboarding.write_default` says otherwise) that the filesystem fence, the GitHub
+plugin's repo picker and the board all read. Note the fence consequence, same as a
+tool-driven `onboard_project`: once `projects:` is non-empty it *is* the fence, so the
+agent's default writable workspace entry no longer applies. When the operator hasn't
+configured `onboarding:` at all and a GitHub remote was found, onboarding is enabled
+rooted at the checkout's parent with `allow: [github.com/<owner>/<name>]` — exactly
+the typed repo, so `onboard_project` resolves it idempotently and nothing wider is
+clonable until the operator widens the allowlist. Keys under core sections (`model`,
+`plugins`, `projects`, `egress`, …) can't be declared as inputs at all.
 
 ## Install one
 

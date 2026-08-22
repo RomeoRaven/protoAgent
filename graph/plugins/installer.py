@@ -781,6 +781,19 @@ def load_bundle(repo: Path) -> dict | None:
 # delegate → dropdown of configured ACP delegates, boolean → toggle).
 CONFIG_INPUT_TYPES = ("string", "path", "delegate", "boolean")
 
+# Core sections a bundle may never prompt for through `config_inputs:` — the Configure
+# step writes answers (and manifest `default`s, with no operator involvement) straight
+# into the tracked config, and `required: true` is a hard gate ("type it to proceed").
+# A bundle is trusted code, but a Configure prompt labelled "API key" that lands in
+# `model.api_key`, or one that silently widens `network`/`egress`/`projects`, is a lying
+# form. Plugin sections (`project_board.*`, `github.*`) are what the mechanism is for.
+CONFIG_INPUT_RESERVED_SECTIONS = frozenset(
+    {
+        "model", "auth", "network", "security", "egress", "plugins", "filesystem",
+        "projects", "onboarding", "delegates", "identity", "instance", "secrets", "mcp",
+    }
+)
+
 # A declared `key` is a DOTTED CONFIG PATH ("section.key[...]") the install path writes
 # the operator's answer to — at least two safe segments, so a bundle can't declare a
 # bare top-level key (which would replace a whole section) or smuggle YAML weirdness.
@@ -812,6 +825,9 @@ def normalize_config_inputs(bundle_id: str, raw: object, *, strict: bool = True)
         if not _CONFIG_INPUT_KEY_RE.fullmatch(key):
             bad(f"key {entry.get('key')!r} is not a dotted config path (e.g. section.key)")
             continue
+        if key.split(".", 1)[0] in CONFIG_INPUT_RESERVED_SECTIONS:
+            bad(f"key {key!r} targets a core section a bundle may not prompt for")
+            continue
         label = str(entry.get("label", "")).strip()
         if not label:
             bad(f"{key!r} has no label")
@@ -821,6 +837,13 @@ def normalize_config_inputs(bundle_id: str, raw: object, *, strict: bool = True)
             bad(f"{key!r} has unknown type {entry.get('type')!r} (known: {', '.join(CONFIG_INPUT_TYPES)})")
             continue
         norm: dict = {"key": key, "label": label, "type": typ, "required": bool(entry.get("required"))}
+        # `project: true` on a `path` input (#PM-first-run): the answered path is a repo
+        # the agent MANAGES — the create path also registers it in the ADR 0095
+        # `projects:` registry (fs fence, GitHub picker, board), records its GitHub
+        # remote, and scopes `onboarding.root` to its parent. A plain flag, ignored by
+        # hosts that predate it, so a bundle can declare it without a core-version gate.
+        if typ == "path" and bool(entry.get("project")):
+            norm["project"] = True
         if "default" in entry and entry["default"] is not None:
             default = coerce_config_input_value(typ, entry["default"])
             if default is not None:
@@ -1089,6 +1112,9 @@ def uninstall(plugin_id: str, *, purge: bool = False) -> dict:
         from graph.sdk import cancel_plugin_jobs
 
         jobs_cancelled = cancel_plugin_jobs(plugin_id)
+        from graph.plugins import setup_gaps as _setup_gaps
+
+        _setup_gaps.clear_plugin(plugin_id)  # its setup-gap banner must not outlive it
     except Exception:  # noqa: BLE001 — job hygiene must never fail the uninstall
         jobs_cancelled = 0
     if jobs_cancelled:
