@@ -444,7 +444,7 @@ test("Rooms rail surface fails closed when no Room backend is installed", async 
 test("PC1 client Room shows canonical history and durable offline pending posts without owner controls", async ({ page }) => {
   await page.route("**/api/plugins/agent-room/rooms?status=all", (route) => route.fulfill({ json: {
     contract_version: "1",
-    rooms: [{ id: "ao", name: "Agent Organization", created_at: "", latest_sequence: 15, client_mode: true, owner_online: false }],
+    rooms: [{ id: "ao", name: "Agent Organization", created_at: "", latest_sequence: 15, status: "active", client_mode: true, owner_online: false }],
   } }));
   await page.route("**/api/plugins/agent-room/rooms/ao/messages?*", (route) => route.fulfill({ json: {
     contract_version: "1", operation: "room.sync", result: {

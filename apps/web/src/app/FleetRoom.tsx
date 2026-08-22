@@ -438,7 +438,7 @@ export function RoomsSurface() {
       fullHeight
       aroundSequence={aroundSequence}
       onReturnLatest={() => setAroundSequence(undefined)}
-      controls={selected.status != null ? <AgentRoomControls rooms={available} room={selected} onSelect={selectRoom} /> : undefined}
+      controls={selected.status != null && !selected.client_mode ? <AgentRoomControls rooms={available} room={selected} onSelect={selectRoom} /> : undefined}
     />
   );
   return (
