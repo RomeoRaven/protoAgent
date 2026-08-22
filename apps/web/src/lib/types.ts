@@ -1414,6 +1414,8 @@ export type AgentRoomMember = {
   host: string;
   can_post: boolean;
   can_mention: boolean;
+  /** True only when this member has a configured local Room dispatch target. */
+  mentionable?: boolean;
 };
 export type AgentRoomEnvelope<T> = { contract_version: "1"; operation?: string; result: T };
 

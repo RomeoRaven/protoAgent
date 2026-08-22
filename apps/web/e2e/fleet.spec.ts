@@ -477,6 +477,72 @@ test("⌘K → canonical Room shows mention delivery and blocked cycle state", a
   await expect(headroomReply.getByText("Hermes · blocked · mention cycle blocked", { exact: true })).toBeVisible();
 });
 
+test("Rooms member click inserts an exact mention and explains who will wake", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "mention-status-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
+  const room = page.locator(".flr");
+  const composer = room.getByRole("textbox", { name: "Room message" });
+
+  await expect(room.getByText("Post to room only — no agents notified", { exact: true })).toBeVisible();
+  await room.getByRole("button", { name: "Mention Hermes" }).click();
+
+  await expect(composer).toHaveValue("@Hermes ");
+  await expect(composer).toBeFocused();
+  await expect(room.getByText("Will notify Hermes", { exact: true })).toBeVisible();
+  await expect(room.locator(".flr__roster .flr__dot")).toHaveCount(0);
+  await expect(room.getByText("Mention enabled", { exact: true })).toHaveCount(2);
+});
+
+test("Rooms composer offers accessible multi-mention suggestions and blocks unknown names", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "mention-status-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
+  const room = page.locator(".flr");
+  const composer = room.getByRole("textbox", { name: "Room message" });
+
+  await composer.fill("@");
+  const suggestions = room.getByRole("listbox", { name: "Mention an agent" });
+  await expect(suggestions.getByRole("option", { name: "Hermes" })).toBeVisible();
+  await expect(suggestions.getByRole("option", { name: "Headroom" })).toBeVisible();
+
+  await composer.press("ArrowUp");
+  await composer.fill("@hea");
+  await expect(room.getByRole("heading", { name: "Agent Organization" })).toBeVisible();
+  await expect(suggestions.getByRole("option", { name: "Headroom" })).toBeVisible();
+  await composer.fill("@");
+
+  await composer.press("ArrowDown");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("@Hermes ");
+
+  await composer.fill("@Hermes @Hea");
+  await expect(suggestions.getByRole("option", { name: "Headroom" })).toBeVisible();
+  await expect(suggestions.getByRole("option", { name: "Hermes" })).toHaveCount(0);
+  await composer.press("Tab");
+  await expect(composer).toHaveValue("@Hermes @Headroom ");
+  await expect(room.getByText("Will notify Hermes, Headroom", { exact: true })).toBeVisible();
+
+  await composer.fill("@Headroom @Hermes reverse order");
+  await expect(room.getByText("Will notify Headroom, Hermes", { exact: true })).toBeVisible();
+
+  await composer.fill("@Unknown status?");
+  await expect(room.getByRole("alert")).toContainText("Unknown agent @Unknown");
+  await expect(room.getByRole("button", { name: "Post message" })).toBeDisabled();
+  const messageCount = await room.locator(".flr-room__message").count();
+  const postRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/plugins/agent-room/rooms/ao/post")) {
+      postRequests.push(request.url());
+    }
+  });
+  await composer.press("Enter");
+  await page.waitForTimeout(100);
+  expect(postRequests).toHaveLength(0);
+  await expect(composer).toHaveValue("@Unknown status?");
+  await expect(room.locator(".flr-room__message")).toHaveCount(messageCount);
+});
+
 test("⌘K → Fleet Room shows the roster + live activity feed side by side", async ({ page }) => {
   await page.goto("/app/", { waitUntil: "load" });
   await openFleetRoom(page);
