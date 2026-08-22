@@ -459,8 +459,16 @@ test("⌘K → canonical Room loads recent messages first and older history on d
   const room = page.locator(".flr");
   await expect(room.getByText("page message 105", { exact: true })).toBeVisible();
   await expect(room.locator(".flr-room__message")).toHaveCount(50);
-  await room.getByRole("button", { name: "Load older messages" }).click();
+  const anchor = room.getByText("page message 56", { exact: true });
+  await page.waitForTimeout(300);
+  const beforeAnchor = await anchor.boundingBox();
+  await room.getByRole("button", { name: "Load older messages" }).evaluate((button: HTMLButtonElement) => button.click());
   await expect(room.locator(".flr-room__message")).toHaveCount(100);
+  await page.waitForTimeout(300);
+  const afterAnchor = await anchor.boundingBox();
+  expect(beforeAnchor).not.toBeNull();
+  expect(afterAnchor).not.toBeNull();
+  expect(Math.abs(afterAnchor!.y - beforeAnchor!.y)).toBeLessThanOrEqual(2);
   await room.getByRole("button", { name: "Load older messages" }).click();
   await expect(room.locator(".flr-room__message")).toHaveCount(105);
   await expect(room.getByRole("button", { name: "Load older messages" })).toHaveCount(0);
@@ -574,6 +582,61 @@ test("Rooms creates, switches, and renames subject rooms", async ({ page }) => {
   await expect(room.getByRole("button", { name: "Switch room, current: Agent Organization" })).toBeVisible();
 });
 
+test("Rooms lifecycle overlays close with Escape and restore opener focus", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "multi-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
+  const room = page.locator(".flr");
+  const switcherButton = room.getByRole("button", { name: /Switch room, current:/ });
+
+  await switcherButton.click();
+  await page.keyboard.press("Escape");
+  await expect(room.getByRole("dialog", { name: "Room switcher" })).toHaveCount(0);
+  await expect(switcherButton).toBeFocused();
+
+  const searchButton = room.getByRole("button", { name: "Search rooms" });
+  await searchButton.click();
+  const searchDialog = room.getByRole("dialog", { name: "Search rooms" });
+  await searchDialog.getByLabel("Search messages").fill("legacy");
+  await page.keyboard.press("Shift+Tab");
+  await expect(searchDialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(searchDialog.getByRole("button", { name: "Search", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(room.getByRole("dialog", { name: "Search rooms" })).toHaveCount(0);
+  await expect(searchButton).toBeFocused();
+
+  await switcherButton.click();
+  await room.getByRole("dialog", { name: "Room switcher" }).getByRole("button", { name: "New room" }).click();
+  await page.keyboard.press("Escape");
+  await expect(room.getByRole("dialog", { name: "Create room" })).toHaveCount(0);
+  await expect(switcherButton).toBeFocused();
+});
+
+test("Rooms all-status cache never feeds an archived room into legacy Fleet", async ({ page }) => {
+  await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "multi-room" });
+  await page.goto("/app/", { waitUntil: "load" });
+  await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
+  const room = page.locator(".flr");
+  await room.getByRole("button", { name: /Switch room, current:/ }).click();
+  await room.getByRole("dialog", { name: "Room switcher" }).getByRole("button", { name: "New room" }).click();
+  await room.getByRole("dialog", { name: "Create room" }).getByLabel("Room name").fill("Active target");
+  await room.getByRole("dialog", { name: "Create room" }).getByRole("button", { name: "Create" }).click();
+  await room.getByRole("button", { name: /Switch room, current:/ }).click();
+  await room.getByRole("dialog", { name: "Room switcher" }).getByRole("button", { name: /Agent Organization/ }).click();
+  await room.getByRole("button", { name: "Room actions" }).click();
+  await room.getByRole("menuitem", { name: "Archive room" }).click();
+  await room.getByRole("dialog", { name: "Archive room" }).getByRole("button", { name: "Archive" }).click();
+
+  await openFleetRoom(page);
+  const fleet = page.getByLabel("Fleet");
+  await expect(fleet.getByText("Archived room — restore to post", { exact: true })).toHaveCount(0);
+  await expect(fleet.getByText("Post to room only — no agents notified", { exact: true })).toBeVisible();
+  await page.request.post("/api/plugins/agent-room/rooms/ao/restore", {
+    headers: { "x-e2e-agent-room": "multi-room" },
+  });
+});
+
 test("Rooms starts fresh non-destructively and archives or restores a room", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "multi-room" });
   await page.goto("/app/", { waitUntil: "load" });
@@ -618,7 +681,9 @@ test("Rooms search active, earlier, and archived history then opens bounded cont
   await expect(result).toBeVisible();
   await result.click();
   await expect(room.getByText("Search result context", { exact: true })).toBeVisible();
-  await expect(room.getByText("legacy topic history", { exact: true })).toBeVisible();
+  const matchedMessage = room.locator(".flr-room__message", { hasText: "legacy topic history" });
+  await expect(matchedMessage).toBeVisible();
+  await expect(matchedMessage).toBeFocused();
   await room.getByRole("button", { name: "Return to latest" }).click();
 });
 

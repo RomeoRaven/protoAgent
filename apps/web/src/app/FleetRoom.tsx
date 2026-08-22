@@ -371,7 +371,7 @@ function LegacyFleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgen
 
 function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
   const rooms = useQuery({
-    queryKey: ["agent-room", "rooms"],
+    queryKey: ["agent-room", "rooms", "active"],
     queryFn: () => api.agentRoomList(),
     retry: false,
     staleTime: 15_000,
@@ -404,7 +404,7 @@ export function RoomsSurface() {
   const [selectedRoomId, setSelectedRoomId] = useState(() => globalThis.localStorage?.getItem("protoagent.agent-room.selected") ?? "");
   const [aroundSequence, setAroundSequence] = useState<number | undefined>();
   const rooms = useQuery({
-    queryKey: ["agent-room", "rooms"],
+    queryKey: ["agent-room", "rooms", "all"],
     queryFn: () => api.agentRoomList("all"),
     retry: false,
     staleTime: 2_000,
@@ -451,7 +451,7 @@ export function RoomsSurface() {
 
 function FleetRoomFooter() {
   const rooms = useQuery({
-    queryKey: ["agent-room", "rooms"],
+    queryKey: ["agent-room", "rooms", "active"],
     queryFn: () => api.agentRoomList(),
     retry: false,
     staleTime: 15_000,

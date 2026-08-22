@@ -29,6 +29,8 @@ export function AgentRoomMode({
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [suggestionsClosed, setSuggestionsClosed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const roomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const lifecycleAvailable = room.status != null;
   const roomStatus = room.status ?? "active";
@@ -136,8 +138,24 @@ export function AgentRoomMode({
   }, [aroundSequence, latest, queryClient, room.id]);
 
   useEffect(() => setActiveSuggestion(-1), [mentionTrigger?.start, mentionTrigger?.query]);
+  useEffect(() => {
+    if (!aroundSequence || !ordered.some((message) => message.sequence === aroundSequence)) return;
+    globalThis.requestAnimationFrame(() => {
+      roomRef.current?.querySelector<HTMLElement>(`[data-room-sequence="${aroundSequence}"]`)?.focus();
+    });
+  }, [aroundSequence, ordered]);
 
   const focusComposer = () => globalThis.requestAnimationFrame(() => inputRef.current?.focus());
+
+  const loadOlder = async () => {
+    const container = messagesRef.current;
+    const anchor = container?.querySelector<HTMLElement>("[data-room-sequence]") ?? null;
+    const beforeY = anchor?.getBoundingClientRect().top ?? 0;
+    await messages.fetchNextPage();
+    globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(() => {
+      if (container && anchor) container.scrollTop += anchor.getBoundingClientRect().top - beforeY;
+    }));
+  };
 
   const insertMemberMention = (member: AgentRoomMember) => {
     setDraft((current) => {
@@ -173,7 +191,7 @@ export function AgentRoomMode({
   };
 
   return (
-    <div className={`flr flr--agent-room${fullHeight ? " flr--full-height" : ""}`}>
+    <div ref={roomRef} className={`flr flr--agent-room${fullHeight ? " flr--full-height" : ""}`}>
       <div className="flr__cols">
         <div className="flr__col flr__roster">
           <div className="flr__colhead">
@@ -215,11 +233,11 @@ export function AgentRoomMode({
             {controls ? <><h2 className="flr-room__sr-only">{room.name}</h2>{controls}</> : <h2>{room.name}</h2>}
             <span className="flr__count">#{room.latest_sequence || latest || 0}</span>
           </div>
-          <div className="flr-room__messages" aria-live="polite">
+          <div ref={messagesRef} className="flr-room__messages">
             {aroundSequence && <div className="flr-room__history-banner"><span>Search result context</span><button type="button" onClick={onReturnLatest}>Return to latest</button></div>}
             {!aroundSequence && lifecycleAvailable && room.history_available && !history && <button className="flr-room__history-action" type="button" onClick={() => setHistory(true)}>Show earlier history</button>}
             {!aroundSequence && history && <button className="flr-room__history-action" type="button" onClick={() => setHistory(false)}>Show current messages</button>}
-            {messages.hasNextPage && <button className="flr-room__history-action" type="button" disabled={messages.isFetchingNextPage} onClick={() => void messages.fetchNextPage()}>Load older messages</button>}
+            {messages.hasNextPage && <button className="flr-room__history-action" type="button" disabled={messages.isFetchingNextPage} onClick={() => void loadOlder()}>Load older messages</button>}
             {messages.isLoading && <div className="flr-room__state">Loading room…</div>}
             {messages.error && <div className="flr-room__state is-error">Room messages unavailable.</div>}
             {!messages.isLoading && !messages.error && ordered.length === 0 && (
@@ -227,7 +245,12 @@ export function AgentRoomMode({
             )}
             {ordered.map((message) => {
               const delivery = mentionsBySource.get(message.id) ?? [];
-              return <article className="flr-room__message" key={message.id}>
+              return <article
+                className={`flr-room__message${aroundSequence === message.sequence ? " is-search-target" : ""}`}
+                data-room-sequence={message.sequence}
+                tabIndex={-1}
+                key={message.id}
+              >
                 <header>
                   <strong>{names.get(message.author_principal) ?? message.author_principal}</strong>
                   <span>#{message.sequence}</span>

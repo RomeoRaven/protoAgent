@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ChevronDown, MoreHorizontal, Plus, Search } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -29,6 +29,10 @@ export function AgentRoomControls({ rooms, room, onSelect }: Props) {
   const [searched, setSearched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const switcherButtonRef = useRef<HTMLButtonElement>(null);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
+  const actionsButtonRef = useRef<HTMLButtonElement>(null);
+  const formReturnRef = useRef<HTMLButtonElement | null>(null);
 
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["agent-room", "rooms"] });
@@ -44,8 +48,19 @@ export function AgentRoomControls({ rooms, room, onSelect }: Props) {
       setBusy(false);
     }
   };
-  const closeForm = () => { setFormMode(null); setName(""); setError(""); };
+  const restoreFocus = (target: HTMLButtonElement | null) => globalThis.requestAnimationFrame(() => target?.focus());
+  const closeForm = () => {
+    setFormMode(null);
+    setName("");
+    setError("");
+    restoreFocus(formReturnRef.current);
+  };
+  const closeSearch = () => {
+    setSearchOpen(false);
+    restoreFocus(searchButtonRef.current);
+  };
   const openForm = (mode: Exclude<FormMode, null>) => {
+    formReturnRef.current = mode === "create" ? switcherButtonRef.current : actionsButtonRef.current;
     setActionsOpen(false);
     setSwitcherOpen(false);
     setName(mode === "rename" ? room.name : "");
@@ -109,25 +124,52 @@ export function AgentRoomControls({ rooms, room, onSelect }: Props) {
   const visibleRooms = rooms.filter((candidate) => candidate.status === roomTab);
 
   return (
-    <div className="flr-room__controls">
+    <div className="flr-room__controls" onKeyDown={(event) => {
+      if (event.key === "Tab" && (searchOpen || formMode)) {
+        const modal = event.currentTarget.querySelector<HTMLElement>(".flr-room__modal");
+        const focusable = modal
+          ? [...modal.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])")]
+          : [];
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
+        return;
+      }
+      if (event.key !== "Escape") return;
+      if (formMode) closeForm();
+      else if (searchOpen) closeSearch();
+      else if (switcherOpen) { setSwitcherOpen(false); restoreFocus(switcherButtonRef.current); }
+      else if (actionsOpen) { setActionsOpen(false); restoreFocus(actionsButtonRef.current); }
+      else return;
+      event.stopPropagation();
+    }}>
       <button
+        ref={switcherButtonRef}
         className="flr-room__room-switch"
         type="button"
         aria-label={`Switch room, current: ${room.name}`}
         aria-expanded={switcherOpen}
+        aria-haspopup="dialog"
+        aria-controls="agent-room-switcher"
         onClick={() => { setSwitcherOpen((value) => !value); setActionsOpen(false); }}
       >
         <span>{room.name}</span><ChevronDown size={14} aria-hidden />
       </button>
-      <button className="flr-room__control" type="button" aria-label="Search rooms" onClick={() => { setSearchOpen(true); setSearchResults([]); setSearched(false); setError(""); setActionsOpen(false); setSwitcherOpen(false); }}>
+      <button ref={searchButtonRef} className="flr-room__control" type="button" aria-label="Search rooms" aria-haspopup="dialog" aria-controls="agent-room-search" onClick={() => { setSearchOpen(true); setSearchResults([]); setSearched(false); setError(""); setActionsOpen(false); setSwitcherOpen(false); }}>
         <Search size={15} aria-hidden />
       </button>
-      <button className="flr-room__control" type="button" aria-label="Room actions" aria-expanded={actionsOpen} onClick={() => { setActionsOpen((value) => !value); setSwitcherOpen(false); }}>
+      <button ref={actionsButtonRef} className="flr-room__control" type="button" aria-label="Room actions" aria-expanded={actionsOpen} aria-haspopup="menu" aria-controls="agent-room-actions" onClick={() => { setActionsOpen((value) => !value); setSwitcherOpen(false); }}>
         <MoreHorizontal size={16} aria-hidden />
       </button>
 
       {switcherOpen && (
-        <div className="flr-room__popover flr-room__switcher" role="dialog" aria-label="Room switcher" onKeyDown={(event) => { if (event.key === "Escape") setSwitcherOpen(false); }}>
+        <div id="agent-room-switcher" className="flr-room__popover flr-room__switcher" role="dialog" aria-label="Room switcher">
           <div className="flr-room__popover-head">
             <div className="flr-room__tabs" aria-label="Room status">
               <button type="button" aria-pressed={roomTab === "active"} onClick={() => setRoomTab("active")}>Active</button>
@@ -151,7 +193,7 @@ export function AgentRoomControls({ rooms, room, onSelect }: Props) {
       )}
 
       {actionsOpen && (
-        <div className="flr-room__menu" role="menu">
+        <div id="agent-room-actions" className="flr-room__menu" role="menu">
           {room.status === "active" ? <>
             <button role="menuitem" type="button" onClick={() => openForm("rename")}>Rename room</button>
             <button role="menuitem" type="button" onClick={() => openForm("reset")}>Start fresh</button>
@@ -183,9 +225,9 @@ export function AgentRoomControls({ rooms, room, onSelect }: Props) {
       )}
 
       {searchOpen && (
-        <div className="flr-room__modal flr-room__search" role="dialog" aria-modal="true" aria-label="Search rooms" onKeyDown={(event) => { if (event.key === "Escape") setSearchOpen(false); }}>
+        <div id="agent-room-search" className="flr-room__modal flr-room__search" role="dialog" aria-modal="true" aria-label="Search rooms">
           <form onSubmit={search}>
-            <div className="flr-room__search-head"><h3>Search rooms</h3><button type="button" onClick={() => setSearchOpen(false)}>Close</button></div>
+            <div className="flr-room__search-head"><h3>Search rooms</h3><button type="button" onClick={closeSearch}>Close</button></div>
             <label>Search messages<input autoFocus value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearched(false); }} /></label>
             <label>Search scope<select value={searchScope} onChange={(event) => setSearchScope(event.target.value as typeof searchScope)}><option value="current">Current room</option><option value="all">All active rooms</option><option value="archived">Archived rooms</option></select></label>
             <label className="flr-room__check"><input type="checkbox" checked={searchHistory} onChange={(event) => setSearchHistory(event.target.checked)} /> Include earlier history</label>

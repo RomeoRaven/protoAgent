@@ -43,6 +43,8 @@
 .flr-room__history-action { cursor: pointer; }
 .flr-room__history-banner { display: flex; align-items: center; gap: 9px; }
 .flr-room__history-banner button { border: 0; background: none; color: var(--pl-color-accent); font: inherit; cursor: pointer; }
+.flr-room__message.is-search-target { border-color: var(--pl-color-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pl-color-accent) 20%, transparent); }
+.flr-room__message:focus-visible { outline: 2px solid var(--pl-color-focus, var(--pl-color-accent)); outline-offset: 2px; }
 .flr-room__room-switch:focus-visible, .flr-room__control:focus-visible, .flr-room__popover button:focus-visible, .flr-room__menu button:focus-visible, .flr-room__modal button:focus-visible, .flr-room__modal input:focus-visible, .flr-room__modal select:focus-visible, .flr-room__history-action:focus-visible { outline: 2px solid var(--pl-color-focus, var(--pl-color-accent)); outline-offset: 1px; }
 
 @container (max-width: 640px) {
