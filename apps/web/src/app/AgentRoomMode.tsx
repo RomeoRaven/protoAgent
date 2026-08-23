@@ -5,7 +5,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { api } from "../lib/api";
 import type { AgentRoom, AgentRoomMember, AgentRoomMention } from "../lib/types";
 
-const ROOM_TOKEN = /(?<!\w)@[\w-]+/g;
+const ROOM_TOKEN = /(?<![^\s(\[{])@[^\s,;:!?()[\]{}]*/g;
 const ALL_WAKEABLE: AgentRoomMember = {
   principal: "__all__",
   kind: "virtual",
@@ -18,8 +18,13 @@ const ALL_WAKEABLE: AgentRoomMember = {
   mentionable: true,
 };
 
-function tokensIn(text: string): string[] {
-  return Array.from(text.matchAll(ROOM_TOKEN), (match) => match[0]);
+export function tokensIn(text: string, knownTokens: Iterable<string> = []): string[] {
+  const known = new Map(Array.from(knownTokens, (token) => [token.toLocaleLowerCase(), token]));
+  return Array.from(text.matchAll(ROOM_TOKEN), (match) => {
+    let token = match[0];
+    while (token.endsWith(".") && !known.has(token.toLocaleLowerCase())) token = token.slice(0, -1);
+    return known.get(token.toLocaleLowerCase()) ?? token;
+  });
 }
 
 export function AgentRoomMode({
@@ -91,7 +96,7 @@ export function AgentRoomMode({
     () => new Map([...roomMembers, ALL_WAKEABLE].map((member) => [member.mention_token.toLocaleLowerCase(), member])),
     [roomMembers],
   );
-  const draftTokens = useMemo(() => tokensIn(draft), [draft]);
+  const draftTokens = useMemo(() => tokensIn(draft, memberTokens.keys()), [draft, memberTokens]);
   const selectedMembers = useMemo(() => {
     if (draftTokens.some((token) => token.toLocaleLowerCase() === ALL_WAKEABLE.mention_token)) return mentionable;
     const byToken = new Map(mentionable.map((member) => [member.mention_token.toLocaleLowerCase(), member]));
@@ -108,7 +113,7 @@ export function AgentRoomMode({
     [draftTokens, memberTokens],
   );
   const mentionTrigger = useMemo(() => {
-    const match = /(?:^|\s)@([\w-]*)$/.exec(draft);
+    const match = /(?<![^\s(\[{])@([^\s,;:!?()[\]{}]*)$/.exec(draft);
     if (!match) return null;
     const at = (match.index ?? 0) + match[0].lastIndexOf("@");
     return { start: at, query: match[1].toLocaleLowerCase() };

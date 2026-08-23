@@ -544,6 +544,10 @@ test("Rooms member click inserts an exact mention and explains who will wake", a
 
   await composer.fill("@all suggestions?");
   await expect(room.getByText("Will notify Hermes, Headroom, protoLabs Agent", { exact: true })).toBeVisible();
+
+  await composer.fill("Unknown @all.foo");
+  await expect(room.getByRole("alert")).toContainText("Unknown agent @all.foo");
+  await expect(room.getByText(/Will notify/)).toHaveCount(0);
 });
 
 test("Rooms composer offers accessible multi-mention suggestions and blocks unknown names", async ({ page }) => {
