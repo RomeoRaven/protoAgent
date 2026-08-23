@@ -702,6 +702,9 @@ test("Rooms starts fresh non-destructively and archives or restores a room", asy
   await room.getByRole("dialog", { name: "Archive room" }).getByRole("button", { name: "Archive" }).click();
   await expect(room.getByText("Archived room — restore to post", { exact: true })).toBeVisible();
   await expect(room.getByRole("textbox", { name: "Room message" })).toHaveCount(0);
+  await expect(room.getByText("Wakeable as @Hermes", { exact: true })).toBeVisible();
+  await expect(room.getByText("Member only", { exact: true })).toHaveCount(2);
+  await expect(room.getByRole("button", { name: "Mention Hermes" })).toHaveCount(0);
 
   await room.getByRole("button", { name: /Switch room, current:/ }).click();
   await room.getByRole("dialog", { name: "Room switcher" }).getByRole("button", { name: "Archived" }).click();

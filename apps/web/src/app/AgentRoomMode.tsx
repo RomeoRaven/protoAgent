@@ -245,7 +245,9 @@ export function AgentRoomMode({
                         <span className="flr-room__member-token">{member.mention_token}</span>
                       )}
                       <span className="flr__meta">{member.role} · {member.host}</span>
-                      <span className="flr-room__member-state">Member only</span>
+                      <span className="flr-room__member-state">
+                        {member.mentionable ? `Wakeable as ${member.mention_token}` : "Member only"}
+                      </span>
                     </div>
                   </div>
                 )}
