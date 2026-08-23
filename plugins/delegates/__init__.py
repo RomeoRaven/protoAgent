@@ -313,6 +313,11 @@ def _load_delegates_config() -> list:
 
 def register(registry) -> None:
     """Entry point — called once per graph build with the live config."""
+    host = getattr(registry, "host", None)
+    # register() is re-run on hot reload. Clear the old roster-bound service before
+    # rebuilding so removed delegates can never remain reachable through the host.
+    if host is not None:
+        host.invoke_delegate = None
     # CRUD API for the console panel (PR2) + the background health prober (PR4).
     # Mounted/started once at process init; the roster they serve is config, which
     # hot-reloads — so the static routes + the loop's per-tick re-read are fine.
@@ -357,6 +362,19 @@ def register(registry) -> None:
         )
         _register_propose()
         return
+
+    async def _invoke_delegate(
+        name: str, prompt: str, conversation_key: str | None = None, *, permissions: str | None = "readonly"
+    ) -> str:
+        return await reg.dispatch(
+            name,
+            prompt,
+            conversation_key=conversation_key,
+            permissions=permissions,
+        )
+
+    if host is not None:
+        host.invoke_delegate = _invoke_delegate
     registry.register_tool(_build_delegate_to(reg))
     registry.register_tool(_build_list_agents(reg))
     _register_propose()
