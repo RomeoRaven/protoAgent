@@ -12,7 +12,9 @@ runtime (ADR 0033) import:
 
 - ``_client_for(spec)`` — get-or-create a cached ``AcpClient`` for a launch+policy
   signature (the cache key includes ``workdir``).
-- ``evict_client(spec)`` — pop that cached client AND terminate its subprocess.
+- ``evict_client(spec)`` — pop one exact cached client AND terminate its subprocess.
+- ``evict_clients(spec)`` — terminate every permission/conversation variant for one
+  configured delegate while leaving unrelated delegates untouched.
 - ``_make_permission(spec)`` — the by-kind permission resolver (ADR 0024).
 
 The ``spec`` dict is supplied by the caller; ``permissions`` is the by-kind policy
