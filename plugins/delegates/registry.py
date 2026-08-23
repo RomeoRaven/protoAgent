@@ -82,7 +82,10 @@ class DelegateRegistry:
         HITL delegation chain). ``raw=True`` bypasses
         the managed-git lifecycle for programmatic callers that consume the reply as
         DATA (e.g. the coder ladder's candidate generation, ADR 0064) — no branch, no
-        commit, no PR, no claim; just the coder's text."""
+        commit, no PR, no claim; just the coder's text. ``conversation_key`` selects
+        one persistent ACP conversation without mutating the configured roster.
+        ``permissions`` is a per-call ACP ceiling; currently only ``readonly`` is
+        accepted, and delegate types that cannot enforce it are refused."""
         d = self._items.get(name)
         if d is None:
             raise DelegateError(f"unknown delegate {name!r}. Configured: {', '.join(self._items) or '(none)'}.")
