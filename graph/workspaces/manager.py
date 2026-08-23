@@ -14,6 +14,7 @@ format. ``run`` returns the env + argv for the CLI to ``exec`` the normal server
 
 from __future__ import annotations
 
+import copy as _copy
 import os
 import re
 import shutil
@@ -201,7 +202,9 @@ def capability_contract_warning(bound_tool_names) -> str | None:
     silent by construction: the model fills the impossible instruction with narration and
     reports the action as completed, so nothing errors and nothing crashes. The shipped
     case was ``project-manager``'s "pain points get filed as issues" against a
-    ``github.write`` that defaults false, so ``github_create_issue`` was never registered.
+    ``github.write`` that defaults false, so ``github_create_issue`` was never registered
+    (the archetype has seeded ``github.write: true`` since v0.4.x and its verify script
+    checks the contract binds — this warning is now the fork/override safety net).
 
     The archetype records the tools its doctrine depends on (``requires_tools`` in
     ``archetype-catalog.json`` / a bundle's ``archetype:`` block); ``create()`` copies
@@ -360,6 +363,8 @@ def create(
     soul: str | None = None,
     inputs: Mapping[str, str] | None = None,
     secrets: list[dict] | None = None,
+    config_inputs: Mapping[str, object] | None = None,
+    delegate_source: str | None = None,
     requires_tools: list[str] | None = None,
 ) -> dict:
     """Scaffold a workspace: its config dir, ``workspace.yaml``, and (with ``bundle``)
@@ -385,8 +390,10 @@ def create(
     seed-time env, so an operator token seeds the server ENABLED instead of visible-but-inert.
     ``secrets`` (``[{key, value}]``) are operator-supplied values for the bundle's *declared*
     secrets, written to the member's ``config/secrets.yaml`` nested under the bundle's section.
-    Both are seeded AFTER install and only apply on the bundle path; operator-supplied only —
-    never auto-copied from the host's environment.
+    ``config_inputs`` (``{dotted_key: value}``, #2934) are the operator's answers to the
+    bundle's declared ``config_inputs:`` prompts, written into the workspace config at each
+    declared dotted key path. All are seeded AFTER install and only apply on the bundle path;
+    operator-supplied only — never auto-copied from the host's environment.
     """
     name = _safe(name)
     if name.lower() in _RESERVED_NAMES:
@@ -479,6 +486,41 @@ def create(
             # per-plugin config defaults (#1350) — a fresh workspace, so nothing to clobber.
             _enable_installed_in_config(cfg, ws / "plugins.lock")
             _apply_bundle_config_defaults(cfg, ws / "plugins.lock")
+            # Operator answers to the bundle's declared config_inputs prompts (#2934) —
+            # written AFTER the defaults overlay so an explicit answer wins over a
+            # bundle-recommended default for the same key.
+            _apply_bundle_config_inputs(cfg, ws / "plugins.lock", config_inputs or {})
+            # A required config input with no answer is a refusal, not a warning: the
+            # member would boot green and fail at first use (a board with no coder). The
+            # except below removes the half-made workspace so a retry doesn't 400.
+            missing = missing_required_config_inputs(cfg, ws / "plugins.lock")
+            if missing:
+                labels = "; ".join(f"{m['label']} ({m['key']})" for m in missing)
+                raise WorkspaceError(f"the bundle needs these Configure answers before the agent can work: {labels}")
+            # The coder the operator PICKED must exist in the MEMBER's registry, not just
+            # the host's — copy the entry (+ its secrets) across. Host-dir aware only.
+            # Where a picked `type: delegate` answer is copied FROM: the host config dir —
+            # the inherited-model source on the console path, or an explicit source (the
+            # CLI, which creates a blank-template workspace but still runs inside the host).
+            source = delegate_source or inherit_model
+            copy_host_delegates(cfg, ws / "plugins.lock", config_inputs or {}, source)
+            member_doc = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+            member_delegates = member_doc.get("delegates") if isinstance(member_doc, dict) else None
+            configured = [
+                str(entry.get("name") or "").strip()
+                for entry in (member_delegates or [])
+                if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+            ]
+            ghosts = _uncopied_required_delegates(ws / "plugins.lock", member_doc, configured)
+            if ghosts:
+                raise WorkspaceError(
+                    "the picked coder delegate is not configured for this member: "
+                    + ", ".join(ghosts)
+                    + " — select a configured delegate source or register it in Settings ▸ Delegates first"
+                )
+            # A path input flagged `project: true` is a repo the agent manages — register
+            # it (projects: entry + GitHub slug + scoped onboarding root).
+            register_project_inputs(cfg, ws / "plugins.lock")
             # Seed the bundle's MCP servers (ADR 0083 D5, #2011). Separate from the config
             # defaults above because `mcp.servers` is a LIST — the dict-leaf overlay can't
             # merge it — and because its `${input}` placeholders resolve from the env here.
@@ -694,11 +736,352 @@ def apply_bundle_secrets(cfg: Path, lock: Path, secrets_list: list[dict]) -> lis
     return written
 
 
+def apply_bundle_config_inputs(cfg: Path, lock: Path, values: Mapping[str, object] | None = None) -> list[str]:
+    """Write operator-supplied answers to a bundle's DECLARED ``config_inputs:`` (#2934)
+    into the config YAML at each declared dotted key path. The bundle declares its
+    prompts in the lock (``{key, label, type, required, default?}`` per bundle, cached by
+    the installer — same pattern as ``apply_bundle_mcp_servers``); ``values`` is the
+    operator's create-time ``{dotted_key: value}`` map from the SetupWizard/NewAgentPanel
+    Configure step.
+
+    Per declared input: an operator value is coerced to the declared type and written —
+    overwriting, because the operator just typed it for THIS install; with no operator
+    value, the declared ``default`` fills in only when the key is still absent, so a
+    re-install never clobbers a live setting. Only DECLARED keys are writable — an entry
+    in ``values`` no bundle declares is ignored, so the operator (or a compromised
+    caller) can't smuggle an arbitrary config path. Best-effort — a malformed lock or
+    config is a no-op. Returns the dotted keys written."""
+    import json
+
+    from graph.config_io import load_yaml_doc, save_yaml_doc
+    from graph.plugins.installer import coerce_config_input_value
+
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8")) if lock.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return []
+    declared: dict[str, dict] = {}
+    for b in data.get("bundles") or []:
+        for dec in b.get("config_inputs") or []:
+            if isinstance(dec, dict) and str(dec.get("key", "")).strip():
+                declared.setdefault(str(dec["key"]).strip(), dec)
+    if not declared:
+        return []
+
+    doc = load_yaml_doc(cfg)
+    if not isinstance(doc, dict):
+        return []
+
+    def _dotted_get(dotted: str) -> object | None:
+        node: object = doc
+        for seg in dotted.split("."):
+            if not isinstance(node, dict) or seg not in node:
+                return None
+            node = node[seg]
+        return node
+
+    def _dotted_set(dotted: str, value: object) -> bool:
+        parts = dotted.split(".")
+        node = doc
+        for seg in parts[:-1]:
+            nxt = node.setdefault(seg, {})
+            if not isinstance(nxt, dict):
+                return False  # an operator scalar sits mid-path — never clobber it with a dict
+            node = nxt
+        node[parts[-1]] = value
+        return True
+
+    written: list[str] = []
+    for key, dec in declared.items():
+        typ = str(dec.get("type") or "string")
+        supplied = (values or {}).get(key)
+        if supplied is not None:
+            coerced = coerce_config_input_value(typ, supplied)
+            if coerced is not None and _dotted_set(key, coerced):
+                written.append(key)
+                continue
+        # No usable operator value → the declared default, and only into an absent key.
+        if "default" in dec and dec["default"] is not None and _dotted_get(key) is None:
+            coerced = coerce_config_input_value(typ, dec["default"])
+            if coerced is not None and _dotted_set(key, coerced):
+                written.append(key)
+    if written:
+        save_yaml_doc(doc, cfg)
+    return written
+
+
+def _declared_config_inputs(lock: Path) -> dict[str, dict]:
+    """The bundle-declared ``config_inputs`` in a plugins.lock, keyed by dotted key
+    (first declaration wins, matching ``apply_bundle_config_inputs``). ``{}`` on a
+    missing or malformed lock."""
+    import json
+
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8")) if lock.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+    declared: dict[str, dict] = {}
+    for b in data.get("bundles") or []:
+        for dec in b.get("config_inputs") or []:
+            if isinstance(dec, dict) and str(dec.get("key", "")).strip():
+                declared.setdefault(str(dec["key"]).strip(), dec)
+    return declared
+
+
+def _dotted_lookup(doc: object, dotted: str) -> object | None:
+    node = doc
+    for seg in dotted.split("."):
+        if not isinstance(node, dict) or seg not in node:
+            return None
+        node = node[seg]
+    return node
+
+
+def missing_required_config_inputs(cfg: Path, lock: Path, overlay: Mapping[str, object] | None = None) -> list[dict]:
+    """The bundle's ``required: true`` config_inputs that have NO usable value in the
+    config after the operator's answers were applied — ``[{key, label}]``. Run AFTER
+    ``apply_bundle_config_inputs``: an answer, a bundle default, or a pre-existing
+    operator value all satisfy it; blank/None does not. ``overlay`` is a pending
+    ``{section: {key: value}}`` defaults overlay the caller will apply LATER (the host
+    install path computes the bundle's ``config:`` overlay after this gate) — a key it
+    fills counts as present, so both paths gate on the same effective config.
+
+    Booleans never gate: the console's toggle always resolves to a value and never
+    sends an untouched one, so a ``required`` boolean with no default would be
+    unsatisfiable from the UI. A ``path`` input flagged ``project: true`` must be
+    ABSOLUTE (after ``~`` expansion): a relative one would register junk and seed
+    ``onboarding.root: "."`` against whatever the server's cwd happens to be.
+
+    A create that proceeds past a missing required input ships a member that cannot
+    do its job (a board with no coder was the 2026-08-22 first-run failure), so
+    callers treat a non-empty result as a refusal, not a warning."""
+    from graph.config_io import load_yaml_doc
+
+    declared = _declared_config_inputs(lock)
+    if not declared:
+        return []
+    doc = load_yaml_doc(cfg)
+    if not isinstance(doc, dict):
+        doc = {}
+    missing: list[dict] = []
+    for key, dec in declared.items():
+        if not bool(dec.get("required")):
+            continue
+        typ = str(dec.get("type") or "string")
+        if typ == "boolean":
+            continue
+        val = _dotted_lookup(doc, key)
+        if val is None and overlay:
+            val = _dotted_lookup(overlay, key)
+        label = str(dec.get("label") or key)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            missing.append({"key": key, "label": label})
+        elif typ == "path" and bool(dec.get("project")) and not Path(str(val).strip()).expanduser().is_absolute():
+            missing.append({"key": key, "label": f"{label} — must be an absolute path"})
+    return missing
+
+
+def copy_host_delegates(cfg: Path, lock: Path, values: Mapping[str, object] | None, host_config_dir: str | None) -> list[str]:
+    """Carry the delegate(s) the operator PICKED in a ``type: delegate`` config input
+    from the host's registry into the member's own — entry into the member's
+    ``langgraph-config.yaml`` ``delegates:`` list, its secrets into the member's
+    ``secrets.yaml`` ``delegate_secrets`` overlay (same key shape the delegates plugin
+    reads: ``<name>.<field>`` / ``<name>.env.<VAR>``).
+
+    Why: the Configure step's dropdown lists the HOST's delegates, but a member
+    resolves delegates from its OWN config (ADR 0025 — per-instance registry). Before
+    this, only the NAME travelled: ``project_board.coder: claude-code`` landed in a
+    member whose ``delegates:`` was empty, and the first dispatch failed "not found"
+    (2026-08-22 fresh-setup audit). Only names the operator actually picked are added to
+    the member's ``delegates:`` — never the whole roster — and only when the host config
+    is known (``inherit_config`` on the create call; with it OFF nothing can travel and
+    ``create`` refuses a required delegate input). Note the member's ``secrets.yaml`` is
+    already the host overlay's copy under ``inherit_config`` (``_overlay_model``), so the
+    per-delegate secret merge here matters for the non-inherited overlay shape, not as a
+    secrecy boundary. The copy is a one-time SNAPSHOT: a later host edit to the entry
+    (rotated key, new ``command``/``workdir``) does not propagate to the member. Returns
+    copied names."""
+    if not values or not host_config_dir:
+        return []
+    declared = _declared_config_inputs(lock)
+    wanted: list[str] = []
+    for key, dec in declared.items():
+        if str(dec.get("type") or "") != "delegate":
+            continue
+        name = str(values.get(key) or "").strip()
+        if name and name not in wanted:
+            wanted.append(name)
+    if not wanted:
+        return []
+
+    from graph.config_io import load_secrets, load_yaml_doc, save_secrets, save_yaml_doc
+
+    host_dir = Path(host_config_dir)
+    host_doc = load_yaml_doc(host_dir / "langgraph-config.yaml")
+    host_list = (host_doc or {}).get("delegates") if isinstance(host_doc, dict) else None
+    host_entries = {
+        str(e.get("name") or "").strip(): e
+        for e in (host_list or [])
+        if isinstance(e, dict) and str(e.get("name") or "").strip()
+    }
+    try:
+        host_secrets = load_secrets(host_dir / "secrets.yaml") or {}
+    except Exception:  # noqa: BLE001 — best-effort: a missing/unreadable overlay copies no secrets
+        host_secrets = {}
+    host_overlay = host_secrets.get("delegate_secrets") if isinstance(host_secrets, dict) else None
+    host_overlay = host_overlay if isinstance(host_overlay, dict) else {}
+
+    doc = load_yaml_doc(cfg)
+    if not isinstance(doc, dict):
+        return []
+    member_list = doc.get("delegates")
+    if not isinstance(member_list, list):
+        member_list = []
+    copied: list[str] = []
+    secret_updates: dict[str, str] = {}
+    for name in wanted:
+        entry = host_entries.get(name)
+        if entry is None:
+            continue
+        member_list = [e for e in member_list if not (isinstance(e, dict) and str(e.get("name") or "") == name)]
+        member_list.append(_copy.deepcopy(entry))
+        # Structured match only — the delegates store keys env secrets ``<name>.env.<VAR>``
+        # and the adapter secret ``<name>.<field>``; a bare ``<name>.`` prefix would also
+        # swallow a sibling whose dotted name extends this one (``cc`` vs ``cc.prod``).
+        secret_fields = {f"{name}.auth.token", f"{name}.api_key", f"{name}.token"}
+        for skey, sval in host_overlay.items():
+            k = str(skey)
+            if (k.startswith(f"{name}.env.") or k in secret_fields) and sval not in (None, ""):
+                secret_updates[k] = str(sval)
+        copied.append(name)
+    if not copied:
+        return []
+    doc["delegates"] = member_list
+    save_yaml_doc(doc, cfg)
+    if secret_updates:
+        save_secrets({"delegate_secrets": secret_updates}, cfg.parent / "secrets.yaml")
+    return copied
+
+
+def _uncopied_required_delegates(
+    lock: Path, member_config: Mapping[str, object], configured: list[str]
+) -> list[str]:
+    """Required delegate answers absent from the resulting member registry.
+
+    The registry may already exist in cloned/snapshot config or may have just been
+    copied from a source agent. Either way, a name without an actual member entry
+    would recreate the pre-#2977 first-dispatch failure, so creation refuses.
+    """
+    out: list[str] = []
+    for key, dec in _declared_config_inputs(lock).items():
+        if str(dec.get("type") or "") != "delegate" or not bool(dec.get("required")):
+            continue
+        name = str(_dotted_lookup(member_config, key) or "").strip()
+        if name and name not in configured and name not in out:
+            out.append(name)
+    return out
+
+
+_GITHUB_REMOTE_RE = re.compile(r"(?<![A-Za-z0-9.-])github\.com[:/]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+
+
+def github_slug_for_checkout(path: Path) -> str:
+    """``owner/name`` parsed from a checkout's ``origin`` remote, or ``""`` (not a git
+    repo, no origin, not GitHub, git missing). Best-effort and bounded — never raises."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(path), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if res.returncode != 0:
+        return ""
+    m = _GITHUB_REMOTE_RE.search(res.stdout.strip())
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+
+def register_project_inputs(cfg: Path, lock: Path) -> list[str]:
+    """For every bundle config input declared ``type: path`` + ``project: true`` whose
+    key now holds a path, make that checkout a MANAGED PROJECT: an ADR 0095
+    ``projects:`` entry (``{name, path, github?, write: false}`` — what the fs fence,
+    the GitHub plugin's picker and the board all read), and — only when the operator
+    hasn't configured onboarding at all — ``onboarding.enabled: true`` with
+    ``onboarding.root`` = the checkout's parent dir, so the persona's ground-first
+    ``onboard_project`` tool binds against exactly the tree the operator just named
+    and nothing wider. An existing entry for the same path is left alone; an explicit
+    ``onboarding:`` section is never touched. Returns the registered paths."""
+    from graph.config_io import load_yaml_doc, save_yaml_doc
+
+    declared = _declared_config_inputs(lock)
+    keys = [k for k, d in declared.items() if str(d.get("type") or "") == "path" and bool(d.get("project"))]
+    if not keys:
+        return []
+    doc = load_yaml_doc(cfg)
+    if not isinstance(doc, dict):
+        return []
+    projects = doc.get("projects")
+    if not isinstance(projects, list):
+        projects = []
+
+    def _norm(p: object) -> str:
+        try:
+            return str(Path(str(p)).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            return str(p)
+
+    known = {_norm(p.get("path")) for p in projects if isinstance(p, dict) and p.get("path")}
+    onboarding = doc.get("onboarding")
+    # Registration mirrors ``onboard_project``: read-only unless the operator's
+    # ``onboarding.write_default`` says otherwise. (A non-empty ``projects:`` registry
+    # IS the fs fence from then on — ADR 0095 — same as a tool-driven onboarding.)
+    write_default = bool(onboarding.get("write_default")) if isinstance(onboarding, dict) else False
+    registered: list[str] = []
+    for key in keys:
+        raw = _dotted_lookup(doc, key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = Path(raw.strip()).expanduser()
+        if not path.is_absolute():
+            continue  # the gate refuses these; never register a cwd-relative checkout
+        text = str(path)
+        if _norm(text) in known:
+            continue
+        entry: dict = {"name": path.name or text, "path": text}
+        slug = github_slug_for_checkout(path) if path.is_dir() else ""
+        if slug:
+            entry["github"] = slug
+        entry["write"] = write_default
+        projects.append(entry)
+        known.add(_norm(text))
+        registered.append(text)
+        # Enable onboarding only when the operator hasn't configured it AND we know the
+        # repo's GitHub owner: ``onboard_project`` matches against ``onboarding.allow``
+        # and an EMPTY allowlist matches nothing — a bound tool that can only refuse is
+        # exactly what the tool's own gate avoids. Scope = EXACTLY the repo the operator
+        # typed (consent to manage that repo is not consent to clone its siblings), rooted
+        # beside this checkout so the idempotent "already registered" path resolves.
+        if "onboarding" not in doc and slug:
+            doc["onboarding"] = {"enabled": True, "root": str(path.parent), "allow": [f"github.com/{slug}"]}
+    if not registered:
+        return []
+    doc["projects"] = projects
+    save_yaml_doc(doc, cfg)
+    return registered
+
+
 # Public since #2118 — ops/plugins.py::install_and_activate seeds a HOST bundle install
 # with the same helpers (host config + host plugins.lock). The private aliases keep the
 # workspace-create call sites and existing tests unchanged.
 _apply_bundle_mcp_servers = apply_bundle_mcp_servers
 _apply_bundle_secrets = apply_bundle_secrets
+_apply_bundle_config_inputs = apply_bundle_config_inputs
+_missing_required_config_inputs = missing_required_config_inputs
+_copy_host_delegates = copy_host_delegates
+_register_project_inputs = register_project_inputs
 
 
 def _overlay_model(cfg: Path, ws: Path, src: str) -> None:
@@ -723,6 +1106,11 @@ def _overlay_model(cfg: Path, ws: Path, src: str) -> None:
     src_sec = (src_path if src_path.is_dir() else src_path.parent) / "secrets.yaml"
     if src_sec.exists():  # carries the api_key so the gateway actually works — sits next to cfg
         shutil.copyfile(src_sec, cfg.parent / "secrets.yaml")
+        # copyfile does not carry mode — the member's overlay must be owner-only like
+        # every other secrets file (it holds the host's gateway key + delegate secrets).
+        from infra.paths import harden_private_file
+
+        harden_private_file(cfg.parent / "secrets.yaml")
 
 
 def _stamp_identity(cfg: Path, name: str, shared_skills: bool, *, instance_id: str | None = None) -> None:

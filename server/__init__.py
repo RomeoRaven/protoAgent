@@ -249,6 +249,7 @@ from server.chat import (  # noqa: E402,F401 — re-export of the extracted chat
     _run_turn_stream,
     _setup_required_message,
     _skill_directive,
+    acp_sessions_snapshot,
     chat,
 )
 
@@ -987,6 +988,9 @@ def _main():
     # — registered before the gate is installed so an inbound webhook / public view
     # page passes under a token-gated deployment.
     auth.set_public_prefixes(getattr(STATE, "plugin_public_paths", []) or [])
+    # Plugin-declared federation-tier prefixes (#2747) — same lifecycle, lowers the
+    # ADR 0066 /api ceiling on the plugin's own routes instead of exempting auth.
+    auth.set_federation_prefixes(getattr(STATE, "plugin_federation_paths", []) or [])
     # Fleet service token (ADR 0089): the instance's internal, loopback-only credential. A
     # member reads it from PROTOAGENT_FLEET_TOKEN (injected by the hub at spawn); a hub /
     # standalone instance reads-or-creates the persisted file. Accepted as operator so the
@@ -1020,7 +1024,7 @@ def _main():
 
     @fastapi_app.get(_member_public.WELL_KNOWN_PATH, include_in_schema=False)
     async def _plugin_public_paths():
-        return {"public_paths": auth.public_prefixes()}
+        return {"public_paths": auth.public_prefixes(), "federation_paths": auth.federation_prefixes()}
 
     # Short-lived SSE token endpoint (Part 3 of auth inversion): the React
     # console fetches a 30s HMAC token here (bearer-gated under /api/) and
@@ -1029,6 +1033,13 @@ def _main():
     @fastapi_app.get("/api/sse-token", include_in_schema=False)
     async def _sse_token():
         return {"token": auth.generate_sse_token()}
+
+    # Live ACP coding-agent sessions (#2889): the per-thread runtime registry in
+    # server/chat.py had no read surface, leaving coding-delegation triage blind.
+    # Bearer-gated by the default-deny middleware like every /api/ path.
+    @fastapi_app.get("/api/acp/sessions")
+    async def _acp_sessions():
+        return await acp_sessions_snapshot()
 
     # Core media output channel (#1929): ONE route serves every artifact a plugin
     # tool saved via registry.save_media() — signed-URL / opt-in-public access is

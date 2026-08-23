@@ -17,8 +17,11 @@ primitives:
 ## Quick start
 
 ```bash
-# an agent from a bundle-backed archetype (project-manager-archetype: board-driven PM)
-python -m server workspace new pm --bundle https://github.com/protoLabsAI/project-manager-archetype
+# an agent from a bundle-backed archetype (project-manager-archetype: board-driven PM) —
+# --input answers the bundle's Configure prompts, --soul seeds the persona the picker would
+python -m server workspace new pm --bundle https://github.com/protoLabsAI/project-manager-archetype \
+  --input project_board.repo=/abs/path/to/repo --input project_board.coder=claude-code \
+  --soul config/soul-presets/project-manager.md
 
 # a blank-slate agent (the built-in Basic archetype — core loop + tools, no plugins)
 python -m server workspace new scratch
@@ -40,7 +43,7 @@ agents on one host never collide (the leak that motivated this; see
 [multi-instance](./multi-instance.md)).
 
 ```bash
-workspace new <name> [--from <cfg>] [--bundle <url>] [--port auto] [--shared-skills]
+workspace new <name> [--from <cfg>] [--bundle <url>] [--input KEY=VALUE …] [--soul FILE] [--port auto] [--shared-skills]
 workspace ls
 workspace run <name>          # foreground: execs the normal server, env wired in
 workspace rm <name> [--purge] # --purge also deletes its scoped data
@@ -48,6 +51,14 @@ workspace rm <name> [--purge] # --purge also deletes its scoped data
 
 `--from <dir>` clones an existing agent's config + secrets (re-stamping identity/instance);
 `--bundle <url>` installs a bundle into it (next section); `--port auto` picks a free port.
+`--input KEY=VALUE` (repeatable, core ≥ 0.146, #2977) answers a bundle's `config_inputs`
+prompts — the required ones must be answered or the create is refused, a `KEY=VALUE`
+without `=` is a usage error, and a `type: delegate` answer is copied from the host config
+(the CLI runs inside the host) **without** inheriting the host model. `--soul FILE` writes
+the persona the picker would have seeded; without it the workspace has **no persona**, and
+the CLI never records an archetype's capability contract. The picker and
+`POST /api/fleet` do all of that in one step
+([the body](./build-with-a-coding-agent#_1-stand-up-the-pm)).
 
 ## Bundles & archetypes — start from a type
 
@@ -95,10 +106,12 @@ Unknown keys in the block warn at install time; the full annotated field set liv
 The picker draws from **two** sources:
 
 - **The archetype catalog** — `config/archetype-catalog.json`, served by `GET /api/archetypes`.
-  The shipped catalog carries the starter set (2026-08: Basic, Cowork, Social Marketing,
-  Project Manager, Design System, Custom — the two code-free personas are Basic and
-  Custom; the rest reference published archetype repos) and is **data-driven**: add or remove
-  archetypes by editing the JSON, no code change. A fork or instance overrides it by
+  The shipped catalog carries the starter set (2026-08: Basic, Cowork, and — under the
+  *Advanced* toggle — Design System Engineer and Project Manager, then Custom; the two
+  code-free personas are Basic and Custom, the rest reference published archetype repos)
+  and is **data-driven**: add or remove archetypes by editing the JSON, no code change. A
+  row the operator has pulled from the picker without deleting it sits in the file's
+  `held:` array (Social Marketing is parked there today) — held rows are never served. A fork or instance overrides it by
   dropping its own `archetype-catalog.json` in the live config dir (same rule as
   `plugin-catalog.json`); if the file is missing entirely, a hardcoded Basic + Custom
   fallback keeps the picker from rendering empty. Each entry names a `soul_preset` (a

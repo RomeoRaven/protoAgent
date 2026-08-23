@@ -959,6 +959,24 @@ def test_policy_custom_allow_deny_kinds():
     assert _perm("readonly", "edit", allow=["read", "edit"]) == "a"  # explicitly allowed
 
 
+def test_readonly_invocation_ceiling_intersects_configured_policy():
+    def resolve(policy, kind, *, allow=None, deny=None):
+        spec = {
+            "name": "x",
+            "permissions": policy,
+            "allow_kinds": allow or [],
+            "deny_kinds": deny or [],
+            "permissions_ceiling": "readonly",
+        }
+        return _make_permission(spec)({"toolCall": {"kind": kind}, "options": _OPTS})
+
+    assert resolve("auto", "read") == "a"
+    assert resolve("auto", "edit") == "r"
+    assert resolve("readonly", "edit", allow=["read", "edit"]) == "r"
+    assert resolve("allowlist", "read", deny=["read"]) == "r"
+    assert resolve("allowlist", "execute", allow=["execute"]) == "r"
+
+
 # ── client cache eviction / teardown ──────────────────────────────────────────
 
 
@@ -1062,10 +1080,79 @@ def test_session_id_path_is_stable_and_keyed_per_signature():
         "deny_kinds": [],
     }
     spec_b = {**spec_a, "workdir": "/tmp/wt-b"}
+    legacy_key = (
+        "proto",
+        "proto",
+        ("--acp",),
+        "/tmp/wt-a",
+        "auto",
+        (),
+        (),
+        (),
+        (),
+    )
+    assert P._cache_key(spec_a) == legacy_key  # upgrade keeps existing persisted-session digest
     p_a, p_a2, p_b = P._session_id_path(spec_a), P._session_id_path(spec_a), P._session_id_path(spec_b)
     assert p_a == p_a2  # stable for the same signature
     assert p_a != p_b  # workdir is part of the key
     assert p_a.name.endswith(".json") and p_a.parent.name == "acp_sessions"
+
+
+def test_conversation_key_distinguishes_client_and_persisted_session():
+    spec = {
+        "name": "proto",
+        "command": "proto",
+        "args": ["--acp"],
+        "workdir": "/tmp/repo",
+        "permissions": "auto",
+        "allow_kinds": [],
+        "deny_kinds": [],
+    }
+    alpha = {**spec, "conversation_key": "alpha"}
+    beta = {**spec, "conversation_key": "beta"}
+    readonly_alpha = {**alpha, "permissions_ceiling": "readonly"}
+
+    assert P._cache_key(alpha) != P._cache_key(beta)
+    assert P._session_id_path(alpha) != P._session_id_path(beta)
+    # The permission resolver is mutable on a pooled ACP client. A ceiling must
+    # therefore select another client/session so a concurrent unrestricted turn
+    # cannot replace the read-only resolver before the turn lock is acquired.
+    assert P._cache_key(alpha) != P._cache_key(readonly_alpha)
+    assert P._session_id_path(alpha) != P._session_id_path(readonly_alpha)
+
+
+async def test_evict_clients_closes_all_conversations_for_only_that_delegate():
+    base = {
+        "name": "proto",
+        "command": "proto",
+        "args": [],
+        "workdir": "/tmp/repo",
+        "permissions": "auto",
+        "allow_kinds": [],
+        "deny_kinds": [],
+    }
+    other = {**base, "name": "other"}
+
+    class _FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    alpha = _FakeClient()
+    beta = _FakeClient()
+    readonly_beta = _FakeClient()
+    untouched = _FakeClient()
+    P._CLIENTS[P._cache_key({**base, "conversation_key": "alpha"})] = alpha
+    P._CLIENTS[P._cache_key({**base, "conversation_key": "beta"})] = beta
+    P._CLIENTS[P._cache_key({**base, "permissions_ceiling": "readonly", "conversation_key": "beta"})] = readonly_beta
+    P._CLIENTS[P._cache_key({**other, "conversation_key": "alpha"})] = untouched
+
+    assert await P.evict_clients(base) is True
+    assert alpha.closed is True and beta.closed is True and readonly_beta.closed is True
+    assert untouched.closed is False
+    assert list(P._CLIENTS.values()) == [untouched]
 
 
 async def test_evict_client_swallows_close_errors():

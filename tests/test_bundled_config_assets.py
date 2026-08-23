@@ -60,9 +60,9 @@ def _sidecar_bundled_sources() -> set[str]:
     """
     tree = ast.parse((ROOT / "apps" / "desktop" / "sidecar" / "build_sidecar.py").read_text())
     for node in ast.walk(tree):
-        target_is_bundled = (
-            isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "BUNDLED_DATA"
-        ) or (isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "BUNDLED_DATA" for t in node.targets))
+        target_is_bundled = (isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "BUNDLED_DATA") or (
+            isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "BUNDLED_DATA" for t in node.targets)
+        )
         if target_is_bundled:
             return {el.elts[0].value for el in node.value.elts}  # type: ignore[attr-defined]
     raise AssertionError("could not find BUNDLED_DATA in build_sidecar.py")
@@ -196,28 +196,38 @@ def test_plugins_dir_is_bundled_into_the_desktop_sidecar() -> None:
     )
 
 
-def test_project_manager_archetype_row() -> None:
-    """#2178 ships the Project Manager archetype as catalog data only (ADR 0042) —
-    pin the invariants the picker relies on: the id is unique (it's the RadioCard
-    value + React key), its `soul_preset` resolves to a preset file that is really
-    bundled, and `custom` is still the catch-all LAST row."""
+def test_project_manager_archetype_is_listed() -> None:
+    """The Project Manager archetype is LISTED again (operator call, 2026-08-22 —
+    it is the flagship demo archetype). It was held on 2026-08-21 for first-run
+    friction; every item on that list shipped: the bundle seeds github.write:true
+    so the contract's tool binds (project-manager-archetype v0.2.0), the board
+    view shows a setup card instead of a raw `br init` error (projectBoard
+    v0.40.0), the Configure step ASKS for repo / coder / github repo (config_inputs,
+    #2934 — shipped by PR #2938 — + archetype v0.3.0), the review gate's runner ships in the bundle
+    (archetype v0.4.0), and auto_merge works on a default board (projectBoard
+    v0.41.4). This pins BOTH directions: the row ships in ``archetypes`` (advanced
+    tier, before ``custom``), and it is NOT also parked in ``held`` — a row in
+    both would render twice the moment the picker merged them."""
     catalog = json.loads((CONFIG / "archetype-catalog.json").read_text())
     ids = [a["id"] for a in catalog["archetypes"]]
 
-    assert ids.count("project-manager") == 1, f"'project-manager' must appear exactly once, got {ids}"
-
-    (row,) = (a for a in catalog["archetypes"] if a["id"] == "project-manager")
-    preset = CONFIG / "soul-presets" / f"{row['soul_preset']}.md"
-    assert preset.is_file(), (
-        f"archetype 'project-manager' points at soul_preset '{row['soul_preset']}' "
-        f"but {preset} does not exist — the persona step would silently seed nothing."
+    assert ids.count("project-manager") == 1, f"'project-manager' must ship exactly once in archetypes, got {ids}"
+    held = [a["id"] for a in catalog.get("held") or []]
+    assert "project-manager" not in held, (
+        f"'project-manager' is listed — it must not also be parked in `held`, got {held}"
     )
 
-    # It's an advanced-tier archetype (ADR 0042 picker placement) — the picker files it
-    # under the collapsed "Advanced" section rather than inline with Basic.
-    assert row.get("tier") == "advanced", f"'project-manager' must be tier 'advanced', got {row.get('tier')!r}"
-
-    assert ids[-1] == "custom", f"'custom' must stay LAST in the archetype list, got {ids}"
+    (row,) = (a for a in catalog["archetypes"] if a["id"] == "project-manager")
+    assert row.get("tier") == "advanced", "Project Manager stays under Advanced — it needs a repo + a coder delegate"
+    assert ids.index("project-manager") < ids.index("custom"), "`custom` stays LAST"
+    preset = CONFIG / "soul-presets" / f"{row['soul_preset']}.md"
+    assert preset.is_file(), (
+        f"'project-manager' points at soul_preset '{row['soul_preset']}' but {preset} does not exist"
+    )
+    assert row.get("bundle", "").startswith("https://github.com/protoLabsAI/project-manager-archetype"), (
+        "the listed row must point at the project-manager-archetype bundle"
+    )
+    assert "_held" not in row, "a listed row must not carry the `_held` parking note"
 
 
 def test_design_system_archetype_row() -> None:
@@ -242,29 +252,31 @@ def test_design_system_archetype_row() -> None:
     assert ids[-1] == "custom", f"'custom' must stay LAST in the archetype list, got {ids}"
 
 
-def test_social_marketing_archetype_row() -> None:
-    """The Social Marketing archetype ships as catalog data only (ADR 0042) — same
-    invariants as the other rows, plus the two that are specific to it: it is a
-    STANDARD-tier card (it's a mainstream persona, not an advanced one, so it must
-    render inline rather than collapse under 'Advanced'), and it must NOT declare
-    `requires: [python_runtime]` — unlike Cowork it drives no document runtime, and a
-    spurious requirement would gate it behind a runtime install on desktop."""
+def test_social_marketing_archetype_is_held() -> None:
+    """The Social Marketing archetype is HELD from the picker (operator call,
+    2026-08-20: not ready for release). JSON has no comments, so 'commented out'
+    is a sibling ``held`` list the reader never serves. This pins BOTH directions:
+    the row must not ship in ``archetypes`` (it would become selectable again),
+    and it must survive intact in ``held`` — soul preset and bundle still valid —
+    so restoring it is one move, not an archaeology dig."""
     catalog = json.loads((CONFIG / "archetype-catalog.json").read_text())
     ids = [a["id"] for a in catalog["archetypes"]]
 
-    assert ids.count("social-marketing") == 1, f"'social-marketing' must appear exactly once, got {ids}"
+    assert "social-marketing" not in ids, (
+        f"'social-marketing' is held from release — it must not be in archetypes, got {ids}"
+    )
 
-    (row,) = (a for a in catalog["archetypes"] if a["id"] == "social-marketing")
+    held = [a["id"] for a in catalog.get("held") or []]
+    assert held.count("social-marketing") == 1, f"'social-marketing' must be parked exactly once in `held`, got {held}"
+    (row,) = (a for a in catalog["held"] if a["id"] == "social-marketing")
     preset = CONFIG / "soul-presets" / f"{row['soul_preset']}.md"
     assert preset.is_file(), (
-        f"archetype 'social-marketing' points at soul_preset '{row['soul_preset']}' "
-        f"but {preset} does not exist — the persona step would silently seed nothing."
+        f"held archetype 'social-marketing' points at soul_preset '{row['soul_preset']}' "
+        f"but {preset} does not exist — restoring the row would silently seed nothing."
     )
-
-    assert row.get("tier", "standard") == "standard", (
-        f"'social-marketing' must render inline (standard tier), got {row.get('tier')!r}"
+    assert row.get("bundle", "").startswith("https://github.com/protoLabsAI/"), (
+        "the held row must keep its bundle URL so restoration is one move"
     )
-    assert "requires" not in row, "the social stack drives no python runtime — it must not declare one"
 
     assert ids[-1] == "custom", f"'custom' must stay LAST in the archetype list, got {ids}"
 
@@ -274,9 +286,9 @@ def _sidecar_cli_hidden_imports() -> set[str]:
     the dynamically-dispatched CLI modules the frozen build must hidden-import."""
     tree = ast.parse((ROOT / "apps" / "desktop" / "sidecar" / "build_sidecar.py").read_text())
     for node in ast.walk(tree):
-        is_it = (
-            isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "CLI_FORWARD_MODULES"
-        ) or (isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "CLI_FORWARD_MODULES" for t in node.targets))
+        is_it = (isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "CLI_FORWARD_MODULES") or (
+            isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "CLI_FORWARD_MODULES" for t in node.targets)
+        )
         if is_it:
             return {el.value for el in node.value.elts}  # type: ignore[attr-defined]
     raise AssertionError("could not find CLI_FORWARD_MODULES in build_sidecar.py")

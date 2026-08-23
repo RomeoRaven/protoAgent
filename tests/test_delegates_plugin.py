@@ -225,41 +225,84 @@ async def test_registry_dispatch_unknown_raises():
         await reg.dispatch("nope", "hi")
 
 
-async def test_registry_dispatch_scopes_acp_conversation_key_without_mutating_roster(monkeypatch):
-    reg = DelegateRegistry([{"name": "hermes", "type": "acp", "command": "hermes-acp", "workdir": "/srv/hub"}])
-    seen = []
+async def test_registry_conversation_key_is_acp_only_and_does_not_mutate_roster(monkeypatch):
+    reg = DelegateRegistry(
+        [
+            {"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp"},
+            {"name": "model", "type": "openai", "url": "https://g/v1", "model": "m"},
+        ]
+    )
+    before = reg.roster()
+    seen = {}
 
-    async def capture(delegate, query, *, timeout=None, item_id=None, resume_task_id=None):
-        seen.append((delegate.conversation_key, query))
-        return "reply"
+    async def _dispatch(d, query, *, timeout=None, item_id=None, resume_task_id=None):
+        seen["delegate"] = d
+        return "done"
 
-    monkeypatch.setattr(ADAPTERS["acp"], "dispatch", capture)
+    monkeypatch.setattr(ADAPTERS["acp"], "dispatch", _dispatch)
 
-    assert await reg.dispatch("hermes", "hello", conversation_key="room:ao:thread-1") == "reply"
-    assert seen == [("room:ao:thread-1", "hello")]
-    assert reg.get("hermes").conversation_key == ""  # per-call only; config roster stays immutable
+    assert await reg.dispatch("coder", "go", conversation_key="thread-1") == "done"
+    assert seen["delegate"].conversation_key == "thread-1"
+    assert seen["delegate"] is not reg.get("coder")
+    assert reg.get("coder").conversation_key == ""
+    assert reg.roster() == before
+    with pytest.raises(DelegateError, match="conversation_key.*acp"):
+        await reg.dispatch("model", "go", conversation_key="thread-1")
 
 
-async def test_registry_refuses_conversation_key_for_non_acp_delegate():
-    reg = DelegateRegistry([{"name": "peer", "type": "a2a", "url": "https://peer/a2a"}])
+async def test_registry_validates_permissions_ceiling_and_refuses_unenforceable_kinds():
+    reg = DelegateRegistry(
+        [
+            {"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp"},
+            {"name": "model", "type": "openai", "url": "https://g/v1", "model": "m"},
+        ]
+    )
+    with pytest.raises(DelegateError, match="permissions.*readonly"):
+        await reg.dispatch("coder", "readonly is just prompt text", permissions="auto")
+    with pytest.raises(DelegateError, match="cannot enforce.*permissions"):
+        await reg.dispatch("model", "readonly", permissions="readonly")
 
-    with pytest.raises(DelegateError, match="conversation_key only applies to acp"):
-        await reg.dispatch("peer", "hello", conversation_key="room:ao:thread-1")
+
+async def test_registry_applies_readonly_as_internal_acp_ceiling(monkeypatch):
+    import plugins.coding_agent as CA
+
+    seen = {}
+
+    class _StubClient:
+        last_stop_reason = None
+        _permission = None
+
+        async def prompt(self, query, timeout=None):
+            seen["query"] = query
+            return "done"
+
+    def _client_for(spec):
+        seen["spec"] = spec
+        return _StubClient()
+
+    monkeypatch.setattr(CA, "_client_for", _client_for)
+    reg = DelegateRegistry(
+        [{"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp", "manage_git": True}]
+    )
+
+    assert await reg.dispatch("coder", "ordinary prompt", permissions="readonly") == "done"
+    assert seen["query"] == "ordinary prompt"
+    assert seen["spec"]["permissions_ceiling"] == "readonly"
+    assert reg.get("coder").manage_git is True  # per-call copy; configured roster is unchanged
 
 
 # ── delegate_to tool ──────────────────────────────────────────────────────────
 
 
 def _register(delegates, monkeypatch):
-    from types import SimpleNamespace
-
     monkeypatch.setattr(P, "_load_delegates_config", lambda: delegates)
+    from graph.plugins.host import PluginHost
 
     class _Reg:
         def __init__(self):
             self.config = {}
             self.tools = []
-            self.host = SimpleNamespace(invoke_delegate="stale")
+            self.host = PluginHost()
 
         def register_tool(self, t):
             self.tools.append(t)
@@ -269,30 +312,46 @@ def _register(delegates, monkeypatch):
     return r
 
 
-def test_register_no_delegates_registers_nothing(monkeypatch):
+def test_register_no_delegates_registers_only_propose(monkeypatch):
+    """An empty roster still gets propose_delegate (#2944) — the consent-gated way
+    OUT of the empty-roster dead end — and nothing else."""
     r = _register([], monkeypatch)
-    assert r.tools == []
-    assert r.host.invoke_delegate is None
+    assert [t.name for t in r.tools] == ["propose_delegate"]
 
 
 def test_register_exposes_delegate_to_and_list_agents(monkeypatch):
     r = _register([{"name": "opus", "type": "openai", "url": "https://g/v1", "model": "m"}], monkeypatch)
-    assert [t.name for t in r.tools] == ["delegate_to", "list_agents"]
+    assert [t.name for t in r.tools] == ["delegate_to", "list_agents", "propose_delegate"]
     assert "opus" in r.tools[0].description
 
 
-async def test_register_exposes_named_delegate_host_service_with_conversation_key(monkeypatch):
-    seen = []
+async def test_register_sets_optional_invoke_delegate_and_forwards_call_options(monkeypatch):
+    r = _register([{"name": "coder", "type": "acp", "command": "proto", "workdir": "/tmp"}], monkeypatch)
+    seen = {}
 
-    async def capture(delegate, query, *, timeout=None, item_id=None, resume_task_id=None):
-        seen.append((delegate.name, delegate.conversation_key, query))
-        return "Hermes reply"
+    async def _dispatch(self, name, query, **kwargs):
+        seen.update(name=name, query=query, **kwargs)
+        return "done"
 
-    monkeypatch.setattr(ADAPTERS["acp"], "dispatch", capture)
-    r = _register([{"name": "hermes", "type": "acp", "command": "hermes-acp", "workdir": "/srv/hub"}], monkeypatch)
+    monkeypatch.setattr(DelegateRegistry, "dispatch", _dispatch)
 
-    assert await r.host.invoke_delegate("hermes", "hello", "room:ao:thread-1") == "Hermes reply"
-    assert seen == [("hermes", "room:ao:thread-1", "hello")]
+    assert await r.host.invoke_delegate("coder", "inspect", "review-1") == "done"
+    assert seen == {
+        "name": "coder",
+        "query": "inspect",
+        "conversation_key": "review-1",
+        "permissions": "readonly",
+    }
+
+
+def test_register_always_clears_stale_invoke_delegate_when_roster_is_empty(monkeypatch):
+    r = _register([], monkeypatch)
+    r.host.invoke_delegate = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(P, "_load_delegates_config", lambda: [])
+    P.register(r)
+
+    assert r.host.invoke_delegate is None
 
 
 def test_registry_roster_shape():
@@ -613,9 +672,10 @@ async def test_acp_dispatch_reuses_client(monkeypatch):
     assert await ADAPTERS["acp"].dispatch(d, "fix the bug") == "coding done"
 
 
-async def test_acp_teardown_evicts_all_workdir_scoped_conversation_clients():
-    """Deleting one configured ACP delegate reaps every Room-thread client created
-    from that exact launch/workdir/policy spec, without needing each thread key."""
+async def test_acp_teardown_evicts_every_conversation_for_the_workdir_scoped_client():
+    """teardown reaps the exact cached client dispatch created — proving the
+    spec/cache-key (incl. workdir) line up, so a per-call scoped workdir tears
+    down its own subprocess."""
     import plugins.coding_agent as CA
 
     d = ADAPTERS["acp"].parse({"name": "proto", "type": "acp", "command": "proto", "workdir": "/tmp/wt-x"})
@@ -628,15 +688,18 @@ async def test_acp_teardown_evicts_all_workdir_scoped_conversation_clients():
         async def close(self):
             self.closed = True
 
-    first, second = _FakeClient(), _FakeClient()
-    first_key = CA._cache_key({**spec, "conversation_key": "room:ao:first"})
-    second_key = CA._cache_key({**spec, "conversation_key": "room:ao:second"})
-    CA._CLIENTS[first_key] = first
-    CA._CLIENTS[second_key] = second
+    first = _FakeClient()
+    second = _FakeClient()
+    CA._CLIENTS[CA._cache_key({**spec, "conversation_key": "one"})] = first
+    CA._CLIENTS[CA._cache_key({**spec, "conversation_key": "two"})] = second
 
     assert await ADAPTERS["acp"].teardown(d) is True
     assert first.closed is True and second.closed is True
-    assert first_key not in CA._CLIENTS and second_key not in CA._CLIENTS
+    base_key = CA._cache_key(spec)
+    assert not any(
+        key == base_key or (len(key) == len(base_key) + 2 and key[: len(base_key)] == base_key)
+        for key in CA._CLIENTS
+    )
     assert await ADAPTERS["acp"].teardown(d) is False  # idempotent
 
 
@@ -1094,3 +1157,98 @@ async def test_empty_reply_at_the_limit_still_explains_itself(monkeypatch):
     out = await _dispatch_with(monkeypatch, "   ", "max_tokens")
     assert out.startswith("[no reply —")
     assert "output-token limit" in out
+
+
+# ── propose_delegate (#2944): consent-gated registration ─────────────────────────
+
+
+def _propose_tool():
+    return P._build_propose_delegate()
+
+
+def _acp_entry(name="cc"):
+    return {"name": name, "type": "acp", "command": "/abs/claude-agent-acp", "workdir": "/abs/repo"}
+
+
+async def test_propose_delegate_rejects_bad_entries_without_parking(monkeypatch):
+    """Garbage never reaches the operator: shape/type errors return immediately."""
+    parked = []
+    monkeypatch.setattr("langgraph.types.interrupt", lambda payload: parked.append(payload))
+    t = _propose_tool()
+    assert (await t.ainvoke({"entry": {"name": "x", "type": "nope"}})).startswith("Error:")
+    assert (await t.ainvoke({"entry": {"type": "acp"}})).startswith("Error:")  # no name
+    assert parked == []
+
+
+async def test_propose_delegate_refuses_a_duplicate(monkeypatch):
+    from plugins.delegates import store as dstore
+
+    monkeypatch.setattr(dstore, "read_delegates_raw", lambda: [_acp_entry()])
+    parked = []
+    monkeypatch.setattr("langgraph.types.interrupt", lambda payload: parked.append(payload))
+    t = _propose_tool()
+    out = await t.ainvoke({"entry": _acp_entry()})
+    assert out.startswith("Error:") and "already exists" in out
+    assert parked == []
+
+
+async def test_propose_delegate_declines_unless_approve_is_exactly_true(monkeypatch):
+    """Fail-closed: an auto-answered autonomous turn (string), an unchecked box, or
+    a truthy-but-not-True value must all decline — nothing is written."""
+    from plugins.delegates import store as dstore
+
+    monkeypatch.setattr(dstore, "read_delegates_raw", lambda: [])
+    writes = []
+    monkeypatch.setattr(dstore, "upsert_delegate", lambda e: writes.append(e))
+
+    async def _probe(d):
+        return {"ok": True}
+
+    monkeypatch.setattr(ADAPTERS["acp"], "probe", _probe)
+    t = _propose_tool()
+    for answer in ("ok sure", {"approve": False}, {"approve": "true"}, {}):
+        monkeypatch.setattr("langgraph.types.interrupt", lambda payload, _a=answer: _a)
+        out = await t.ainvoke({"entry": _acp_entry(), "reason": "board coder"})
+        assert "NOT registered" in out, answer
+    assert writes == []
+
+
+async def test_propose_delegate_registers_on_explicit_approval(monkeypatch):
+    """The approval path writes through the same store seam as the console CRUD,
+    hot-reloads, and reports the new roster. The consent card carries the entry
+    (command path visible) and the probe result."""
+    from plugins.delegates import store as dstore
+
+    monkeypatch.setattr(dstore, "read_delegates_raw", lambda: [])
+    writes = []
+    monkeypatch.setattr(dstore, "upsert_delegate", lambda e: writes.append(e))
+
+    async def _probe(d):
+        return {"ok": True, "detail": "handshake fine"}
+
+    monkeypatch.setattr(ADAPTERS["acp"], "probe", _probe)
+
+    async def _fake_reload():
+        return True, "reloaded"
+
+    import plugins.delegates.api as dapi
+
+    monkeypatch.setattr(dapi, "_reload", _fake_reload)
+    monkeypatch.setattr(dapi, "_list_payload", lambda: {"delegates": [{"name": "cc"}]})
+
+    seen = {}
+
+    def _interrupt(payload):
+        seen.update(payload)
+        return {"approve": True, "note": "go"}
+
+    monkeypatch.setattr("langgraph.types.interrupt", _interrupt)
+    t = _propose_tool()
+    out = await t.ainvoke({"entry": _acp_entry(), "reason": "the board needs a coder"})
+
+    assert writes and writes[0]["name"] == "cc"
+    assert "Registered delegate 'cc'" in out and "roster reloaded" in out and "go" in out
+    assert seen["kind"] == "form"
+    assert "/abs/claude-agent-acp" in seen["description"]  # command path front and center
+    assert "handshake fine" in seen["description"]  # probe result shown
+    assert "the board needs a coder" in seen["description"]  # the agent's why

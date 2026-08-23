@@ -1,5 +1,73 @@
 [
   {
+    "version": "v0.146.0",
+    "date": "2026-08-23",
+    "changes": [
+      "Plugins can declare federation_paths — a peer-reachable, still-authenticated plugin RPC (#2747).",
+      "Plugin releases now poke their archetypes (#2960).",
+      "Chat shows a streaming activity indicator through mid-turn generation pauses (#2967).",
+      "Escape now stops the streaming response — or cancels the newest queued steer first (#2968).",
+      "Plugin surfaces can fence a turn to a tool allowlist (#2972).",
+      "A Project Manager member created from the picker works out of the box (#2977).",
+      "Plugins can invoke named ACP delegates with isolated conversations and a host-enforced read-only ceiling (#2747).",
+      "⌘K now clears the chat; the command palette moved to ⌘⇧K (#2949).",
+      "The Project Manager soul preset no longer commands tools a fresh member can't hold (#2978).",
+      "The archetype picker no longer offers a Create that can only fail (#2979).",
+      "One hard-required predicate behind the archetype picker gate (#2984).",
+      "Bundle updates no longer downgrade a member that moved ahead of the archetype's pin (#2960).",
+      "The Project Manager first-run guide matches what ships (#2980).",
+      "Project Manager first-run docs match today's releases (#2982)."
+    ]
+  },
+  {
+    "version": "v0.145.0",
+    "date": "2026-08-22",
+    "changes": [
+      "ACP plan session updates are recorded instead of dropped (#2945).",
+      "Agents can now propose_delegate — registration still needs your explicit approval (#2953).",
+      "The Project Manager archetype is listed again — the flagship for demos — and the first-run docs now match what the wizard actually does (#2963).",
+      "Creating an agent now lands you in it (#2952).",
+      "The Project Manager persona grounds first and proposes its own bench (#2954).",
+      "A failed conversation harvest no longer costs the thread its knowledge (#2950).",
+      "Parked (HITL) turns now appear in telemetry (#2951).",
+      "Model fallback is no longer silent (#2956).",
+      "\"Test connection\" now works for a Claude subscription (#2957).",
+      "Infisical host tolerates the CLI's /api suffix (#2958).",
+      "A show_component widget is never hidden inside a folded turn (#2965).",
+      "The docs and marketing sites now unfurl with the same branded social card as the GitHub repo (#2942)."
+    ]
+  },
+  {
+    "version": "v0.144.0",
+    "date": "2026-08-21",
+    "changes": [
+      "Bundles can declare config_inputs: — setup prompts wired to plugin config (#2934).",
+      "The marketing site no longer installs React for one stylesheet (#2930).",
+      "Fresh installs no longer show the per-turn token/cost footer under chat answers (#2931).",
+      "The Docs view no longer 401s on first load of a token-gated host (#2933).",
+      "Plugin views can no longer 401 on first load — the DS kit itself now waits for the bearer (#2935).",
+      "One-shot scheduled tasks resume the chat that scheduled them (#2939).",
+      "The Project Manager archetype is held from the new-agent picker (#2932)."
+    ]
+  },
+  {
+    "version": "v0.143.0",
+    "date": "2026-08-20",
+    "changes": [
+      "Queued-steer placeholder hint (#2837).",
+      "Auth-gated e2e mock lane (#2886).",
+      "ACP session observability (#2889).",
+      "Query keys are now slug-namespaced (#2887).",
+      "Background report cards shrink to dismissable chips (#2923).",
+      "Plugin form callbacks survive reload (#2889).",
+      "Background delegation dispatches collapse into a compact chip (#2896).",
+      "Changelog gate now blocks merge (#2906).",
+      "onboard_project registers into the managed-projects registry, so the GitHub plugin sees onboarded repos (#2925).",
+      "Friction and devkit plugin views no longer 401 on first load (#2926).",
+      "The Social Marketing archetype is held from the new-agent picker (#2921)."
+    ]
+  },
+  {
     "version": "v0.142.1",
     "date": "2026-08-20",
     "changes": [

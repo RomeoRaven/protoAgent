@@ -215,6 +215,36 @@ def test_create_forwards_inputs_and_secrets(client, monkeypatch):
     assert captured["secrets"] == [{"key": "openai_api_key", "value": "sk-1"}]
 
 
+def test_create_forwards_config_inputs(client, monkeypatch):
+    """POST /api/fleet threads operator `config_inputs` answers (#2934) into
+    manager.create — values untouched (a toggle's bool stays a bool; the seed helper
+    coerces per declared type), JSON nulls dropped, malformed/absent → None."""
+    from graph.workspaces import manager
+
+    captured: dict = {}
+
+    def fake_create(name, **kwargs):
+        captured.update(kwargs)
+        return {"id": f"{name}-0", "name": name, "port": 7999, "path": "/tmp", "installed": []}
+
+    monkeypatch.setattr(manager, "create", fake_create)
+    r = client.post(
+        "/api/fleet",
+        json={
+            "name": "pm",
+            "start": False,
+            "bundle": "https://github.com/x/stack",
+            "config_inputs": {"board.repo": "org/repo", "board.auto_merge": True, "board.skip": None},
+        },
+    )
+    assert r.status_code == 200
+    assert captured["config_inputs"] == {"board.repo": "org/repo", "board.auto_merge": True}
+
+    captured.clear()
+    assert client.post("/api/fleet", json={"name": "pm2", "start": False, "config_inputs": "nope"}).status_code == 200
+    assert captured["config_inputs"] is None
+
+
 def test_create_forwards_requires_tools(client, monkeypatch):
     """POST /api/fleet threads the archetype's `requires_tools` contract into manager.create
     (#2277/#2713) — blank entries dropped, absent field → None so nothing is persisted."""
@@ -630,3 +660,19 @@ def test_purge_that_cannot_delete_the_workspace_is_409_not_500(client, monkeypat
     assert resp.status_code == 409  # not 500, and not the 400 a rejected request gets
     detail = resp.json()["detail"]
     assert "IS stopped" in detail and "retry" in detail.lower()
+
+
+def test_create_refusal_is_a_400_with_the_prompt_named(client, monkeypatch):
+    """A required Configure answer missing (or a picked delegate the host lacks) is a
+    WorkspaceError from manager.create → 400 carrying the message the panel toasts."""
+    from graph.workspaces import manager
+
+    def refuse(name, **kwargs):
+        raise manager.WorkspaceError(
+            "the bundle needs these Configure answers before the agent can work: Coder delegate (board.coder)"
+        )
+
+    monkeypatch.setattr(manager, "create", refuse)
+    r = client.post("/api/fleet", json={"name": "pm", "start": False, "bundle": "https://github.com/x/stack"})
+    assert r.status_code == 400
+    assert "Coder delegate (board.coder)" in r.json()["detail"]
