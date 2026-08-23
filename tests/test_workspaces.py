@@ -941,6 +941,45 @@ def test_copy_host_delegates_carries_only_the_picked_entry_and_its_secrets(root,
     assert manager.copy_host_delegates(cfg, lock, {"board.coder": "claude-code"}, None) == []
 
 
+def test_create_refuses_required_delegate_when_no_source_registry(root, tmp_path, monkeypatch):
+    """A required delegate answer cannot create a member whose own registry is empty."""
+
+    def fake_install(ws, bundle):
+        _pm_lock(ws, project=False)
+        return ["board"]
+
+    monkeypatch.setattr(manager, "_install_bundle_into", fake_install)
+    with pytest.raises(manager.WorkspaceError, match="not configured"):
+        manager.create(
+            "isolated-pm",
+            bundle="https://example.invalid/pm",
+            config_inputs={"board.repo": str(tmp_path), "board.coder": "claude-code"},
+            inherit_model=None,
+            delegate_source=None,
+        )
+    assert not root.exists() or not any(root.iterdir())
+
+
+def test_create_accepts_required_delegate_already_in_cloned_registry(root, tmp_path, monkeypatch):
+    """Final-registry validation accepts a delegate already carried by cloned config."""
+
+    def fake_install(ws, bundle):
+        _pm_lock(ws, project=False)
+        return ["board"]
+
+    monkeypatch.setattr(manager, "_install_bundle_into", fake_install)
+    source = _host_dir(tmp_path)
+    result = manager.create(
+        "cloned-pm",
+        from_config=str(source),
+        bundle="https://example.invalid/pm",
+        config_inputs={"board.repo": str(tmp_path), "board.coder": "claude-code"},
+        delegate_source=None,
+    )
+    cfg = yaml.safe_load((root / result["id"] / "config" / "langgraph-config.yaml").read_text())
+    assert [entry["name"] for entry in cfg["delegates"]] == ["claude-code", "peer"]
+
+
 def test_register_project_inputs_registers_checkout_and_scopes_onboarding(root, tmp_path, monkeypatch):
     """A `project: true` path input becomes a `projects:` entry (name = dir name,
     GitHub slug from the origin remote, read-only) and — only when the operator has no

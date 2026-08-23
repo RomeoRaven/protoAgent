@@ -503,15 +503,21 @@ def create(
             # the inherited-model source on the console path, or an explicit source (the
             # CLI, which creates a blank-template workspace but still runs inside the host).
             source = delegate_source or inherit_model
-            copied = copy_host_delegates(cfg, ws / "plugins.lock", config_inputs or {}, source)
-            if source:
-                ghosts = _uncopied_required_delegates(ws / "plugins.lock", config_inputs or {}, copied)
-                if ghosts:
-                    raise WorkspaceError(
-                        "the picked coder delegate is not configured on this host: "
-                        + ", ".join(ghosts)
-                        + " — register it in Settings ▸ Delegates first"
-                    )
+            copy_host_delegates(cfg, ws / "plugins.lock", config_inputs or {}, source)
+            member_doc = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+            member_delegates = member_doc.get("delegates") if isinstance(member_doc, dict) else None
+            configured = [
+                str(entry.get("name") or "").strip()
+                for entry in (member_delegates or [])
+                if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+            ]
+            ghosts = _uncopied_required_delegates(ws / "plugins.lock", config_inputs or {}, configured)
+            if ghosts:
+                raise WorkspaceError(
+                    "the picked coder delegate is not configured for this member: "
+                    + ", ".join(ghosts)
+                    + " — select a configured delegate source or register it in Settings ▸ Delegates first"
+                )
             # A path input flagged `project: true` is a repo the agent manages — register
             # it (projects: entry + GitHub slug + scoped onboarding root).
             register_project_inputs(cfg, ws / "plugins.lock")
@@ -957,16 +963,19 @@ def copy_host_delegates(cfg: Path, lock: Path, values: Mapping[str, object] | No
     return copied
 
 
-def _uncopied_required_delegates(lock: Path, values: Mapping[str, object], copied: list[str]) -> list[str]:
-    """Names answered for a REQUIRED ``type: delegate`` input that ``copy_host_delegates``
-    could not find on the host — the member would boot with the name but no entry, the
-    exact pre-#2977 failure, so the create refuses instead."""
+def _uncopied_required_delegates(lock: Path, values: Mapping[str, object], configured: list[str]) -> list[str]:
+    """Required delegate answers absent from the resulting member registry.
+
+    The registry may already exist in cloned/snapshot config or may have just been
+    copied from a source agent. Either way, a name without an actual member entry
+    would recreate the pre-#2977 first-dispatch failure, so creation refuses.
+    """
     out: list[str] = []
     for key, dec in _declared_config_inputs(lock).items():
         if str(dec.get("type") or "") != "delegate" or not bool(dec.get("required")):
             continue
         name = str(values.get(key) or "").strip()
-        if name and name not in copied and name not in out:
+        if name and name not in configured and name not in out:
             out.append(name)
     return out
 
