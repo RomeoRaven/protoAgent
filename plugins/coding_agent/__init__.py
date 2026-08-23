@@ -84,7 +84,7 @@ def _make_permission(spec: dict) -> Callable[[dict], str | None]:
 
 
 def _cache_key(spec: dict) -> tuple:
-    return (
+    base = (
         spec["name"],
         spec["command"],
         tuple(spec["args"]),
@@ -97,12 +97,17 @@ def _cache_key(spec: dict) -> tuple:
         # for everyone (QA panel on #2145; env itself had the same latent gap).
         tuple(sorted((spec.get("env") or {}).items())),
         tuple(sorted(spec.get("env_remove") or ())),  # sorted: order-insensitive identity
-        # A per-invocation ceiling changes the mutable ACP permission resolver.
-        # Key it before the conversation discriminator so concurrent fenced and
-        # unrestricted turns can never share a client and overwrite each other.
-        str(spec.get("permissions_ceiling") or ""),
-        str(spec.get("conversation_key") or ""),
     )
+    ceiling = str(spec.get("permissions_ceiling") or "")
+    conversation = str(spec.get("conversation_key") or "")
+    if not ceiling and not conversation:
+        # Preserve the historical tuple exactly so upgrades keep finding every
+        # existing persisted ACP session file (#970).
+        return base
+    # A per-invocation ceiling changes the mutable ACP permission resolver. Key it
+    # before the conversation discriminator so concurrent fenced and unrestricted
+    # turns can never share a client and overwrite each other.
+    return (*base, ceiling, conversation)
 
 
 def _session_id_path(spec: dict) -> Path:
@@ -191,10 +196,10 @@ async def evict_clients(spec: dict) -> bool:
     ``conversation_key``. Match the stable launch/policy prefix and leave every
     unrelated delegate untouched. Idempotent and best-effort.
     """
-    base = _cache_key({**spec, "permissions_ceiling": "", "conversation_key": ""})[:-2]
+    base = _cache_key({**spec, "permissions_ceiling": "", "conversation_key": ""})
     clients = []
     for key in list(_CLIENTS):
-        if key[:-2] == base:
+        if key == base or (len(key) == len(base) + 2 and key[: len(base)] == base):
             client = _CLIENTS.pop(key, None)
             if client is not None:
                 clients.append(client)

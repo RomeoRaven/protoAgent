@@ -1023,6 +1023,18 @@ def test_session_id_path_is_stable_and_keyed_per_signature():
         "deny_kinds": [],
     }
     spec_b = {**spec_a, "workdir": "/tmp/wt-b"}
+    legacy_key = (
+        "proto",
+        "proto",
+        ("--acp",),
+        "/tmp/wt-a",
+        "auto",
+        (),
+        (),
+        (),
+        (),
+    )
+    assert P._cache_key(spec_a) == legacy_key  # upgrade keeps existing persisted-session digest
     p_a, p_a2, p_b = P._session_id_path(spec_a), P._session_id_path(spec_a), P._session_id_path(spec_b)
     assert p_a == p_a2  # stable for the same signature
     assert p_a != p_b  # workdir is part of the key

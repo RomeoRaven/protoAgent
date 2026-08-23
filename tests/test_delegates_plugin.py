@@ -695,7 +695,11 @@ async def test_acp_teardown_evicts_every_conversation_for_the_workdir_scoped_cli
 
     assert await ADAPTERS["acp"].teardown(d) is True
     assert first.closed is True and second.closed is True
-    assert not any(key[:-2] == CA._cache_key(spec)[:-2] for key in CA._CLIENTS)
+    base_key = CA._cache_key(spec)
+    assert not any(
+        key == base_key or (len(key) == len(base_key) + 2 and key[: len(base_key)] == base_key)
+        for key in CA._CLIENTS
+    )
     assert await ADAPTERS["acp"].teardown(d) is False  # idempotent
 
 
