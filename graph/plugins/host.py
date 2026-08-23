@@ -28,13 +28,18 @@ log = logging.getLogger("protoagent.plugins")
 
 @dataclass
 class PluginHost:
-    # async (prompt, session_id) -> str — invoke the agent as a chat surface
-    # (one conversation per session_id, the LangGraph thread key).
-    invoke: Optional[Callable[[str, str], Awaitable[str]]] = None
-    # async (delegate_name, prompt, conversation_key) -> str — supplied by the
-    # first-party delegates plugin. Keeps callers independent of delegate/ACP
-    # config parsing, secrets, permissions, and client lifecycle internals.
-    invoke_delegate: Optional[Callable[[str, str, str], Awaitable[str]]] = None
+    # async (prompt, session_id, *, tool_fence=None) -> str — invoke the agent as
+    # a chat surface (one conversation per session_id, the LangGraph thread key).
+    # ``tool_fence`` (#2972, optional keyword) is a per-turn tool allowlist for a
+    # turn that originated with an untrusted party — e.g. a surface relaying
+    # another operator's agent; the host blocks tool calls outside it. Surfaces
+    # that need it should feature-detect (``inspect.signature``) and refuse to
+    # run unfenced on an older host.
+    invoke: Optional[Callable[..., Awaitable[str]]] = None
+    # async (name, prompt, conversation_key=None, *, permissions="readonly") -> str —
+    # invoke a configured delegate without reaching into its plugin package. The
+    # default host-enforced ceiling makes an ordinary plugin invocation read-only.
+    invoke_delegate: Optional[Callable[..., Awaitable[str]]] = None
     # (event: str, data: dict) -> None — publish to the server→client event bus.
     publish: Optional[Callable[[str, dict], Any]] = None
     # () -> subscription — subscribe to the event bus (e.g. return-address delivery).

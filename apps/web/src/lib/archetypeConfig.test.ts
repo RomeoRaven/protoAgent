@@ -2,7 +2,10 @@ import { describe, it, expect } from "vitest";
 
 import {
   archetypeConfigFields,
+  hasHardRequiredBundleConfig,
+  isMissingRequiredBundleConfig,
   isMissingRequiredConfig,
+  requiresToolsNotice,
   fieldId,
   hasConfigFields,
   mcpItemLabel,
@@ -136,6 +139,7 @@ describe("splitConfigValues — collected form values back into create() channel
     expect(splitConfigValues(fields, values)).toEqual({
       inputs: { root: "/work", github_token: "ghp_1" },
       secrets: [],
+      config: {},
     });
   });
 
@@ -144,6 +148,7 @@ describe("splitConfigValues — collected form values back into create() channel
     expect(splitConfigValues(fields, values)).toEqual({
       inputs: {},
       secrets: [{ key: "BRAVE_API_KEY", value: "brv_9" }],
+      config: {},
     });
   });
 
@@ -165,6 +170,7 @@ describe("splitConfigValues — collected form values back into create() channel
     expect(splitConfigValues(clashFields, values)).toEqual({
       inputs: { TOKEN: "from-input" },
       secrets: [{ key: "TOKEN", value: "from-secret" }],
+      config: {},
     });
   });
 });
@@ -192,6 +198,7 @@ describe("collision-aware fieldId + splitConfigValues — two servers sharing a 
     expect(splitConfigValues(fields, values)).toEqual({
       inputs: { "gh:token": "ghp_1", "bb:token": "bbp_2", workspace: "acme" },
       secrets: [],
+      config: {},
     });
   });
 
@@ -215,7 +222,70 @@ describe("collision-aware fieldId + splitConfigValues — two servers sharing a 
     expect(splitConfigValues(single, values)).toEqual({
       inputs: { root: "/work", github_token: "ghp_1" },
       secrets: [],
+      config: {},
     });
+  });
+});
+
+// A bundle declaring config_inputs (#2934) — one of each widget type; the path input
+// carries a default and the boolean is required (a toggle always resolves, so required
+// must not block it).
+function configInputsPreview(): ArchetypePreview {
+  return {
+    id: "project-manager-archetype",
+    bundle: {
+      kind: "bundle",
+      name: "Project Manager",
+      members: [],
+      config_inputs: [
+        { key: "board.repo", label: "Board repo", type: "string", required: true },
+        { key: "board.workroot", label: "Work root", type: "path", required: true, default: "~/work" },
+        { key: "acp.default_delegate", label: "Coding delegate", type: "delegate" },
+        { key: "board.auto_merge", label: "Auto merge", type: "boolean", required: true, default: false },
+      ],
+    },
+  };
+}
+
+describe("config_inputs fields (#2934) — declared plugin config prompts", () => {
+  const fields = archetypeConfigFields(configInputsPreview());
+
+  it("flattens each declared input to an unmasked config-origin field carrying its widget kind", () => {
+    expect(fields.map((f) => [f.origin, f.key, f.kind])).toEqual([
+      ["config", "board.repo", "string"],
+      ["config", "board.workroot", "path"],
+      ["config", "acp.default_delegate", "delegate"],
+      ["config", "board.auto_merge", "boolean"],
+    ]);
+    expect(fields.every((f) => !f.secret)).toBe(true);
+    expect(fields.find((f) => f.key === "board.workroot")?.defaultValue).toBe("~/work");
+    expect(fieldId({ origin: "config", key: "board.repo" })).toBe("config:board.repo");
+  });
+
+  it("routes values to the config channel keyed by dotted path, booleans as real booleans", () => {
+    const values = {
+      [fieldId({ origin: "config", key: "board.repo" })]: "org/repo",
+      [fieldId({ origin: "config", key: "board.auto_merge" })]: "true",
+      [fieldId({ origin: "config", key: "acp.default_delegate" })]: "", // untouched → dropped
+    };
+    expect(splitConfigValues(fields, values)).toEqual({
+      inputs: {},
+      secrets: [],
+      config: { "board.repo": "org/repo", "board.auto_merge": true },
+    });
+  });
+
+  it("required gate: a blank required string blocks; a declared default or a toggle never does", () => {
+    // board.repo is the only blocker — workroot has a default (the backend writes it
+    // when skipped) and the boolean toggle always resolves to a value.
+    expect(isMissingRequiredConfig(fields, {})).toBe(true);
+    expect(
+      isMissingRequiredConfig(fields, { [fieldId({ origin: "config", key: "board.repo" })]: "org/repo" }),
+    ).toBe(false);
+  });
+
+  it("a bundle without config_inputs yields no config fields (backward compat)", () => {
+    expect(archetypeConfigFields(githubPreview()).some((f) => f.origin === "config")).toBe(false);
   });
 });
 
@@ -241,5 +311,49 @@ describe("preview summaries — read-only display in ArchetypePreviewDialog", ()
       ]),
     ).toBe("GitHub token, Brave API key");
     expect(previewSecretsSummary(undefined)).toBe("");
+  });
+});
+
+describe("isMissingRequiredBundleConfig — the hard gate (#2977)", () => {
+  const base = githubPreview();
+  const preview = {
+    ...base,
+    bundle: {
+      ...base.bundle!,
+      config_inputs: [
+        { key: "board.repo", label: "Repo", type: "path", required: true },
+        { key: "board.coder", label: "Coder", type: "delegate", required: true },
+        { key: "board.loop", label: "Loop", type: "boolean", required: false, default: false },
+      ],
+    },
+  } as ArchetypePreview;
+  const fields = archetypeConfigFields(preview);
+
+  it("only counts required bundle config_inputs — a blank required MCP input is soft", () => {
+    const values = {
+      [fieldId({ origin: "config", key: "board.repo" })]: "/work/repo",
+      [fieldId({ origin: "config", key: "board.coder" })]: "claude-code",
+    };
+    expect(isMissingRequiredBundleConfig(fields, values)).toBe(false); // MCP `root` still blank
+    expect(isMissingRequiredConfig(fields, values)).toBe(true);
+  });
+
+  it("knows whether the bundle has any hard-required answer at all", () => {
+    expect(hasHardRequiredBundleConfig(fields)).toBe(true);
+    expect(hasHardRequiredBundleConfig(archetypeConfigFields(githubPreview()))).toBe(false); // MCP-only bundle
+  });
+
+  it("is true while a required config answer is blank; a boolean toggle never gates", () => {
+    expect(isMissingRequiredBundleConfig(fields, { [fieldId({ origin: "config", key: "board.repo" })]: "/r" })).toBe(true);
+  });
+});
+
+describe("requiresToolsNotice", () => {
+  it("names the contract, or nothing when there is none", () => {
+    expect(requiresToolsNotice("Project Manager", ["github_create_issue"])).toBe(
+      "Project Manager commits to a tool its bundle must provide: github_create_issue.",
+    );
+    expect(requiresToolsNotice("Basic", [])).toBeNull();
+    expect(requiresToolsNotice("Basic", undefined)).toBeNull();
   });
 });

@@ -73,6 +73,7 @@ class DelegateRegistry:
         raw: bool = False,
         resume_task_id: str | None = None,
         conversation_key: str | None = None,
+        permissions: str | None = None,
     ) -> str:
         """Dispatch ``query`` to the named delegate.
 
@@ -81,20 +82,33 @@ class DelegateRegistry:
         HITL delegation chain). ``raw=True`` bypasses
         the managed-git lifecycle for programmatic callers that consume the reply as
         DATA (e.g. the coder ladder's candidate generation, ADR 0064) — no branch, no
-        commit, no PR, no claim; just the coder's text."""
+        commit, no PR, no claim; just the coder's text. ``conversation_key`` selects
+        one persistent ACP conversation without mutating the configured roster.
+        ``permissions`` is a per-call ACP ceiling; currently only ``readonly`` is
+        accepted, and delegate types that cannot enforce it are refused."""
         d = self._items.get(name)
         if d is None:
             raise DelegateError(f"unknown delegate {name!r}. Configured: {', '.join(self._items) or '(none)'}.")
         conversation_key = str(conversation_key or "").strip()
+        permissions = str(permissions or "").strip().lower()
         if conversation_key and d.type != "acp":
-            raise DelegateError(f"delegate {name!r} is type {d.type!r} — conversation_key only applies to acp delegates.")
-        if conversation_key or (raw and d.manage_git):
+            raise DelegateError(
+                f"delegate {name!r} is type {d.type!r} — conversation_key only applies to acp delegates."
+            )
+        if permissions and permissions != "readonly":
+            raise DelegateError("permissions must be 'readonly' when an invocation ceiling is requested.")
+        if permissions and d.type != "acp":
+            raise DelegateError(f"delegate {name!r} is type {d.type!r} and cannot enforce a permissions ceiling.")
+        if conversation_key or permissions or (raw and d.manage_git):
             import dataclasses
 
             d = dataclasses.replace(
                 d,
-                **({"conversation_key": conversation_key} if conversation_key else {}),
-                **({"manage_git": False} if raw and d.manage_git else {}),
+                conversation_key=conversation_key,
+                permissions_ceiling=permissions,
+                # A read-only invocation ceiling covers host-managed side effects
+                # too, not only ACP permission requests from the child.
+                manage_git=False if permissions or raw else d.manage_git,
             )
         # Only a2a tasks can park-and-resume. Silently ignoring a resume id on any
         # other adapter would run the ANSWER as a brand-new task (for a managed-git

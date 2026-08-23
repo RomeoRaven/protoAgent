@@ -16,23 +16,35 @@ roster.
 
 ### Programmatic dispatch from a plugin
 
-A server-side plugin can use the host service instead of importing the delegates
-plugin or ACP client internals:
+A server-side plugin can use the host service instead of importing delegate or
+ACP internals:
 
 ```python
 invoke = registry.host.invoke_delegate
 if invoke is None:
     raise RuntimeError("no delegates configured")
-reply = await invoke("coder", "Review this room thread", "room:ao:thread-42")
+reply = await invoke(
+    "coder",
+    "Review this room thread",
+    "conversation:thread-42",
+    permissions="readonly",
+)
 ```
 
-The third argument is an optional ACP conversation key. It isolates the cached
-client and persisted ACP session for that stable conversation while preserving
-the configured delegate's command, workdir, secrets, and permission policy. A
-conversation key is refused for non-ACP delegates rather than silently ignored.
-Removing an ACP delegate closes every cached conversation variant for its exact
-launch/policy definition. The service is cleared on reload when no delegates
-remain, so a plugin cannot call a stale roster.
+The optional conversation key applies only to ACP delegates. It isolates the
+cached client and persisted ACP session for one stable conversation while
+preserving the configured command, workdir, environment, and roster entry. A
+conversation key is refused for other delegate types rather than ignored.
+Explicit ACP teardown closes every cached conversation variant for that
+exact launch and policy definition. Hot reload clears the host service before
+rebinding the current roster, so removed delegates cannot remain callable.
+
+`permissions="readonly"` is a per-invocation ceiling enforced by the ACP host,
+not prompt guidance. The host intersects it with the delegate's configured
+by-kind policy, disables framework-managed Git for that call, and rejects
+write/execute requests even if the configured policy would allow them. A
+delegate type that cannot enforce the ceiling is refused. The configured
+roster remains unchanged.
 
 Manage delegates three ways: the **console panel** (Workspace settings ▸
 Delegates), a **REST API**, or **config** — all hot-swappable (changes apply on
@@ -100,6 +112,37 @@ delegates:
 `delegates` is a **top-level list** (ORBIS-style), not a plugin config section.
 Editing it and hitting **Save & Reload** rebuilds the roster live — no restart
 (protoAgent re-runs the plugin's `register()` with the new config).
+
+## Let the agent propose one (`propose_delegate`)
+
+An empty roster used to be a dead end: the agent could see nobody was configured
+and could only describe, in prose, what it needed. Since core 0.145 (#2953) the
+`delegates` plugin registers **`propose_delegate(entry, reason)`** —
+*unconditionally*, even when the roster is empty and `delegate_to` /
+`list_agents` therefore aren't bound — so *"register Claude Code as our coder"*
+has a real move behind it. Registration stays **consent-gated**:
+
+1. **Validate** — the entry goes through the same per-type schema the panel and
+   `POST /api/delegates` use; a malformed entry or a name that already exists
+   returns an error to the agent (*"read `list_agents` instead of re-registering"*).
+2. **Probe** — the adapter's reachability probe runs (for `acp`, the ACP
+   `initialize` handshake). A failed probe is **shown, not hidden**: you approve
+   something proven runnable, or knowingly approve one that isn't.
+3. **Park for approval** — the turn pauses with a form (A2A `input-required` /
+   the console's approval card) showing the agent's reason, the full proposed
+   entry with the **command path front and center** (an `acp` entry is a binary
+   this agent may run), and the probe result. Only an explicit **approve: true**
+   writes it — through the same seam as Settings ▸ Delegates, followed by a live
+   roster reload, so the new delegate is usable on the next turn. Anything else
+   declines, and your optional note goes back to the agent, which must not
+   re-propose the same entry.
+
+Autonomous turns (scheduled, inbox, background) **fail closed**: there is no
+operator to approve, the runtime auto-answers the pause, and the auto-answer
+declines. The Project Manager preset relies on this tool for its empty-bench
+rule (an absent `list_agents` *is* the answer — propose, don't retry); the
+[coding-agent guide](/guides/build-with-a-coding-agent#_2-wire-a-coder) shows it
+in that flow, and the archetype's Configure step can pick whatever it registered.
 
 ## Use it
 

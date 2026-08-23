@@ -4,17 +4,26 @@ import { ArrowLeft, ChevronDown, ChevronRight } from "lucide-react";
 import { ImportSnapshotPanel } from "./ImportSnapshotPanel";
 import { useMemo, useState } from "react";
 
-import { Input, RadioCard, RadioCardGroup, SecretInput } from "@protolabsai/ui/forms";
+import { Input, RadioCard, RadioCardGroup } from "@protolabsai/ui/forms";
 import { Button } from "@protolabsai/ui/primitives";
 import { PanelHeader } from "@protolabsai/ui/navigation";
 import { useToast } from "@protolabsai/ui/overlays";
 
 import { api } from "../lib/api";
+import { ArchetypeConfigField } from "../setup/ArchetypeConfigField";
 import { ArchetypePreviewDialog } from "../setup/ArchetypePreviewDialog";
 import { pythonRuntimeView } from "../app/pythonRuntime";
 import { archetypesQuery, pythonRuntimeQuery, queryKeys } from "../lib/queries";
 import { lucideIcon } from "../lib/lucideIcon";
-import { archetypeConfigFields, isMissingRequiredConfig, fieldId, splitConfigValues } from "../lib/archetypeConfig";
+import {
+  archetypeConfigFields,
+  fieldId,
+  hasHardRequiredBundleConfig,
+  isMissingRequiredBundleConfig,
+  isMissingRequiredConfig,
+  requiresToolsNotice,
+  splitConfigValues,
+} from "../lib/archetypeConfig";
 import type { Archetype } from "../lib/types";
 
 const NAME_RE = /^[A-Za-z0-9-_]+$/;
@@ -31,7 +40,16 @@ const NAME_RE = /^[A-Za-z0-9-_]+$/;
 // because "where do new agents come from" should be one question with two answers. The
 // snapshot path is its own component: it has to show a plan and take consent before it can
 // create anything, which is a different shape from picking a card.
-export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) => void; onCancel?: () => void }) {
+export function NewAgentPanel({
+  onDone,
+  onCancel,
+}: {
+  // `id` is the created agent's slug — FleetSurface navigates into the new agent's own
+  // console with it. Optional because a success response may omit the agent record; the
+  // caller must degrade (back to the list) rather than navigate to nowhere.
+  onDone?: (name: string, id?: string) => void;
+  onCancel?: () => void;
+}) {
   const qc = useQueryClient();
   const toast = useToast();
   const archetypes = useQuery(archetypesQuery());
@@ -87,9 +105,13 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
         ? `Python runtime is installing — ${pickedArchetype.label}'s document skills will work when it finishes.`
         : `${pickedArchetype.label} needs the managed Python runtime for its document skills — install it in Settings ▸ Tools first, or create the agent now and provision later.`
       : null;
-  // A required field left blank is a soft hint, NOT a hard gate — skipping the Configure step
-  // (or an individual required field) is a first-class path that falls back to env-only.
+  // A required MCP input / secret left blank is a soft hint (skip → env fallback); a required
+  // bundle config_inputs answer is a HARD gate (#2977) — the server refuses the create, so the
+  // button does too, whether or not the Configure step is open.
   const missingRequired = configOpen && isMissingRequiredConfig(fields, values);
+  const missingHard = isMissingRequiredBundleConfig(fields, values);
+  const hasHardRequired = hasHardRequiredBundleConfig(fields);
+  const contractNotice = pickedArchetype ? requiresToolsNotice(pickedArchetype.label, pickedArchetype.requires_tools) : null;
 
   function pick(id: string) {
     setPicked(id);
@@ -103,14 +125,20 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
     // agent on the default SOUL. When the Configure form is open, split the collected values
     // into the two seed channels (#2041); a collapsed/absent form sends nothing → env-only.
     mutationFn: () => {
-      const { inputs, secrets } =
-        configOpen && fields.length ? splitConfigValues(fields, values) : { inputs: {}, secrets: [] };
+      // MCP inputs + secrets are skippable (collapsed form → env fallback); bundle config
+      // answers are NOT (the server gates on them, #2977) — they ride the request whether
+      // or not the section is open, so fill-then-collapse can't drop them.
+      const split = fields.length ? splitConfigValues(fields, values) : { inputs: {}, secrets: [], config: {} };
+      const inputs = configOpen ? split.inputs : {};
+      const secrets = configOpen ? split.secrets : [];
+      const config = split.config;
       return api.createAgent({
         name: name.trim(),
         bundle: archetype?.bundle ?? null,
         soul: archetype?.soul || undefined,
         inputs: Object.keys(inputs).length ? inputs : undefined,
         secrets: secrets.length ? secrets : undefined,
+        config_inputs: Object.keys(config).length ? config : undefined,
         requires_tools: archetype?.requires_tools?.length ? archetype.requires_tools : undefined,
       });
     },
@@ -119,7 +147,9 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
       qc.invalidateQueries({ queryKey: queryKeys.fleet });
       const created = res.agent?.name ?? name.trim();
       toast({ tone: "success", title: "Agent created", message: `${created} is ready.` });
-      onDone?.(created);
+      // Same guard as the name above: a success response without the agent record must
+      // not throw here — it hands back no id and the caller falls back to the list.
+      onDone?.(created, res.agent?.id);
     },
   });
 
@@ -158,7 +188,7 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
           </button>
         </div>
         {source === "snapshot" ? (
-          <ImportSnapshotPanel onDone={(created) => onDone?.(created)} />
+          <ImportSnapshotPanel onDone={onDone} />
         ) : (
         <>
         <label className="field archetype-name-field">
@@ -170,7 +200,7 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
             aria-label="Agent name"
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && nameOk && !create.isPending) create.mutate();
+              if (e.key === "Enter" && nameOk && !missingHard && !create.isPending) create.mutate();
             }}
           />
           <span className="field-hint">Letters, numbers, dashes and underscores — it's the agent's id and URL.</span>
@@ -179,7 +209,7 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
         <div className="panel-actions">
           <Button
             variant="primary"
-            disabled={!nameOk || create.isPending}
+            disabled={!nameOk || missingHard || create.isPending}
             onClick={() => create.mutate()}
           >
             {create.isPending ? "Creating…" : archetype?.bundle ? `Create from ${archetype.label}` : "Create agent"}
@@ -234,9 +264,15 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
             {runtimeWarning}
           </p>
         ) : null}
+        {contractNotice ? (
+          <p className="archetype-runtime-notice" role="note">
+            {contractNotice}
+          </p>
+        ) : null}
 
-        {/* Inline Configure step (#2041) — appears only when the picked bundle has MCP inputs
-            or declared secrets. Collapsible: skipping falls back to this host's environment. */}
+        {/* Inline Configure step (#2041/#2934) — appears only when the picked bundle has MCP
+            inputs, declared secrets, or config_inputs. Collapsible: skipping falls back to
+            this host's environment / the declared defaults. */}
         {fields.length ? (
           <div className="archetype-configure">
             <button
@@ -247,8 +283,13 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
             >
               {configOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
               <span>Configure {pickedArchetype?.label}</span>
-              <span className="field-hint">optional — skip to use this host's environment</span>
+              <span className="field-hint">
+                {hasHardRequired ? "answers marked * are required" : "optional — skip to use this host's environment"}
+              </span>
             </button>
+            {missingHard && !configOpen ? (
+              <span className="field-hint">Fields marked * are needed before this agent can be created — open Configure.</span>
+            ) : null}
             {configOpen ? (
               <div className="archetype-configure-fields">
                 {fields.map((f) => (
@@ -257,25 +298,16 @@ export function NewAgentPanel({ onDone, onCancel }: { onDone?: (name: string) =>
                       {f.label}
                       {f.required ? " *" : ""}
                     </span>
-                    {f.secret ? (
-                      <SecretInput
-                        placeholder={f.placeholder}
-                        value={values[fieldId(f)] ?? ""}
-                        aria-label={f.label}
-                        onChange={(e) => setValues((v) => ({ ...v, [fieldId(f)]: e.target.value }))}
-                      />
-                    ) : (
-                      <Input
-                        type="text"
-                        placeholder={f.placeholder}
-                        value={values[fieldId(f)] ?? ""}
-                        aria-label={f.label}
-                        onChange={(e) => setValues((v) => ({ ...v, [fieldId(f)]: e.target.value }))}
-                      />
-                    )}
+                    <ArchetypeConfigField
+                      field={f}
+                      value={values[fieldId(f)] ?? ""}
+                      onChange={(val) => setValues((v) => ({ ...v, [fieldId(f)]: val }))}
+                    />
                   </label>
                 ))}
-                {missingRequired ? (
+                {missingHard ? (
+                  <span className="field-hint">Fields marked * are needed before this agent can be created.</span>
+                ) : missingRequired ? (
                   <span className="field-hint">
                     Fields marked * connect their server — fill them, or skip to use this host's environment.
                   </span>

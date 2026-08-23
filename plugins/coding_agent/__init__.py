@@ -12,7 +12,9 @@ runtime (ADR 0033) import:
 
 - ``_client_for(spec)`` — get-or-create a cached ``AcpClient`` for a launch+policy
   signature (the cache key includes ``workdir``).
-- ``evict_client(spec)`` — pop that cached client AND terminate its subprocess.
+- ``evict_client(spec)`` — pop one exact cached client AND terminate its subprocess.
+- ``evict_clients(spec)`` — terminate every permission/conversation variant for one
+  configured delegate while leaving unrelated delegates untouched.
 - ``_make_permission(spec)`` — the by-kind permission resolver (ADR 0024).
 
 The ``spec`` dict is supplied by the caller; ``permissions`` is the by-kind policy
@@ -54,12 +56,16 @@ def _make_permission(spec: dict) -> Callable[[dict], str | None]:
 
     def _allowed(kind: str) -> bool:
         if policy == "readonly":
-            return kind in (allow_set or _READONLY_KINDS)
-        if policy == "allowlist":
+            allowed = kind in (allow_set or _READONLY_KINDS)
+        elif policy == "allowlist":
             if kind in (deny_set or _DEFAULT_DENY):
                 return False
-            return kind in allow_set if allow_set else True
-        return True  # auto
+            allowed = kind in allow_set if allow_set else True
+        else:
+            allowed = True  # auto
+        if spec.get("permissions_ceiling") == "readonly":
+            allowed = allowed and kind in _READONLY_KINDS
+        return allowed
 
     def resolver(params: dict) -> str | None:
         options = params.get("options") or []
@@ -80,7 +86,7 @@ def _make_permission(spec: dict) -> Callable[[dict], str | None]:
 
 
 def _cache_key(spec: dict) -> tuple:
-    return (
+    base = (
         spec["name"],
         spec["command"],
         tuple(spec["args"]),
@@ -93,11 +99,17 @@ def _cache_key(spec: dict) -> tuple:
         # for everyone (QA panel on #2145; env itself had the same latent gap).
         tuple(sorted((spec.get("env") or {}).items())),
         tuple(sorted(spec.get("env_remove") or ())),  # sorted: order-insensitive identity
-        # Optional caller-owned conversation discriminator. Empty preserves the
-        # historical one-client/session-per-launch signature; Room supplies a
-        # stable (agent, room, thread) key to isolate durable ACP context.
-        str(spec.get("conversation_key") or ""),
     )
+    ceiling = str(spec.get("permissions_ceiling") or "")
+    conversation = str(spec.get("conversation_key") or "")
+    if not ceiling and not conversation:
+        # Preserve the historical tuple exactly so upgrades keep finding every
+        # existing persisted ACP session file (#970).
+        return base
+    # A per-invocation ceiling changes the mutable ACP permission resolver. Key it
+    # before the conversation discriminator so concurrent fenced and unrestricted
+    # turns can never share a client and overwrite each other.
+    return (*base, ceiling, conversation)
 
 
 def _session_id_path(spec: dict) -> Path:
@@ -159,7 +171,7 @@ async def close_all() -> bool:
 
 
 async def evict_client(spec: dict) -> bool:
-    """Drop the cached client for ``spec`` AND terminate its subprocess.
+    """Drop the exact cached client for ``spec`` AND terminate its subprocess.
 
     The dispatch/relaunch paths ``_CLIENTS.pop(...)`` on an ``AcpError`` only
     *forget* the handle, leaving the child to be reaped by GC. A caller that
@@ -180,16 +192,16 @@ async def evict_client(spec: dict) -> bool:
 
 
 async def evict_clients(spec: dict) -> bool:
-    """Terminate every cached conversation variant for one delegate spec.
+    """Terminate every cached conversation variant for one configured delegate.
 
-    ``conversation_key`` is the final cache-key element. Delegate removal has the
-    base saved config, not every Room thread key, so match the stable launch and
-    policy prefix and close only those clients. Idempotent and best-effort.
+    A delegate removal has the base configuration, not each per-call
+    ``conversation_key``. Match the stable launch/policy prefix and leave every
+    unrelated delegate untouched. Idempotent and best-effort.
     """
-    base = _cache_key({**spec, "conversation_key": ""})[:-1]
+    base = _cache_key({**spec, "permissions_ceiling": "", "conversation_key": ""})
     clients = []
     for key in list(_CLIENTS):
-        if key[:-1] == base:
+        if key == base or (len(key) == len(base) + 2 and key[: len(base)] == base):
             client = _CLIENTS.pop(key, None)
             if client is not None:
                 clients.append(client)

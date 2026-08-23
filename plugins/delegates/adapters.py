@@ -122,7 +122,10 @@ class Delegate:
     permissions: str = "auto"
     allow_kinds: list[str] = field(default_factory=list)
     deny_kinds: list[str] = field(default_factory=list)
-    conversation_key: str = ""  # per-call ACP session discriminator; never persisted in delegate config
+    # Per-invocation ACP-only values. The registry sets these on an immutable
+    # dataclass copy; they are never parsed from or persisted to delegate config.
+    conversation_key: str = ""
+    permissions_ceiling: str = ""
     confirm: bool = False
     # acp managed git (ADR 0076): the framework owns branch/commit/push/PR; the
     # coder edits files only. Off by default — non-worktree setups keep the old
@@ -944,6 +947,7 @@ class AcpAdapter(Adapter):
             "allow_kinds": d.allow_kinds,
             "deny_kinds": d.deny_kinds,
             "conversation_key": d.conversation_key,
+            "permissions_ceiling": d.permissions_ceiling,
         }
 
     async def dispatch(

@@ -221,6 +221,7 @@ def _init_langgraph_agent(headless_setup: bool = False):
                 _pre.meta,
             )
             STATE.plugin_public_paths = _pre.public_paths
+            STATE.plugin_federation_paths = _pre.federation_paths
             _register_plugin_subagents(_pre.subagents)
             log.info(
                 "Setup wizard has not been completed — graph not compiled "
@@ -290,6 +291,7 @@ def _init_langgraph_agent(headless_setup: bool = False):
     # (`global STATE.plugin_routers, STATE.plugin_surfaces` is declared at the top of the fn.)
     STATE.plugin_routers, STATE.plugin_surfaces = _plugins.routers, _plugins.surfaces
     STATE.plugin_public_paths = _plugins.public_paths
+    STATE.plugin_federation_paths = _plugins.federation_paths
     _register_plugin_subagents(_plugins.subagents)
     _apply_config_subagents(STATE.graph_config)  # YAML subagent overrides (tools/max_turns/model)
     STATE.plugin_middleware = _resolve_plugin_middleware(STATE.graph_config, _plugins.middleware)  # ADR 0032
@@ -879,7 +881,15 @@ async def _checkpoint_prune_loop() -> None:
                 if harvest:
                     # Summarize each aged thread into knowledge, then drop it —
                     # past conversations stay searchable, raw checkpoints freed.
-                    for thread_id in await asyncio.to_thread(find_aged_threads, path, max_age):
+                    # Jittered gap between threads (#2946): back-to-back harvest model
+                    # calls manufacture 429 bursts on a shared provider account (the
+                    # standard fleet configuration) — and a failed harvest used to cost
+                    # the conversation its knowledge forever.
+                    import random as _random
+
+                    for i, thread_id in enumerate(await asyncio.to_thread(find_aged_threads, path, max_age)):
+                        if i:
+                            await asyncio.sleep(_random.uniform(2.0, 5.0))
                         await _retire_thread(thread_id)
                 # Per-thread cap on the survivors (SQL age-TTL is the fallback
                 # delete path when harvesting is off).
@@ -1001,6 +1011,12 @@ async def _watch_loop() -> None:
         await asyncio.sleep(max(MIN_WATCH_INTERVAL_S, float(interval or DEFAULT_WATCH_INTERVAL_S)))
 
 
+# Consecutive failed harvests per thread (#2946) — in-process only: a restart resets
+# the count, which just grants a fresh retry budget. Entries clear on success or delete.
+_HARVEST_FAILURES: dict[str, int] = {}
+_HARVEST_FAILURE_CAP = 3
+
+
 async def _retire_thread(thread_id: str, *, harvest: bool | None = None, cascade: bool = True) -> str | None:
     """Harvest a thread to the knowledge base (best-effort) then delete its
     checkpoints. Shared by the prune sweep and explicit tab deletion. Returns
@@ -1024,12 +1040,49 @@ async def _retire_thread(thread_id: str, *, harvest: bool | None = None, cascade
     if STATE.graph_config is not None and do_harvest:
         from graph.conversation_harvest import harvest_thread
 
-        chunk_id = await harvest_thread(
-            thread_id,
-            checkpointer=STATE.checkpointer,
-            knowledge_store=STATE.knowledge_store,
-            config=STATE.graph_config,
-        )
+        try:
+            chunk_id = await harvest_thread(
+                thread_id,
+                checkpointer=STATE.checkpointer,
+                knowledge_store=STATE.knowledge_store,
+                config=STATE.graph_config,
+                raise_on_error=True,
+            )
+        except Exception:
+            # A FAILED harvest must not silently cost the conversation its knowledge
+            # (#2946): the old flow swallowed the error and deleted the thread anyway —
+            # a transient 429 at retire time (the shared-account burst case) permanently
+            # skipped capture. Sweep-path failures are retryable: keep the thread for
+            # the next sweep, up to a cap so a permanently-broken harvest can't pin
+            # checkpoints forever. An EXPLICIT delete (the dialog's checkbox) still
+            # deletes — the operator asked for deletion — but says so loudly.
+            if harvest is None:
+                n = _HARVEST_FAILURES.get(thread_id, 0) + 1
+                if n < _HARVEST_FAILURE_CAP:
+                    _HARVEST_FAILURES[thread_id] = n
+                    log.warning(
+                        "[retire] harvest failed for %s (attempt %d/%d) — keeping the thread "
+                        "for the next sweep",
+                        thread_id,
+                        n,
+                        _HARVEST_FAILURE_CAP,
+                    )
+                    return None
+                _HARVEST_FAILURES.pop(thread_id, None)
+                log.error(
+                    "[retire] harvest failed %d times for %s — deleting anyway; its knowledge "
+                    "was NOT captured",
+                    n,
+                    thread_id,
+                )
+            else:
+                log.warning(
+                    "[retire] harvest failed for %s — explicit delete proceeds; its knowledge "
+                    "was NOT captured",
+                    thread_id,
+                )
+        else:
+            _HARVEST_FAILURES.pop(thread_id, None)
     if STATE.checkpoint_path:
         await asyncio.to_thread(delete_thread, STATE.checkpoint_path, thread_id, cascade=cascade)
     elif STATE.checkpointer is not None and hasattr(STATE.checkpointer, "delete_thread"):
@@ -2269,6 +2322,10 @@ def _reload_langgraph_agent() -> tuple[bool, str]:
         from a2a_impl import auth as _a2a_auth
 
         _a2a_auth.set_public_prefixes(new_plugins.public_paths)
+        # Federation-tier prefixes ride the same re-push (#2747): replacing the set is
+        # what makes a disabled plugin's route fall back to operator-only at once.
+        STATE.plugin_federation_paths = new_plugins.federation_paths
+        _a2a_auth.set_federation_prefixes(new_plugins.federation_paths)
         # Re-publish the remaining boot-time plugin wiring that consumers read fresh from
         # STATE (same #1752/#1890 rule). Each was assigned only at init, so a hot
         # enable/update left it stale until a full restart: the thread_id resolver
@@ -2296,10 +2353,12 @@ def _reload_langgraph_agent() -> tuple[bool, str]:
     return True, f"reloaded • model={STATE.graph_config.model_name}{fleet_label_note}"
 
 
-async def _plugin_agent_invoke(prompt: str, session_id: str) -> str:
+async def _plugin_agent_invoke(prompt: str, session_id: str, *, tool_fence: list[str] | None = None) -> str:
     """Agent invoke exposed to plugin surfaces via the plugin host (ADR 0018) — a
-    chat turn joined to its assistant text (mirrors the Discord surface invoker)."""
-    result = await chat(prompt, session_id)
+    chat turn joined to its assistant text (mirrors the Discord surface invoker).
+    ``tool_fence`` (#2972) restricts the turn to that tool allowlist — for a surface
+    relaying a message from an untrusted party (another operator's agent)."""
+    result = await chat(prompt, session_id, tool_fence=tool_fence)
     return "\n\n".join(m["content"] for m in result if m.get("role") == "assistant" and m.get("content"))
 
 

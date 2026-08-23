@@ -51,7 +51,7 @@ test("Agents tab lists the host (this instance) + peers, host active by default"
   await expect(page.locator(".fleet-row", { hasText: "main" }).getByRole("button")).toHaveCount(0);
 });
 
-test("New agent → archetype picker → create returns to the list", async ({ page }) => {
+test("New agent → archetype picker → create navigates into the new agent", async ({ page }) => {
   await openAgents(page);
   await page.getByRole("button", { name: "New agent" }).click();
   await expect(page.getByRole("heading", { name: "New agent" })).toBeVisible();
@@ -59,7 +59,11 @@ test("New agent → archetype picker → create returns to the list", async ({ p
   await page.locator(".pl-radiocard", { hasText: "Product Manager" }).click();
   await page.getByLabel("Agent name").fill("newbot");
   await page.getByRole("button", { name: /Create/ }).click();
-  await expect(page.locator(".fleet-row", { hasText: "newbot" })).toBeVisible();
+  // Create lands the operator IN the new agent's console — the id is the URL slug
+  // (ADR 0042, the same navigation the FleetSwitcher uses) — because the next move is
+  // configuring the agent just made, not re-reading the fleet list.
+  await expect(page).toHaveURL(/\/app\/agent\/newbot-ab12\//);
+  await expect(page.getByTestId("fleet-switcher")).toContainText("newbot");
 });
 
 test("New agent → configure a bundle's MCP inputs → create seeds them (#2041)", async ({ page }) => {
@@ -85,7 +89,9 @@ test("New agent → configure a bundle's MCP inputs → create seeds them (#2041
   await page.getByLabel("Agent name").fill("ghbot");
   await page.getByRole("button", { name: /Create/ }).click();
 
-  await expect(page.locator(".fleet-row", { hasText: "ghbot" })).toBeVisible();
+  // Create navigates into the new agent (see the picker test above); reaching the slug
+  // URL also proves the POST has been captured before the payload assertions below.
+  await expect(page).toHaveURL(/\/app\/agent\/ghbot-ab12\//);
   expect(posted?.inputs).toEqual({ github_token: "ghp_secret" });
   // The Brave secret was left blank → dropped (env-only fallback), not sent as an empty value.
   expect(posted?.secrets ?? []).toEqual([]);
@@ -274,7 +280,7 @@ test("discover → add to fleet → switch into the remote member (ADR 0042 §I)
 
 test("⌘K root: member names surface the Fleet Room; the old per-member commands are gone", async ({ page }) => {
   await page.goto("/app/", { waitUntil: "load" });
-  await page.keyboard.press("ControlOrMeta+k");
+  await page.keyboard.press("ControlOrMeta+Shift+k");
   await expect(page.locator(".pl-cmdk__panel")).toBeVisible();
   const input = page.locator(".pl-cmdk__panel .pl-cmdk-commands__input");
   // The toggle submorph is folded away.
@@ -331,7 +337,7 @@ test("Fleet Room: a parked member turn shows 'needs approval', then hands back (
 });
 
 async function openFleetRoom(page) {
-  await page.keyboard.press("ControlOrMeta+k");
+  await page.keyboard.press("ControlOrMeta+Shift+k");
   await expect(page.locator(".pl-cmdk__panel")).toBeVisible();
   await page.locator(".pl-cmdk__panel .pl-cmdk-commands__input").fill("Fleet Room");
   await page.getByRole("option", { name: "Fleet Room" }).click();
@@ -367,7 +373,7 @@ test("⌘K → Fleet Room: presence, DM a member (the wired chat), broadcast", a
 test("⌘K → Fleet Room uses the canonical backend without broadcasting", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "native-room" });
   await page.goto("/app/", { waitUntil: "load" });
-  await page.keyboard.press("ControlOrMeta+k");
+  await page.keyboard.press("ControlOrMeta+Shift+k");
   const palette = page.locator(".pl-cmdk__panel");
   await palette.locator(".pl-cmdk-commands__input").fill("Fleet Room");
   const command = palette.getByRole("option", { name: "Fleet Room" });

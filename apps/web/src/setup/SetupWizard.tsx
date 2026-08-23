@@ -25,8 +25,17 @@ import { errMsg } from "../lib/format";
 import { lucideIcon } from "../lib/lucideIcon";
 import { pythonRuntimeView } from "../app/pythonRuntime";
 import { archetypesQuery, pythonRuntimeQuery } from "../lib/queries";
-import { archetypeConfigFields, fieldId, isMissingRequiredConfig, splitConfigValues } from "../lib/archetypeConfig";
+import {
+  archetypeConfigFields,
+  fieldId,
+  hasHardRequiredBundleConfig,
+  isMissingRequiredBundleConfig,
+  isMissingRequiredConfig,
+  requiresToolsNotice,
+  splitConfigValues,
+} from "../lib/archetypeConfig";
 import type { AgentConfig, Archetype, ConfigPayload } from "../lib/types";
+import { ArchetypeConfigField } from "./ArchetypeConfigField";
 import { ArchetypePreviewDialog } from "./ArchetypePreviewDialog";
 import { useOauthLifecycle } from "../oauth/OAuthAccount";
 import { personaSoul } from "./persona";
@@ -219,10 +228,11 @@ export function SetupWizard({
   // that self-registers) — the same GET /api/archetypes source the fleet new-agent picker
   // uses. Each carries a base SOUL the persona step seeds when picked (ADR 0042).
   const archetypes = useQuery(archetypesQuery());
-  // Inline Configure step for a bundle archetype's MCP inputs + declared secrets —
-  // NewAgentPanel parity (#2714; the fleet picker got this in #2041, the wizard —
-  // the surface a NEW user actually hits first — installed the bundle with no prompt).
-  // Collapsible: skipping falls back to this host's environment, same as the panel.
+  // Inline Configure step for a bundle archetype's MCP inputs + declared secrets +
+  // config_inputs (#2934) — NewAgentPanel parity (#2714; the fleet picker got this in
+  // #2041, the wizard — the surface a NEW user actually hits first — installed the
+  // bundle with no prompt). Collapsible: skipping falls back to this host's
+  // environment / the declared defaults, same as the panel.
   const [configOpen, setConfigOpen] = useState(true);
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [models, setModels] = useState<string[]>([]);
@@ -445,8 +455,9 @@ export function SetupWizard({
   const pickedArchetype = archetypeList.find((a) => a.id === state.archetype);
 
   // The picked archetype's read-only peek — the Configure form's fields (its bundle's
-  // MCP inputs + declared secrets), NewAgentPanel parity (#2714). Shares the preview
-  // dialog's cache key; only fetched for bundle-backed archetypes.
+  // MCP inputs, declared secrets, and config_inputs #2934), NewAgentPanel parity
+  // (#2714). Shares the preview dialog's cache key; only fetched for bundle-backed
+  // archetypes.
   const archetypePeek = useQuery({
     queryKey: ["archetype-preview", state.archetype],
     queryFn: () => api.archetypePreview(state.archetype),
@@ -458,6 +469,11 @@ export function SetupWizard({
   // A required field left blank is a soft hint, NOT a hard gate — skipping the Configure
   // step (or a field) falls back to this host's environment, same as NewAgentPanel.
   const missingRequired = configOpen && isMissingRequiredConfig(configFields, configValues);
+  // Hard gate (#2977): a required bundle config_inputs answer has no env fallback — the host
+  // install refuses to activate without it, so Finish waits for it too.
+  const missingHard = isMissingRequiredBundleConfig(configFields, configValues);
+  const hasHardRequired = hasHardRequiredBundleConfig(configFields);
+  const contractNotice = pickedArchetype ? requiresToolsNotice(pickedArchetype.label, pickedArchetype.requires_tools) : null;
 
   // Runtime requirement at CHOOSE-time (#2186): same affordance as NewAgentPanel —
   // the wizard's first-run pick of Cowork on a runtime-less desktop otherwise ends at
@@ -571,15 +587,21 @@ export function SetupWizard({
       if (pickedBundle) {
         setMessage(`Setting up the ${personaLabel} tools — this can take a few seconds…`);
         try {
-          // Collected Configure values ride the install (#2714) — the same two seed
-          // channels POST /api/fleet uses (#2041). Collapsed/absent form → env-only.
-          const { inputs, secrets } =
-            configOpen && configFields.length
-              ? splitConfigValues(configFields, configValues)
-              : { inputs: {}, secrets: [] };
+          // Collected Configure values ride the install (#2714) — the same seed
+          // channels POST /api/fleet uses (#2041/#2934). Collapsed/absent form →
+          // env-only / declared defaults.
+          // Bundle config answers ride the install regardless of the collapsed state
+          // (no env fallback; the host install refuses to activate without them, #2977).
+          const split = configFields.length
+            ? splitConfigValues(configFields, configValues)
+            : { inputs: {}, secrets: [], config: {} };
+          const inputs = configOpen ? split.inputs : {};
+          const secrets = configOpen ? split.secrets : [];
+          const config = split.config;
           const r = await api.installPlugin(pickedBundle, undefined, undefined, {
             inputs: Object.keys(inputs).length ? inputs : undefined,
             secrets: secrets.length ? secrets : undefined,
+            config_inputs: Object.keys(config).length ? config : undefined,
           });
           const failedLoad = Object.keys(r.load_errors ?? {});
           // Consent gate (#2721) — only reachable when a fork's catalog points an
@@ -761,9 +783,14 @@ export function SetupWizard({
                   {runtimeWarning}
                 </p>
               ) : null}
-              {/* Inline Configure step — NewAgentPanel parity (#2714/#2041): appears only when
-                  the picked bundle declares MCP inputs or secrets. Collapsing skips it
-                  (→ env-only seeding on install). */}
+              {contractNotice ? (
+                <p className="archetype-runtime-notice" role="note">
+                  {contractNotice}
+                </p>
+              ) : null}
+              {/* Inline Configure step — NewAgentPanel parity (#2714/#2041/#2934): appears only
+                  when the picked bundle declares MCP inputs, secrets, or config_inputs.
+                  Collapsing skips it (→ env-only / declared-default seeding on install). */}
               {configFields.length ? (
                 <div className="archetype-configure">
                   <button
@@ -774,8 +801,13 @@ export function SetupWizard({
                   >
                     {configOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                     <span>Configure {pickedArchetype?.label}</span>
-                    <span className="field-hint">optional — skip to use this host&apos;s environment</span>
+                    <span className="field-hint">
+                      {hasHardRequired ? "answers marked * are required" : "optional — skip to use this host's environment"}
+                    </span>
                   </button>
+                  {missingHard && !configOpen ? (
+                    <span className="field-hint">Fields marked * are needed before setup can finish — open Configure.</span>
+                  ) : null}
                   {configOpen ? (
                     <div className="archetype-configure-fields">
                       {configFields.map((f) => (
@@ -784,25 +816,16 @@ export function SetupWizard({
                             {f.label}
                             {f.required ? " *" : ""}
                           </span>
-                          {f.secret ? (
-                            <SecretInput
-                              placeholder={f.placeholder}
-                              value={configValues[fieldId(f)] ?? ""}
-                              aria-label={f.label}
-                              onChange={(e) => setConfigValues((v) => ({ ...v, [fieldId(f)]: e.target.value }))}
-                            />
-                          ) : (
-                            <Input
-                              type="text"
-                              placeholder={f.placeholder}
-                              value={configValues[fieldId(f)] ?? ""}
-                              aria-label={f.label}
-                              onChange={(e) => setConfigValues((v) => ({ ...v, [fieldId(f)]: e.target.value }))}
-                            />
-                          )}
+                          <ArchetypeConfigField
+                            field={f}
+                            value={configValues[fieldId(f)] ?? ""}
+                            onChange={(val) => setConfigValues((v) => ({ ...v, [fieldId(f)]: val }))}
+                          />
                         </label>
                       ))}
-                      {missingRequired ? (
+                      {missingHard ? (
+                        <span className="field-hint">Fields marked * are needed before setup can finish.</span>
+                      ) : missingRequired ? (
                         <span className="field-hint">
                           Fields marked * connect their server — fill them, or skip to use this host&apos;s environment.
                         </span>
@@ -1084,7 +1107,7 @@ export function SetupWizard({
                   Open console
                 </Button>
               ) : (
-                <Button variant="primary" type="button" onClick={() => void finishSetup()} disabled={busy}>
+                <Button variant="primary" type="button" onClick={() => void finishSetup()} disabled={busy || missingHard}>
                   {busy ? <Spinner size={15} /> : <Check size={15} />}
                   Finish
                 </Button>

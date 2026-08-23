@@ -344,6 +344,10 @@ def _write_bundle_fixture(tmp_path):
         "  - { template: github, inputs: [ { key: token, label: GitHub Token, secret: true, required: true } ] }\n"
         "secrets:\n"
         "  - { key: openai_api_key, label: OpenAI API Key, placeholder: 'sk-...', secret: true, required: true }\n"
+        "config_inputs:\n"
+        "  - { key: board.repo, label: Board repo, type: string, required: true }\n"
+        "  - { key: board.auto_merge, label: Auto merge, type: boolean, default: false }\n"
+        "  - { key: bogus, label: Bad key }\n"
     )
 
     def fake_fetch(url, ref, dest):
@@ -454,6 +458,23 @@ async def test_peek_bundle_surfaces_mcp_and_secrets(tmp_path, monkeypatch):
     ]
 
 
+async def test_peek_bundle_surfaces_config_inputs(tmp_path, monkeypatch):
+    """The preview exposes the bundle's declared config_inputs (#2934), leniently
+    normalized — the un-dotted `bogus` entry drops instead of blanking the preview,
+    so the Configure step can render fields WITHOUT installing."""
+    import ops.plugins as plugin_ops
+    from graph.plugins import installer
+
+    plugin_ops._peek_cache.clear()
+    monkeypatch.setattr(installer, "_fetch", _write_bundle_fixture(tmp_path))
+    result = await plugin_ops.peek_bundle("https://example.test/stack-config-inputs")
+
+    assert result["config_inputs"] == [
+        {"key": "board.repo", "label": "Board repo", "type": "string", "required": True},
+        {"key": "board.auto_merge", "label": "Auto merge", "type": "boolean", "required": False, "default": False},
+    ]
+
+
 async def test_peek_single_plugin_reports_empty_mcp_and_secrets(tmp_path, monkeypatch):
     """A non-bundle (single-plugin repo) peek still carries the keys, both empty —
     so the dialog reads mcp/secrets uniformly across bundle + plugin previews."""
@@ -478,7 +499,7 @@ async def test_peek_single_plugin_reports_empty_mcp_and_secrets(tmp_path, monkey
     result = await plugin_ops.peek_bundle("https://example.test/solo")
 
     assert result["kind"] == "plugin"
-    assert result["mcp"] == [] and result["secrets"] == []
+    assert result["mcp"] == [] and result["secrets"] == [] and result["config_inputs"] == []
 
 
 async def test_peek_bundle_caches_by_url(tmp_path, monkeypatch):
@@ -600,6 +621,110 @@ async def test_host_bundle_secrets_reach_host_overlay(tmp_path, monkeypatch):
     assert "undeclared" not in str(overlay)
 
 
+async def test_host_bundle_install_writes_config_inputs(tmp_path, monkeypatch):
+    """#2934 — operator answers to a bundle's declared config_inputs land in the HOST
+    config at the declared dotted keys (declared-only; an unanswered input falls back
+    to its default), and the written keys ride the result for the route to surface."""
+    import json
+
+    import yaml
+
+    from graph import config_io
+
+    cfg = tmp_path / "langgraph-config.yaml"
+    cfg.write_text("model:\n  name: m\n")
+    lock = tmp_path / "plugins.lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "plugins": [],
+                "bundles": [
+                    {
+                        "id": "stack",
+                        "config_inputs": [
+                            {"key": "board.repo", "label": "Board repo", "type": "string", "required": True},
+                            {"key": "board.auto_merge", "label": "Auto merge", "type": "boolean", "default": False},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(config_io, "config_yaml_path", lambda: cfg)
+    monkeypatch.setattr(installer, "lock_path", lambda: lock)
+    monkeypatch.setattr(
+        installer, "install", lambda url, ref=None, **k: {"bundle": "stack", "installed": [{"id": "a"}], "enabled": []}
+    )
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+    _, apply = _capture_apply()
+
+    res = await install_and_activate(
+        "https://x/stack",
+        ctx=_ctx(),
+        apply_settings=apply,
+        config_inputs={"board.repo": "org/repo", "not.declared": "nope"},
+    )
+    assert sorted(res.config_written) == ["board.auto_merge", "board.repo"]  # answer + defaulted toggle
+    doc = yaml.safe_load(cfg.read_text())
+    assert doc["board"] == {"repo": "org/repo", "auto_merge": False}
+    assert "not" not in doc  # undeclared keys never reach the config
+
+
+async def test_host_bundle_install_refuses_missing_required_input(tmp_path, monkeypatch):
+    """A `required` config input with no answer (and no default / live value) refuses
+    ACTIVATION — InstallError names the missing prompt, apply_settings is never called
+    (plugins stay installed-but-off), so a re-run with the answer activates cleanly.
+    A `project: true` path answer is registered as a managed project on the way."""
+    import json
+
+    import yaml
+
+    from graph import config_io
+    from graph.workspaces import manager as ws_manager
+
+    cfg = tmp_path / "langgraph-config.yaml"
+    cfg.write_text("model:\n  name: m\n")
+    lock = tmp_path / "plugins.lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "plugins": [],
+                "bundles": [
+                    {
+                        "id": "pm",
+                        "config_inputs": [
+                            {"key": "board.repo", "label": "Repo", "type": "path", "required": True, "project": True},
+                            {"key": "board.coder", "label": "Coder", "type": "delegate", "required": True},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(config_io, "config_yaml_path", lambda: cfg)
+    monkeypatch.setattr(installer, "lock_path", lambda: lock)
+    monkeypatch.setattr(
+        installer, "install", lambda url, ref=None, **k: {"bundle": "pm", "installed": [{"id": "a"}], "enabled": ["a"]}
+    )
+    monkeypatch.setattr(loader, "purge_plugin_modules", lambda pid: None)
+    monkeypatch.setattr(ws_manager, "github_slug_for_checkout", lambda p: "acme/proj")
+    captured, apply = _capture_apply()
+    repo = tmp_path / "proj"
+    repo.mkdir()
+
+    with pytest.raises(installer.InstallError, match="Coder \\(board.coder\\)"):
+        await install_and_activate("https://x/pm", ctx=_ctx(), apply_settings=apply, config_inputs={"board.repo": str(repo)})
+    assert "updates" not in captured
+
+    await install_and_activate(
+        "https://x/pm", ctx=_ctx(), apply_settings=apply, config_inputs={"board.repo": str(repo), "board.coder": "cc"}
+    )
+    assert "updates" in captured
+    doc = yaml.safe_load(cfg.read_text())
+    assert doc["projects"] == [{"name": "proj", "path": str(repo), "github": "acme/proj", "write": False}]
+    assert doc["onboarding"] == {"enabled": True, "root": str(tmp_path), "allow": ["github.com/acme/proj"]}
+
+
 async def test_activate_false_skips_bundle_service_seeding(tmp_path, monkeypatch):
     """The CLI's fetch-only install (activate=False) must stay fetch-only — no mcp
     seeding, config untouched (#2118 keeps the ADR 0027 install ≠ enable line)."""
@@ -636,3 +761,148 @@ async def test_peek_cache_is_keyed_by_url_and_ref(tmp_path, monkeypatch):
     assert len(calls) == n_first
     await plugin_ops.peek_bundle("https://example.test/stack", ref="v2")  # new ref → fresh peek
     assert len(calls) > n_first
+
+
+# ── _install_bundle member semver chase (#2960 S3) ────────────────────────────
+# A bundle update re-pins every member to the manifest's ref — which DOWNGRADED a
+# member an operator had force-installed ahead of the archetype's pin. Release-tag
+# members now ls-remote their own repo (via check_plugin_update) and install the
+# newest semver tag when one exists; SHA/branch refs and builtins are untouched.
+
+
+def _member_chase_env(tmp_path, monkeypatch):
+    """Sandbox the lock + capture install() calls for direct _install_bundle tests."""
+    monkeypatch.setattr(installer, "lock_path", lambda: tmp_path / "plugins.lock")
+    calls: list[tuple] = []
+
+    def fake_install(url, ref=None, **k):
+        calls.append((url, ref))
+        return {"id": url.rsplit("/", 1)[-1]}
+
+    monkeypatch.setattr(installer, "install", fake_install)
+    return calls
+
+
+def _stack(members):
+    return {"id": "stack", "name": "Stack", "plugins": members}
+
+
+def test_bundle_member_release_tag_chases_newest_semver(tmp_path, monkeypatch):
+    """The manifest pins v1.0.0 but a newer tag exists on the member repo — the
+    bundle install must NOT downgrade the member; it installs the newest tag."""
+    calls = _member_chase_env(tmp_path, monkeypatch)
+    checked: list[dict] = []
+
+    def fake_check(entry):
+        checked.append(entry)
+        return {"latest_ref": "v1.2.0", "latest_sha": "b" * 40, "behind": True}
+
+    monkeypatch.setattr(installer, "check_plugin_update", fake_check)
+
+    res = installer._install_bundle(
+        _stack([{"id": "board", "url": "https://x/board", "ref": "v1.0.0"}]),
+        "https://x/stack",
+        "a" * 40,
+        None,
+        force=True,
+        by="test",
+        allow=None,
+    )
+    assert calls == [("https://x/board", "v1.2.0")]  # chased tag, not the manifest pin
+    # the check ran against the MEMBER repo with the manifest pin as the baseline
+    assert checked == [{"id": "board", "source_url": "https://x/board", "requested_ref": "v1.0.0", "resolved_sha": ""}]
+    assert [p["id"] for p in res["installed"]] == ["board"]
+
+
+def test_bundle_member_no_newer_tag_uses_manifest_pin(tmp_path, monkeypatch):
+    calls = _member_chase_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        installer, "check_plugin_update", lambda entry: {"latest_ref": None, "latest_sha": None, "behind": False}
+    )
+
+    installer._install_bundle(
+        _stack([{"id": "board", "url": "https://x/board", "ref": "v1.0.0"}]),
+        "https://x/stack",
+        "a" * 40,
+        None,
+        force=True,
+        by="test",
+        allow=None,
+    )
+    assert calls == [("https://x/board", "v1.0.0")]
+
+
+def test_bundle_member_chase_failure_falls_back_to_manifest_pin(tmp_path, monkeypatch):
+    """A network error / timeout in the chase must not fail the bundle install —
+    the member falls back to the manifest pin (the pre-#2960 behavior)."""
+    calls = _member_chase_env(tmp_path, monkeypatch)
+
+    def boom(entry):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(installer, "check_plugin_update", boom)
+
+    installer._install_bundle(
+        _stack([{"id": "board", "url": "https://x/board", "ref": "v1.0.0"}]),
+        "https://x/stack",
+        "a" * 40,
+        None,
+        force=True,
+        by="test",
+        allow=None,
+    )
+    assert calls == [("https://x/board", "v1.0.0")]
+
+
+def test_bundle_member_non_release_refs_pass_through(tmp_path, monkeypatch):
+    """SHA pins, branch refs, and ref-less members never trigger the network chase."""
+    calls = _member_chase_env(tmp_path, monkeypatch)
+
+    def boom(entry):
+        raise AssertionError("check_plugin_update must not run for a non-release-tag ref")
+
+    monkeypatch.setattr(installer, "check_plugin_update", boom)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+
+    installer._install_bundle(
+        _stack(
+            [
+                {"id": "a", "url": "https://x/a", "ref": sha},
+                {"id": "b", "url": "https://x/b", "ref": "main"},
+                {"id": "c", "url": "https://x/c"},
+            ]
+        ),
+        "https://x/stack",
+        "a" * 40,
+        None,
+        force=True,
+        by="test",
+        allow=None,
+    )
+    assert calls == [("https://x/a", sha), ("https://x/b", "main"), ("https://x/c", None)]
+
+
+def test_bundle_member_builtin_skips_fetch_and_chase(tmp_path, monkeypatch):
+    calls = _member_chase_env(tmp_path, monkeypatch)
+
+    def boom(entry):
+        raise AssertionError("check_plugin_update must not run for a builtin member")
+
+    monkeypatch.setattr(installer, "check_plugin_update", boom)
+
+    res = installer._install_bundle(
+        _stack(
+            [
+                {"id": "delegates", "builtin": True, "ref": "v1.0.0"},
+                {"id": "board", "url": "https://x/board", "ref": "main"},
+            ]
+        ),
+        "https://x/stack",
+        "a" * 40,
+        None,
+        force=True,
+        by="test",
+        allow=None,
+    )
+    assert res["skipped_builtin"] == ["delegates"]
+    assert calls == [("https://x/board", "main")]

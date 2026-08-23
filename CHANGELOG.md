@@ -15,6 +15,211 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.146.0] - 2026-08-23
+
+### Added
+- **Plugins can declare `federation_paths` — a peer-reachable, still-authenticated plugin RPC (#2747).**
+  The ADR 0066 `/api` operator ceiling kept a federation-tier credential out of every plugin
+  route, so a second instance syncing a plugin-owned store had to either hold the operator
+  bearer or tunnel RPC through the A2A task envelope. A manifest `federation_paths` list —
+  namespace-scoped exactly like `public_paths` — now lowers the ceiling to the federation tier
+  on the plugin's own declared prefixes only. The paths are not public (401 without a valid
+  credential), fleet-proxied variants keep the ceiling, and the set is replaced on every
+  plugin reload so a disabled plugin's routes fall back to operator-only at once. Handlers read
+  `request.state.trust_tier` and bind identity by tier.
+
+- **Plugin releases now poke their archetypes (#2960).** The bundle template's
+  `verify-bundle.yml` listens for a `member-released` `repository_dispatch` and runs its
+  pin-bump job immediately, and the new `examples/bundles/member-release-notify.yml`
+  snippet is the member-side release.yml step that sends it (`gh api
+  repos/<archetype>/dispatches`, no-op unless the plugin lists its archetypes).
+  Previously a member could ship four releases in a day and the archetype wouldn't
+  notice until the Monday cron. Template-only: propagating to live archetype and plugin
+  repos is separate follow-up, and the weekly cron cadence itself is unchanged (S2).
+
+- **Chat shows a streaming activity indicator through mid-turn generation pauses (#2967).**
+  Once a streaming turn had any content, the only motion was the text itself — so the gaps
+  (between tool calls, during a long tool run, while the model generates large tool-call
+  arguments like `show_component` JSON) read as a dead stall. A small dimmed spinner now
+  sits at the bottom of the streaming message: DOM order pushes it below each new part as
+  it arrives, and it disappears when the turn settles. The fully-empty streaming turn keeps
+  its original larger spinner.
+
+- **Escape now stops the streaming response — or cancels the newest queued steer first
+  (#2968).** A new `chat.stop` keybinding (default `Esc`, chat-scoped, live while typing in
+  the composer) matches the Claude.ai/ChatGPT convention: while a turn streams, Escape stops
+  it (same as the Stop button); with messages queued into the running turn, each press
+  cancels the most recent queued steer first (LIFO) and only stops the turn once none
+  remain. When idle, Escape does nothing — it never clears the draft or blurs the composer.
+  The slash-menu and HITL-form Escape behaviors are unchanged (they take precedence, no
+  double-fire), and the binding is rebindable in Settings ▸ Keyboard.
+
+- **Plugin surfaces can fence a turn to a tool allowlist (#2972).** `host.invoke(prompt,
+  session_id, tool_fence=[...])` — and `server.chat.chat(..., tool_fence=...)` underneath —
+  runs that one turn with only the listed tools callable; anything else is blocked before
+  execution with a `Blocked by policy` tool result. It reuses the existing per-turn
+  `subagent_fence` state channel (#1639), stamped every turn so a fenced turn never leaves the
+  next unfenced turn on the same session fenced. Built for surfaces that relay messages from
+  an untrusted party — the Discord plugin's upcoming cross-operator peer channels — where a
+  turn triggered by another operator's agent must not be able to run code, write files, or
+  delegate on that agent's say-so. Existing two-argument `host.invoke` callers are unchanged.
+
+- **A Project Manager member created from the picker works out of the box (#2977).** A fresh-setup run proved a new member booted with `warnings: []` while its coder, board, and GitHub rail were all dead. Now a `type: delegate` Configure answer **copies the picked host delegate (and its secrets) into the member's own registry** instead of only its name; `required: true` config inputs are a **hard gate** (create → 400 + cleanup, host install → refuses to activate); a `path` input flagged `project: true` **registers the checkout as a managed project** (ADR 0095 `projects:` entry with its GitHub slug, plus a scoped `onboarding.root`) so `onboard_project` and the fs fence see it; and plugins gain `registry.report_setup_gap()` to surface "br missing / no coder / gh unauthenticated" as **self-clearing operator warnings**. The delegate dropdown now lists coding (`acp`) delegates only.
+
+### Changed
+- **Plugins can invoke named ACP delegates with isolated conversations and a host-enforced read-only ceiling (#2747).**
+  `PluginHost.invoke_delegate` keeps plugins out of delegate internals, supports stable per-conversation ACP sessions, clears stale roster services on reload, and can require a per-call policy that blocks writes, execution, and framework-managed Git without mutating the configured delegate.
+
+- **⌘K now clears the chat; the command palette moved to ⌘⇧K (#2949).** The default
+  keybindings were swapped to match the Claude.ai/ChatGPT convention: `mod+k` clears the
+  current conversation when focus is in the chat panel (same behavior as `/clear`), and
+  `mod+shift+k` opens the command palette from anywhere. Outside the chat panel ⌘K now does
+  nothing by default. Both bindings remain rebindable in Settings ▸ Keyboard, and existing
+  user overrides are untouched.
+
+- **The Project Manager soul preset no longer commands tools a fresh member can't hold (#2978).** Ground-first reads the Configure-step repo through the managed-projects registry instead of claiming `onboard_project` writes the grounding doc; the empty-bench rule treats a missing `list_agents` as the answer; and three rules protoEngineer learned live are now in the preset — a colleague not a typist, the smallest action wins, irreversible/outward actions get confirmed (a board's `auto_merge` is the authorization for its own reviewed PRs).
+
+- **The archetype picker no longer offers a Create that can only fail (#2979).** A required bundle Configure answer (the Project Manager's repo and coder delegate) disables Create / Finish until it's filled, matching the server-side gate from #2977; MCP inputs and secrets keep their skip-to-environment semantics. The archetype's capability contract (`requires_tools`) now shows under the picked card at choose-time instead of only as a post-boot banner.
+
+- **One hard-required predicate behind the archetype picker gate (#2984).** `isHardRequiredField` in `archetypeConfig.ts` now backs the Create/Finish gate and both pickers' toggle copy instead of three hand-copies.
+
+### Fixed
+- **Bundle updates no longer downgrade a member that moved ahead of the archetype's pin
+  (#2960).** `_install_bundle` used to re-pin every member to the ref in the bundle
+  manifest, so a member an operator had force-installed ahead of the archetype (e.g.
+  projectBoard v0.41.3 against a manifest still pinning v0.41.2) was silently rolled
+  back on the next bundle update. Release-tag members now chase their own repo's newest
+  semver tag (the same `check_plugin_update` ls-remote logic the single-plugin update
+  route uses) and install that when it's newer. The chase is best-effort — a network
+  error or timeout falls back to the manifest pin — and SHA pins, branch refs, and
+  builtin members are untouched.
+
+### Docs
+- **The Project Manager first-run guide matches what ships (#2980).** `docs/guides/build-with-a-coding-agent.md` now opens with the host binaries the Configure step can't install — a coder, `br` (beads-rust, not Homebrew `bd`), and an authenticated `gh` — and what the console shows when each is missing; lists all **five** Configure fields (the `auto_merge` toggle ships on — off means a human merges); states that the repo and coder are a hard gate (the create is refused, and `workspace new --bundle` can't answer them, so the API body is shown instead); describes the #2977 create-time work (the picked delegate is copied into the member, the repo is registered as a managed project) and the #2978 preset rules; and reconciles the PATH advice with the coding-agents guide (desktop passes the login-shell PATH; absolute paths are the fallback). `propose_delegate` is documented in the delegates guide and the starter-tools reference; the fleet guide and README list exactly the catalog's archetypes (Social Marketing is held); and the retired `pm-stack` / `cowork-stack` / `leadEngineer` names carry amendment notes in ADRs 0041/0042/0049/0055/0064/0072/0078/0083 (`pm-stack` → `portfolio-manager-archetype`, per #2895).
+
+- **Project Manager first-run docs match today's releases (#2982).** The coding-agent guide no longer calls github-plugin 0.6.0 "in flight" or says the pinned board "doesn't call the seam yet": archetype v0.6.0 pins projectBoard 0.42.0 (setup preflight keys `br`/`gh`/`coder`/`repo`, loop pauses and resumes itself) and github-plugin 0.6.0 (status probe keys `gh`/`auth`), and sets `project: true` on the repo input, so the "add the `projects:` entry yourself" fallback applies only to v0.5.0. The GitHub auth order now reads as the plugin resolves it — the `token` secret wins, then `gh`'s own `GH_TOKEN` → `GITHUB_TOKEN` → keyring. README and the plugins guide stop listing a first-party `plugins/github/` "read-only GitHub tools" row (extracted to github-plugin; write rail on for the PM archetype). PROTO.md gains the gotcha for bundle `config_inputs` reserved sections (`CONFIG_INPUT_RESERVED_SECTIONS`) and the `registry.report_setup_gap` seam.
+
+## [0.145.0] - 2026-08-22
+
+### Added
+- **ACP `plan` session updates are recorded instead of dropped (#2945).** Coding agents like Claude Code stream their live todo list over ACP; `AcpClient` now keeps the latest plan as `last_plan` (sanitized, capped, latest-wins — the same contract as `last_usage`) so consumers can sample it. The project board's live coder-monitor drawer (projectBoard-plugin v0.41.0) is the first: it renders the coder's plan as a checklist beside its streamed narration and current tool.
+
+- **Agents can now `propose_delegate` — registration still needs your explicit approval (#2953).** An empty delegate roster was a dead end: the agent could see nobody was configured but could only describe what it needed in prose. The new tool validates the proposed entry, probes it, and pauses with an approval card showing exactly what would run (command path included) plus the probe result; only an explicit approval writes it, through the same seam as Settings ▸ Delegates, with a live roster reload. Autonomous turns fail closed — the auto-answered pause declines. Pairs with the archetype `config_inputs` delegate picker so a board agent's coder can be set up end to end without hand-editing config.
+
+- **The Project Manager archetype is listed again — the flagship for demos — and the first-run docs now match what the wizard actually does (#2963).**
+  Held on 08-21 for first-run friction, every item has since shipped (github.write seeded, setup card instead of a raw beads error, a Configure step that asks for repo / coder / GitHub repo / loop toggle, the review-gate runner in the bundle, auto-merge reachable on a default board). The build-with-a-coding-agent guide gains the Configure-step flow, the merge step (`auto_merge` off means nobody merges), and a "stuck in review" decoder; `projects:` and `onboarding:` get reference sections; the first-agent tutorial describes the archetype picker instead of the retired persona presets.
+
+### Changed
+- **Creating an agent now lands you in it (#2952).** Create-from-archetype and snapshot
+  import used to drop the operator back on the fleet list — one click short of the agent
+  they were obviously about to configure. Both flows now navigate straight into the new
+  agent's own console (its id is the URL slug, the same full-page navigation the
+  FleetSwitcher uses). One deliberate exception: a snapshot import that comes back
+  incomplete (credentials missing, plugins failed) stays put on an in-page summary naming
+  exactly what's still needed — navigating immediately would unload that detail before it
+  could be read — with an Open button to move in once it has been. Also fixes a crash
+  typing into the import panel's credential fields (the event target was read after React
+  had already nulled it, so the first keystroke unmounted the panel).
+
+- **The Project Manager persona grounds first and proposes its own bench (#2954).** Two live first-run gaps: the preset now runs `onboard_project` on first contact with a repo (registry-backed local reads instead of per-file HTTP fetches), and treats an empty delegate roster as a `propose_delegate` moment — a validated, probed entry the operator approves — instead of a dead end it can only narrate. Pairs with project-manager-archetype v0.4.0, which now ships the review gate runnable (workflows member) and the friction ledger on.
+
+### Fixed
+- **A failed conversation harvest no longer costs the thread its knowledge (#2950).** The retire path deleted checkpoints even when the harvest had failed (its swallowed `None` was indistinguishable from "nothing to harvest"), so a transient 429 at retire time — the normal case on a shared fleet OAuth account — permanently skipped capture; 8 threads were lost this way in one day. Sweep-path failures now keep the thread for the next sweep (capped at 3 consecutive failures, then a loud delete), explicit chat deletions still delete but log the loss, and sweep harvests space themselves with jittered gaps so back-to-back model calls stop manufacturing rate-limit bursts.
+
+- **Parked (HITL) turns now appear in telemetry (#2951).** A turn that paused for operator input never recorded a row, so every model call made before the pause vanished from usage/cost numbers — the most expensive turn class, systematically undercounted. The park leg now records its own outcome with the pre-pause spend (state `input_required`, success left NULL so failure-rate queries stay honest); the resumed leg keeps recording separately as before.
+
+- **Model fallback is no longer silent (#2956).** `ModelFallbackMiddleware` failed over without a trace — a successful fallback was indistinguishable from a normal turn, so the operator's first clue of a degraded primary was a quality drop days later. The routing wiring now uses `ObservableModelFallbackMiddleware`, a drop-in subclass that logs a WARNING naming the primary failure and the fallback model that served, and publishes a `model.fallback` event (primary exception class, fallback model, fallback index) on the event bus (ADR 0039) for plugins/telemetry to consume. A HITL interrupt (`GraphBubbleUp`) now also propagates untouched instead of triggering fallback retries, and when every fallback fails the primary exception — the failure worth diagnosing — is the one re-raised.
+
+- **"Test connection" now works for a Claude subscription (#2957).** The OAuth connection probe streamed a bare user prompt, but Anthropic's OAuth infra refuses traffic whose system prompt doesn't lead with the Claude Code identity line — so the probe 429'd while real turns (which get the line from `ClaudeCodeIdentityMiddleware`) worked fine. The probe now sends the identity prefix as its system message for `anthropic-oauth`; Codex keeps its bare user prompt, since the Responses backend rejects system-role items.
+
+- **Infisical host tolerates the CLI's `/api` suffix (#2958).** The Infisical CLI's
+  `--domain` value includes `/api`, but `secrets_manager.host` must not — the provider
+  appends `/api/v1/...` itself, so a pasted CLI value produced `…/api/api/v1/…` and a
+  bare 404. The host is now normalized (a trailing `/api` is stripped,
+  case-insensitively), and a 404 on universal-auth login with an `/api`-suffixed host
+  gets an explicit hint in the error string.
+
+- **A `show_component` widget is never hidden inside a folded turn (#2965).**
+  A reasoning model thinks between the component and its final sentence, so the widget landed in the collapsed "Worked" timeline instead of the answer — the tool ran, the server emitted it, nothing visible happened. Components now always lead the answer, streaming or settled.
+
+### Docs
+- **The docs and marketing sites now unfurl with the same branded social card as the GitHub repo (#2942).**
+  Both were serving the unbranded robot banner as `og:image`, with no `og:description` on docs and no
+  `twitter:title`/`twitter:description` on either; shared links now show the 1280×640 wordmark card
+  with the tagline, and the marketing card moved to a new URL so stale scraper caches refresh.
+
+## [0.144.0] - 2026-08-21
+
+### Added
+- **Bundles can declare `config_inputs:` — setup prompts wired to plugin config (#2934).** A
+  `protoagent.bundle.yaml` can now carry a `config_inputs:` list (`{key, label, type,
+  required?, default?}`, same shape as MCP catalog inputs) declaring plugin config keys the
+  operator should fill at create time. The SetupWizard and the fleet New Agent panel render
+  them in the Configure step — text for `string`/`path`, a dropdown of configured ACP
+  delegates for `delegate`, a toggle for `boolean` — and the install path writes the answers
+  into the host/member config at the declared dotted key paths (declared keys only; an
+  unanswered input falls back to its default without clobbering a live value). Bundles
+  without `config_inputs:` behave exactly as before.
+
+### Fixed
+- **The marketing site no longer installs React for one stylesheet (#2930).** `sites/marketing` is a pure Astro site, but it pulled the entire React runtime via `@protolabsai/ui` just to import `styles.css`. It now depends on `@protolabsai/ui-css` — the CSS-only split of the `.pl-*` component classes — so `react`/`react-dom` drop out of its dependency tree entirely. No visual change.
+
+- **Fresh installs no longer show the per-turn token/cost footer under chat answers (#2931).**
+  `showChatUsage` now defaults to off, so a new install gets a clean transcript out of the
+  box; Settings ▸ Chat still turns it on. Existing installs keep their current setting —
+  zustand/persist hydrates the flag from localStorage, so the new default only applies where
+  no persisted UI state exists.
+
+- **The Docs view no longer 401s on first load of a token-gated host (#2933).** Same race #2926 fixed for the friction and devkit views: the first fetch fired from module scope before the console's bearer handshake reached the iframe, so a fresh desktop member opened Docs to "Could not load docs — HTTP 401". The first load now rides the handshake, with a fallback for open-mode/top-level pages.
+
+- **Plugin views can no longer 401 on first load — the DS kit itself now waits for the bearer (#2935).** `@protolabsai/ui` 0.60.1's `apiFetch` awaits the console handshake (bounded) before its first request, covering every plugin view at the kit layer; the earlier per-view fixes (#2926, #2933) become belt-and-braces. Also picks up ui 0.60.0's React-free `ui-css` stylesheet split (no visual change).
+
+- **One-shot scheduled tasks resume the chat that scheduled them (#2939).** `schedule_task` never passed the originating session to the scheduler, so every fire — even a "remind me at 3pm" scoped to a conversation — landed in the `system:activity` thread. One-shot ISO schedules now carry the turn's session as `context_id` (the same injected-state pattern `wait` uses), so the fire resumes that conversation. Cron schedules deliberately stay context-free and keep firing into Activity — a recurring job resuming a chat the operator closed days ago would be wrong.
+
+### Removed
+- **The Project Manager archetype is held from the new-agent picker (#2932).** An operator first-run test hit the capability-contract banner (the bundle seeded `github.write: false` against its own `requires_tools: [github_create_issue]` contract) and a raw `br init` error from the unbound board on desktop. The catalog row is parked (not deleted) with its bundle, persona, and contract intact, and returns once the companion fixes land (project-manager-archetype#3, projectBoard-plugin#192). Existing agents created from it are unaffected.
+
+## [0.143.0] - 2026-08-20
+
+### Added
+- **Queued-steer placeholder hint (#2837).** The composer shows "Press ↑ to edit queued
+  message" when a mid-turn steer is queued, improving discoverability of the edit
+  affordance. Idle ("Message protoAgent…") and streaming-with-nothing-queued ("Steer the
+  agent…") placeholders are unchanged.
+
+- **Auth-gated e2e mock lane (#2886).** The console e2e mock server gains a real bearer-gate
+  mode (boot with `?gated=1` — a per-context cookie keeps parallel specs hermetic) mirroring
+  `a2a_impl/auth.py`'s default-deny + public allowlist: anonymous SPA/static chrome, anonymous
+  plugin view page chrome (`public_paths`), 401 everywhere else, plus the bearer-gated
+  `/api/sse-token` → `/api/events?token=` handshake. A new `auth-gated-views.spec.ts` boots the
+  console against it with NO injected headers and proves the real auth flow end to end — auth
+  dialog → chat surface → SSE connect → an authed chat turn with zero post-auth 401s — catching
+  the #2884 class of bug (a view subresource not covered by the auth handshake), which the
+  existing route-interception spec structurally cannot see.
+
+- **ACP session observability (#2889).** New `GET /api/acp/sessions` route surfaces live
+  coding-agent sessions (thread, agent, busy status) for delegation triage.
+
+### Changed
+- **Query keys are now slug-namespaced (#2887).** React Query cache keys include the agent slug, preventing stale cross-agent data if in-place agent switching is ever built.
+
+- **Background report cards shrink to dismissable chips (#2923).** A finished background job's report now renders in chat as a single compact row — 📄 title + "Open" + ✕ — instead of the ~200px clamped-excerpt card. "Open" still opens the full report in the document viewer; dismissing removes the chip from the transcript (persisted per job, so a reload doesn't resurrect it) while the report stays reviewable in the Background agents panel.
+
+### Fixed
+- **Plugin form callbacks survive reload (#2889).** Pending slash-command form
+  submissions no longer silently expire when plugins are hot-reloaded.
+
+- **Background delegation dispatches collapse into a compact chip (#2896).** `delegate_to(background=true)` / `task(run_in_background=true)` tool calls no longer render as full-height cards in the chat stream — a turn that fired several buried its answer under identical "Started a background delegation…" cards. They now fold into one muted, expandable "N background jobs" chip (even a single one) and never occupy the streaming spotlight slot; foreground tools keep the existing spotlight/fold behavior. Detection parses the call args at render time, so no schema change; unparseable mid-stream args read as foreground until they complete.
+
+- **Changelog gate now blocks merge (#2906).** A malformed changelog fragment (missing the top-level bullet) no longer slips through auto-merge.
+
+- **`onboard_project` registers into the managed-projects registry, so the GitHub plugin sees onboarded repos (#2925).** The tool wrote its entry into `filesystem.projects` — the fs-fence projection — which the GitHub plugin never reads, so every onboarded repo was missing from `/issue` and the GitHub board. It now writes the ADR 0095 `projects:` entry (`github` binding + `default_branch` probed from `origin/HEAD`) and mirrors the fence entry only where an explicit `filesystem.projects` override is in force; a repo living only in that legacy override is promoted into the registry on re-onboard.
+
+- **Friction and devkit plugin views no longer 401 on first load (#2926).** Both fired their first request before the console's bearer handshake had reached the iframe, so on any token-gated instance the Friction rail opened to "Couldn't load the friction ledger: 401 Unauthorized" until a manual refresh. The first load now rides the handshake (with a fallback for open-mode/top-level pages). Also fixed a stray NUL byte in `friction/view.html` that made git diff the file as binary.
+
+### Removed
+- **The Social Marketing archetype is held from the new-agent picker (#2921).** It isn't release-ready yet; the catalog row is parked (not deleted) so it returns in a future release with its bundle and persona intact. Existing agents created from it are unaffected.
+
 ## [0.142.1] - 2026-08-20
 
 ### Fixed

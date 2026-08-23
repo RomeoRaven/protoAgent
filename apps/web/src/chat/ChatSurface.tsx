@@ -40,6 +40,7 @@ import { ComposerModelSelect } from "./ComposerModelSelect";
 import { useServerTurn, useServerTurnSessions } from "./server-turn-store";
 import { filesFromTransfer, isLargePaste, pastedTextFile } from "./paste";
 import { inputHistory, pushInputHistory } from "./inputHistory";
+import { registerChatEscapeHandler, resolveEscapeAction } from "./escapeStop";
 import { finalizeStoppedMessages, resolveStopTarget } from "./stopTurn";
 import { rewindableTailId, replaceText } from "./parts";
 import { applyComponent, applyReasoning, applyText, applyToolEvent } from "./turnReducers";
@@ -47,6 +48,7 @@ import { reattachTurn } from "./reattach";
 import { loadDraft, loadScroll, loadSteers, saveDraft, saveScroll, saveSteers } from "./scratchState";
 import { createStreamWatchdog } from "./streamWatchdog";
 import { ADD_SELECTOR, isIncognitoAddClick, trackShiftHeld } from "./shiftCue";
+import { composerPlaceholder } from "./composerPlaceholder";
 import { sessionsToClose } from "./bulkClose";
 
 function messageId() {
@@ -555,6 +557,20 @@ function ChatSessionSlot({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composerFocusNonce]);
   const status = chat.sessionStatusMap[sessionId] || "idle";
+  // Escape-to-stop (#2968): the `chat.stop` keybinding runs outside React, so the VISIBLE
+  // slot publishes its behavior on the escapeStop seam. No dep array — re-registered each
+  // render so the binding always sees the CURRENT stop() closure (it reads taskId state);
+  // the seam's guarded unregister makes the per-render churn safe. Streaming with steers
+  // queued → peel off the newest one (LIFO); streaming with none → stop the turn; idle →
+  // strict no-op (never clear the draft or blur).
+  useEffect(() => {
+    if (!visible) return;
+    return registerChatEscapeHandler(() => {
+      const action = resolveEscapeAction(status, steerQueueRef.current);
+      if (action.kind === "cancel-steer") void cancelSteer(action.steerId);
+      else if (action.kind === "stop") void stop();
+    });
+  });
   // A server-initiated turn (background push-resume / scheduled / watch fire, #1767) is
   // running into THIS session — the browser can't stream it, so show a labelled typing
   // indicator. Suppressed while this tab is itself streaming (its own spinner covers it).
@@ -1930,8 +1946,9 @@ function ChatSessionSlot({
           onStop={() => void stop()}
           // Short hints only (#1699) — key/command discoverability lives in /help now, not
           // in a placeholder wall of text competing with the message being written. ("Steer
-          // the agent" is also an e2e anchor — chat-steer-cancel.spec.ts.)
-          placeholder={status === "streaming" ? "Steer the agent…" : "Message protoAgent…"}
+          // the agent" is also an e2e anchor — chat-steer-cancel.spec.ts.) With a steer
+          // queued mid-turn, the hint flips to ↑-recall discoverability (#2837).
+          placeholder={composerPlaceholder(status, steerQueue.length)}
           inputRef={textareaRef}
           onKeyDown={onComposerKeyDown}
           onPaste={(e) => {

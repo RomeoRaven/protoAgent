@@ -47,6 +47,7 @@ class PluginLoadResult:
     a2a_handlers: dict = field(default_factory=dict)  # accepted skill id -> deterministic handler
     routers: list = field(default_factory=list)  # {plugin_id, router, prefix} (ADR 0018)
     public_paths: list = field(default_factory=list)  # manifest-declared auth-exempt prefixes
+    federation_paths: list = field(default_factory=list)  # manifest-declared federation-tier prefixes (#2747)
     surfaces: list = field(default_factory=list)  # {plugin_id, name, start, stop}
     subagents: list = field(default_factory=list)  # SubagentConfig
     middleware: list = field(default_factory=list)  # factories: (config) -> AgentMiddleware|None (ADR 0032)
@@ -552,6 +553,10 @@ def load_plugins(config, *, core_tool_names: set[str] | None = None) -> PluginLo
             # can't see it). Pre-setup loads run before the scheduler is wired
             # (STATE.scheduler is None → no-op).
             _sweep_plugin_jobs(manifest.id)
+            # A disabled plugin's setup-gap banners must not outlive it (setup_gaps seam).
+            from graph.plugins import setup_gaps as _setup_gaps
+
+            _setup_gaps.clear_plugin(manifest.id)
             result.meta.append(entry)
             continue
 
@@ -584,6 +589,7 @@ def load_plugins(config, *, core_tool_names: set[str] | None = None) -> PluginLo
                 section = manifest.config_section or manifest.id
                 pconf = (getattr(config, "plugin_config", {}) or {}).get(section) or dict(manifest.config or {})
                 registry = PluginRegistry(manifest.id, manifest.path, config=pconf, config_section=section)
+                registry.display_name = str(manifest.name or manifest.id)
             with timed_lifecycle_phase(manifest.id, "registration"):
                 register(registry)
         except Exception as exc:  # noqa: BLE001 — a bad plugin must not break boot
@@ -682,6 +688,9 @@ def load_plugins(config, *, core_tool_names: set[str] | None = None) -> PluginLo
         # parser) — the server hands these to the auth middleware so an inbound
         # webhook / public view page works under a token gate.
         result.public_paths.extend(manifest.public_paths)
+        # Federation-tier prefixes (#2747) — same namespace scoping; the auth middleware
+        # lowers the /api operator ceiling to the federation tier on these, nothing more.
+        result.federation_paths.extend(manifest.federation_paths)
         # Cross-check: every declared view must be served by one of this plugin's
         # routers, else the iframe renders blank/404. Catches "declared a view but
         # forgot register_router" / a path typo that fails silently today.
@@ -747,6 +756,14 @@ def load_plugins(config, *, core_tool_names: set[str] | None = None) -> PluginLo
             len(registry.chat_commands),
         )
 
+    # Setup gaps (setup_gaps seam) from plugins that are no longer on disk at all must
+    # not outlive them — the disabled-branch clear above never visits an uninstalled id.
+    try:
+        from graph.plugins import setup_gaps as _setup_gaps
+
+        _setup_gaps.retain({str(m.get("id")) for m in result.meta})
+    except Exception:  # noqa: BLE001 — hygiene must never break plugin loading
+        pass
     return result
 
 

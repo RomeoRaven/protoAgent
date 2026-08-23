@@ -797,6 +797,102 @@ def load_bundle(repo: Path) -> dict | None:
     return doc
 
 
+# The input types a bundle's `config_inputs:` may declare (#2934). Mirrors the MCP
+# catalog input shape ({key, label, type, required?, default?}); the SetupWizard /
+# NewAgentPanel Configure step picks the widget from `type` (string/path → text,
+# delegate → dropdown of configured ACP delegates, boolean → toggle).
+CONFIG_INPUT_TYPES = ("string", "path", "delegate", "boolean")
+
+# Core sections a bundle may never prompt for through `config_inputs:` — the Configure
+# step writes answers (and manifest `default`s, with no operator involvement) straight
+# into the tracked config, and `required: true` is a hard gate ("type it to proceed").
+# A bundle is trusted code, but a Configure prompt labelled "API key" that lands in
+# `model.api_key`, or one that silently widens `network`/`egress`/`projects`, is a lying
+# form. Plugin sections (`project_board.*`, `github.*`) are what the mechanism is for.
+CONFIG_INPUT_RESERVED_SECTIONS = frozenset(
+    {
+        "model", "auth", "network", "security", "egress", "plugins", "filesystem",
+        "projects", "onboarding", "delegates", "identity", "instance", "secrets", "mcp",
+    }
+)
+
+# A declared `key` is a DOTTED CONFIG PATH ("section.key[...]") the install path writes
+# the operator's answer to — at least two safe segments, so a bundle can't declare a
+# bare top-level key (which would replace a whole section) or smuggle YAML weirdness.
+_CONFIG_INPUT_KEY_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*(\.[A-Za-z0-9_][A-Za-z0-9_-]*)+$")
+
+
+def normalize_config_inputs(bundle_id: str, raw: object, *, strict: bool = True) -> list[dict]:
+    """Validate + normalize a bundle's ``config_inputs:`` block (#2934) into
+    ``[{key, label, type, required, default?}]``. ``strict`` (the install path) raises
+    :class:`InstallError` on a malformed entry so a typo'd manifest fails the install
+    with a reason instead of silently dropping the operator prompt; ``strict=False``
+    (the read-only peek) drops bad entries so one typo can't blank the whole preview."""
+
+    def bad(reason: str) -> None:
+        if strict:
+            raise InstallError(f"bundle {bundle_id!r}: invalid config_inputs entry — {reason}")
+
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        bad("config_inputs must be a list")
+        return []
+    out: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            bad(f"{entry!r} is not a mapping")
+            continue
+        key = str(entry.get("key", "")).strip()
+        if not _CONFIG_INPUT_KEY_RE.fullmatch(key):
+            bad(f"key {entry.get('key')!r} is not a dotted config path (e.g. section.key)")
+            continue
+        if key.split(".", 1)[0] in CONFIG_INPUT_RESERVED_SECTIONS:
+            bad(f"key {key!r} targets a core section a bundle may not prompt for")
+            continue
+        label = str(entry.get("label", "")).strip()
+        if not label:
+            bad(f"{key!r} has no label")
+            continue
+        typ = str(entry.get("type") or "string").strip().lower()
+        if typ not in CONFIG_INPUT_TYPES:
+            bad(f"{key!r} has unknown type {entry.get('type')!r} (known: {', '.join(CONFIG_INPUT_TYPES)})")
+            continue
+        norm: dict = {"key": key, "label": label, "type": typ, "required": bool(entry.get("required"))}
+        # `project: true` on a `path` input (#PM-first-run): the answered path is a repo
+        # the agent MANAGES — the create path also registers it in the ADR 0095
+        # `projects:` registry (fs fence, GitHub picker, board), records its GitHub
+        # remote, and scopes `onboarding.root` to its parent. A plain flag, ignored by
+        # hosts that predate it, so a bundle can declare it without a core-version gate.
+        if typ == "path" and bool(entry.get("project")):
+            norm["project"] = True
+        if "default" in entry and entry["default"] is not None:
+            default = coerce_config_input_value(typ, entry["default"])
+            if default is not None:
+                norm["default"] = default
+        out.append(norm)
+    return out
+
+
+def coerce_config_input_value(typ: str, value: object) -> object | None:
+    """Coerce an operator-supplied (or manifest-default) config_inputs value to its
+    declared ``type``. Returns the value to write into the config YAML, or ``None``
+    when it can't be interpreted (blank text, an unrecognized boolean word) — the
+    caller skips the write rather than persisting junk. A quoted ``"false"`` must
+    come out ``False``, so booleans parse words, never truthiness."""
+    if typ == "boolean":
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def bundle_config_overlay(bundle_config: dict | None, current: dict | None) -> dict:
     """Reduce a bundle's recommended ``config:`` ({section: {key: val}}) to a DEFAULTS
     overlay: only the keys the operator hasn't already set in ``current`` (the live
@@ -845,6 +941,9 @@ def _install_bundle(
     direct install), then record the bundle for provenance. Enable + config are
     *suggested* in the return value, never applied (install ≠ enable ≠ trust)."""
     bid = str(bundle.get("id"))
+    # Validate the declared operator prompts (#2934) BEFORE fetching any member — a
+    # malformed config_inputs entry fails the install with a reason, not after N clones.
+    config_inputs = normalize_config_inputs(bid, bundle.get("config_inputs"))
     installed: list[dict] = []
     skipped: list[str] = []
     for entry in bundle.get("plugins") or []:
@@ -856,7 +955,30 @@ def _install_bundle(
         purl = entry.get("url")
         if not purl:
             raise InstallError(f"bundle {bid!r}: plugin {entry.get('id', '?')!r} has no url")
-        installed.append(install(str(purl), entry.get("ref"), force=force, by=f"bundle:{bid}", allow=allow))
+
+        member_ref = entry.get("ref")
+        # Independent member semver chase (#2960): a release-tag pin in the bundle
+        # manifest is a FLOOR, not the answer — an operator may have force-installed
+        # the member ahead of the archetype's pin, and blindly re-pinning to the
+        # manifest would DOWNGRADE it. ls-remote the member repo (via
+        # check_plugin_update, the same newest-semver-tag logic the single-plugin
+        # update route rides) and install the newest tag when one exists. SHA pins
+        # and branch refs pass through untouched.
+        if member_ref and is_release_tag(member_ref):
+            try:
+                member_lock = {
+                    "id": str(entry.get("id", "")),
+                    "source_url": str(purl),
+                    "requested_ref": member_ref,
+                    "resolved_sha": "",
+                }
+                status = check_plugin_update(member_lock)
+                if status.get("latest_ref"):
+                    member_ref = status["latest_ref"]
+            except Exception:  # noqa: BLE001 — best-effort; fall back to the manifest pin
+                pass
+
+        installed.append(install(str(purl), member_ref, force=force, by=f"bundle:{bid}", allow=allow))
 
     lock = _read_lock()
     lock.setdefault("bundles", [])
@@ -891,6 +1013,11 @@ def _install_bundle(
             # create path can prompt for / seed these inputs without re-parsing the bundle
             # manifest (#2041, slice 1).
             "secrets": list(bundle.get("secrets") or []),
+            # The plugin config keys the SetupWizard/NewAgentPanel Configure step prompts
+            # for at create time (#2934) — {key: dotted config path, label, type, required,
+            # default?}, normalized above. Cached so the lock-only seed path
+            # (`apply_bundle_config_inputs`) can anchor operator values to DECLARED keys.
+            "config_inputs": config_inputs,
             # Archetype metadata (ADR 0042) cached here so the new-agent picker can offer
             # this bundle as a starter type without re-reading its manifest. Unknown keys
             # are cached but never read — warn (not fail) so a typo'd field (`souls:`,
@@ -916,6 +1043,7 @@ def _install_bundle(
         "skipped_builtin": skipped,
         "enabled": list(bundle.get("enabled") or []),
         "config": bundle.get("config") or {},
+        "config_inputs": config_inputs,
     }
 
 
@@ -1006,6 +1134,9 @@ def uninstall(plugin_id: str, *, purge: bool = False) -> dict:
         from graph.sdk import cancel_plugin_jobs
 
         jobs_cancelled = cancel_plugin_jobs(plugin_id)
+        from graph.plugins import setup_gaps as _setup_gaps
+
+        _setup_gaps.clear_plugin(plugin_id)  # its setup-gap banner must not outlive it
     except Exception:  # noqa: BLE001 — job hygiene must never fail the uninstall
         jobs_cancelled = 0
     if jobs_cancelled:
