@@ -537,7 +537,13 @@ test("Rooms member click inserts an exact mention and explains who will wake", a
   await expect(composer).toBeFocused();
   await expect(room.getByText("Will notify Hermes", { exact: true })).toBeVisible();
   await expect(room.locator(".flr__roster .flr__dot")).toHaveCount(0);
-  await expect(room.getByText("Mention enabled", { exact: true })).toHaveCount(2);
+  const pla = room.getByRole("listitem").filter({ hasText: "protoLabs Agent" });
+  await expect(pla.getByText("@PLA", { exact: true })).toBeVisible();
+  await expect(pla.getByText("Wakeable as @PLA", { exact: true })).toBeVisible();
+  await expect(room.getByText("Member only", { exact: true })).toHaveCount(1);
+
+  await composer.fill("@all suggestions?");
+  await expect(room.getByText("Will notify Hermes, Headroom, protoLabs Agent", { exact: true })).toBeVisible();
 });
 
 test("Rooms composer offers accessible multi-mention suggestions and blocks unknown names", async ({ page }) => {
@@ -549,6 +555,7 @@ test("Rooms composer offers accessible multi-mention suggestions and blocks unkn
 
   await composer.fill("@");
   const suggestions = room.getByRole("listbox", { name: "Mention an agent" });
+  await expect(suggestions.getByRole("option", { name: "All wakeable agents" })).toBeVisible();
   await expect(suggestions.getByRole("option", { name: "Hermes" })).toBeVisible();
   await expect(suggestions.getByRole("option", { name: "Headroom" })).toBeVisible();
 
