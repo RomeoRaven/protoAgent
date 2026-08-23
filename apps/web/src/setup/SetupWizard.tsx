@@ -25,7 +25,14 @@ import { errMsg } from "../lib/format";
 import { lucideIcon } from "../lib/lucideIcon";
 import { pythonRuntimeView } from "../app/pythonRuntime";
 import { archetypesQuery, pythonRuntimeQuery } from "../lib/queries";
-import { archetypeConfigFields, fieldId, isMissingRequiredConfig, splitConfigValues } from "../lib/archetypeConfig";
+import {
+  archetypeConfigFields,
+  fieldId,
+  isMissingRequiredBundleConfig,
+  isMissingRequiredConfig,
+  requiresToolsNotice,
+  splitConfigValues,
+} from "../lib/archetypeConfig";
 import type { AgentConfig, Archetype, ConfigPayload } from "../lib/types";
 import { ArchetypeConfigField } from "./ArchetypeConfigField";
 import { ArchetypePreviewDialog } from "./ArchetypePreviewDialog";
@@ -461,6 +468,13 @@ export function SetupWizard({
   // A required field left blank is a soft hint, NOT a hard gate — skipping the Configure
   // step (or a field) falls back to this host's environment, same as NewAgentPanel.
   const missingRequired = configOpen && isMissingRequiredConfig(configFields, configValues);
+  // Hard gate (#2977): a required bundle config_inputs answer has no env fallback — the host
+  // install refuses to activate without it, so Finish waits for it too.
+  const missingHard = isMissingRequiredBundleConfig(configFields, configValues);
+  const hasHardRequired = configFields.some(
+    (f) => f.origin === "config" && f.required && f.kind !== "boolean" && f.defaultValue === undefined,
+  );
+  const contractNotice = pickedArchetype ? requiresToolsNotice(pickedArchetype.label, pickedArchetype.requires_tools) : null;
 
   // Runtime requirement at CHOOSE-time (#2186): same affordance as NewAgentPanel —
   // the wizard's first-run pick of Cowork on a runtime-less desktop otherwise ends at
@@ -577,10 +591,14 @@ export function SetupWizard({
           // Collected Configure values ride the install (#2714) — the same seed
           // channels POST /api/fleet uses (#2041/#2934). Collapsed/absent form →
           // env-only / declared defaults.
-          const { inputs, secrets, config } =
-            configOpen && configFields.length
-              ? splitConfigValues(configFields, configValues)
-              : { inputs: {}, secrets: [], config: {} };
+          // Bundle config answers ride the install regardless of the collapsed state
+          // (no env fallback; the host install refuses to activate without them, #2977).
+          const split = configFields.length
+            ? splitConfigValues(configFields, configValues)
+            : { inputs: {}, secrets: [], config: {} };
+          const inputs = configOpen ? split.inputs : {};
+          const secrets = configOpen ? split.secrets : [];
+          const config = split.config;
           const r = await api.installPlugin(pickedBundle, undefined, undefined, {
             inputs: Object.keys(inputs).length ? inputs : undefined,
             secrets: secrets.length ? secrets : undefined,
@@ -766,6 +784,11 @@ export function SetupWizard({
                   {runtimeWarning}
                 </p>
               ) : null}
+              {contractNotice ? (
+                <p className="archetype-runtime-notice" role="note">
+                  {contractNotice}
+                </p>
+              ) : null}
               {/* Inline Configure step — NewAgentPanel parity (#2714/#2041/#2934): appears only
                   when the picked bundle declares MCP inputs, secrets, or config_inputs.
                   Collapsing skips it (→ env-only / declared-default seeding on install). */}
@@ -779,8 +802,13 @@ export function SetupWizard({
                   >
                     {configOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                     <span>Configure {pickedArchetype?.label}</span>
-                    <span className="field-hint">optional — skip to use this host&apos;s environment</span>
+                    <span className="field-hint">
+                      {hasHardRequired ? "answers marked * are required" : "optional — skip to use this host's environment"}
+                    </span>
                   </button>
+                  {missingHard && !configOpen ? (
+                    <span className="field-hint">Fields marked * are needed before setup can finish — open Configure.</span>
+                  ) : null}
                   {configOpen ? (
                     <div className="archetype-configure-fields">
                       {configFields.map((f) => (
@@ -796,7 +824,9 @@ export function SetupWizard({
                           />
                         </label>
                       ))}
-                      {missingRequired ? (
+                      {missingHard ? (
+                        <span className="field-hint">Fields marked * are needed before setup can finish.</span>
+                      ) : missingRequired ? (
                         <span className="field-hint">
                           Fields marked * connect their server — fill them, or skip to use this host&apos;s environment.
                         </span>
@@ -1078,7 +1108,7 @@ export function SetupWizard({
                   Open console
                 </Button>
               ) : (
-                <Button variant="primary" type="button" onClick={() => void finishSetup()} disabled={busy}>
+                <Button variant="primary" type="button" onClick={() => void finishSetup()} disabled={busy || missingHard}>
                   {busy ? <Spinner size={15} /> : <Check size={15} />}
                   Finish
                 </Button>

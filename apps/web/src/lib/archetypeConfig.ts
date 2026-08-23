@@ -103,14 +103,39 @@ export function hasConfigFields(preview: ArchetypePreview | undefined): boolean 
   return archetypeConfigFields(preview).length > 0;
 }
 
-// A required field left blank blocks create while the form is OPEN — the operator either
-// fills it or collapses the form to skip (→ env-only). Trims so whitespace isn't "filled".
-// A config field with a declared default is never missing (the backend writes the default
-// when skipped), and a boolean toggle always resolves to a value.
+// The SOFT hint: a required MCP input / declared secret left blank while the form is open.
+// Those have an environment fallback, so the operator may collapse the form to skip them.
+// Required bundle config_inputs do NOT (server refuses, #2977) — see
+// isMissingRequiredBundleConfig below, which is what gates the Create button. Trims so
+// whitespace isn't "filled"; a declared default is never missing; booleans never gate.
 export function isMissingRequiredConfig(fields: ConfigField[], values: Record<string, string>): boolean {
   return fields.some(
     (f) => f.required && f.kind !== "boolean" && f.defaultValue === undefined && !fieldValue(values, f),
   );
+}
+
+// The HARD gate (#2977): a required bundle `config_inputs` answer (origin "config") has no
+// environment fallback — the server refuses the create/install and names the prompt — so
+// the picker must not offer a Create that can only 400. MCP inputs and declared secrets
+// keep their soft semantics (skip → env), which is what isMissingRequiredConfig hints at.
+export function isMissingRequiredBundleConfig(fields: ConfigField[], values: Record<string, string>): boolean {
+  return fields.some(
+    (f) =>
+      f.origin === "config" &&
+      f.required &&
+      f.kind !== "boolean" &&
+      f.defaultValue === undefined &&
+      !fieldValue(values, f),
+  );
+}
+
+// One line for the archetype card: the tools its persona COMMITS to (the capability
+// contract, ADR 0100). Shown at choose-time so a contract break is a known trade-off,
+// not a post-boot surprise banner. Empty when the archetype declares none.
+export function requiresToolsNotice(label: string, requiresTools: string[] | undefined): string | null {
+  const tools = (requiresTools ?? []).map((t) => t.trim()).filter(Boolean);
+  if (!tools.length) return null;
+  return `${label} commits to ${tools.length === 1 ? "a tool" : "tools"} its bundle must provide: ${tools.join(", ")}.`;
 }
 
 // Split the collected form values back into the three create() channels. Blank values are
