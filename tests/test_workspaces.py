@@ -980,6 +980,45 @@ def test_create_accepts_required_delegate_already_in_cloned_registry(root, tmp_p
     assert [entry["name"] for entry in cfg["delegates"]] == ["claude-code", "peer"]
 
 
+def test_create_refuses_cloned_required_delegate_missing_from_cloned_registry(root, tmp_path, monkeypatch):
+    """A stale required delegate value in cloned config cannot bypass registry validation."""
+    import json
+
+    def fake_install(ws, bundle):
+        (ws / "plugins.lock").write_text(
+            json.dumps(
+                {
+                    "bundles": [
+                        {
+                            "id": "pm",
+                            "config_inputs": [
+                                {
+                                    "key": "board.coder",
+                                    "label": "Coder delegate",
+                                    "type": "delegate",
+                                    "required": True,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ["board"]
+
+    monkeypatch.setattr(manager, "_install_bundle_into", fake_install)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "langgraph-config.yaml").write_text(
+        manager._CONFIG_TEMPLATE.format(name="source", id="source-id") + "\nboard:\n  coder: ghost\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(manager.WorkspaceError, match="not configured"):
+        manager.create("cloned-ghost", from_config=str(source), bundle="https://example.invalid/pm")
+    assert not root.exists() or not any(root.iterdir())
+
+
 def test_register_project_inputs_registers_checkout_and_scopes_onboarding(root, tmp_path, monkeypatch):
     """A `project: true` path input becomes a `projects:` entry (name = dir name,
     GitHub slug from the origin remote, read-only) and — only when the operator has no

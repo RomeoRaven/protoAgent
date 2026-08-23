@@ -511,7 +511,7 @@ def create(
                 for entry in (member_delegates or [])
                 if isinstance(entry, dict) and str(entry.get("name") or "").strip()
             ]
-            ghosts = _uncopied_required_delegates(ws / "plugins.lock", config_inputs or {}, configured)
+            ghosts = _uncopied_required_delegates(ws / "plugins.lock", member_doc, configured)
             if ghosts:
                 raise WorkspaceError(
                     "the picked coder delegate is not configured for this member: "
@@ -963,7 +963,9 @@ def copy_host_delegates(cfg: Path, lock: Path, values: Mapping[str, object] | No
     return copied
 
 
-def _uncopied_required_delegates(lock: Path, values: Mapping[str, object], configured: list[str]) -> list[str]:
+def _uncopied_required_delegates(
+    lock: Path, member_config: Mapping[str, object], configured: list[str]
+) -> list[str]:
     """Required delegate answers absent from the resulting member registry.
 
     The registry may already exist in cloned/snapshot config or may have just been
@@ -974,7 +976,7 @@ def _uncopied_required_delegates(lock: Path, values: Mapping[str, object], confi
     for key, dec in _declared_config_inputs(lock).items():
         if str(dec.get("type") or "") != "delegate" or not bool(dec.get("required")):
             continue
-        name = str(values.get(key) or "").strip()
+        name = str(_dotted_lookup(member_config, key) or "").strip()
         if name and name not in configured and name not in out:
             out.append(name)
     return out
