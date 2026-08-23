@@ -1382,6 +1382,11 @@ export type DelegateView = {
   // True when any per-row env secret is stored (#2114) — the form shows those rows
   // set-but-masked. The masked env values come back as "***" in the `env` map.
   has_env_secrets?: boolean;
+  /** "host" = fleet-shared (the box's host-config.yaml, hub-managed, every member sees it);
+   *  "agent" = this instance's own entry (ADR 0105). Absent on pre-0105 hosts → agent. */
+  scope?: "host" | "agent";
+  /** This agent-scoped entry hides a same-name fleet-shared one — deleting it reveals that. */
+  shadows_host?: boolean;
   health?: DelegateProbe;
   last_dispatch?: DelegateDispatch;
   [key: string]: unknown;

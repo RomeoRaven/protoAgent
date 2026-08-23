@@ -41,7 +41,8 @@ def _public_view(raw: dict) -> dict:
         except DelegateError as e:
             configured, error = False, str(e)
     name = raw.get("name")
-    overlay = store.secret_overlay()
+    scope = store._scope_of(raw)
+    overlay = store.secret_overlay(scope)
     has_secret = bool(adapter and adapter.secret_field and overlay.get(f"{name}.{adapter.secret_field}"))
     # Per-env secret var names stored for this delegate (`<name>.env.<VAR>`) — masked
     # in the returned env so the form shows them set-but-masked (#2114).
@@ -63,6 +64,9 @@ def _public_view(raw: dict) -> dict:
             "error": error,
             "has_secret": has_secret,
             "has_env_secrets": bool(env_secret_keys),
+            # "host" = fleet-shared (box host-config.yaml, hub-managed); "agent" = this
+            # instance's own entry (ADR 0105).
+            "scope": scope,
         }
     )
     return view
@@ -78,10 +82,14 @@ def _list_payload() -> dict:
     # handshake, so a coder that launches but fails every session shows a green dot.
     dispatched = status.snapshot()
     out = []
+    shared_names = {str(e.get("name") or "") for e in store.read_host_delegates_raw()}
     for r in store.read_delegates_raw():
         if not isinstance(r, dict):
             continue
         view = _public_view(r)
+        # An agent entry that hides a same-name fleet-shared one: deleting it REVEALS
+        # the shared entry rather than removing the name — the console says so.
+        view["shadows_host"] = bool(view.get("scope") == store.SCOPE_AGENT and view.get("name") in shared_names)
         h = health.get(view.get("name"))
         if h:
             view["health"] = h
@@ -89,7 +97,9 @@ def _list_payload() -> dict:
         if last:
             view["last_dispatch"] = last
         out.append(view)
-    return {"delegates": out}
+    # `can_share`: may THIS instance write the fleet-shared (host) layer? Hub → yes;
+    # a member sees shared entries read-only (ADR 0105).
+    return {"delegates": out, "can_share": store.can_write_host_layer()}
 
 
 def _validate(entry: dict):
@@ -116,7 +126,9 @@ def _inject_stored_secret(entry: dict, adapter) -> dict:
     entry = copy.deepcopy(entry)
     if store._pop_dotted(copy.deepcopy(entry), adapter.secret_field):
         return entry  # caller supplied one
-    val = store.secret_overlay().get(f"{entry.get('name')}.{adapter.secret_field}")
+    # Layer-aware: a Test of an agent-scoped entry must not borrow a fleet-shared key.
+    scope = store._scope_of(entry)
+    val = store.secret_overlay(scope).get(f"{entry.get('name')}.{adapter.secret_field}")
     if val:
         store._set_dotted(entry, adapter.secret_field, val)
     return entry
@@ -172,9 +184,21 @@ def build_router():
             name, _ = _validate(entry)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        if any(isinstance(e, dict) and e.get("name") == name for e in store.read_delegates_raw()):
-            raise HTTPException(409, f"delegate {name!r} already exists")
-        store.upsert_delegate(entry)
+        # Same-name collision is checked within the target layer; a member may shadow a
+        # fleet-shared entry with its own (agent wins at read time), a hub may not
+        # double-register — it would silently move the entry between layers instead.
+        scope = store._scope_of(entry)
+        existing = store.read_delegates_raw()
+        clash = next((e for e in existing if isinstance(e, dict) and e.get("name") == name), None)
+        if clash is not None and (clash.get("scope") == scope or store.can_write_host_layer()):
+            where = "fleet-shared" if clash.get("scope") == store.SCOPE_HOST else "this agent's"
+            raise HTTPException(
+                409, f"delegate {name!r} already exists in {where} list — edit it and toggle 'Share with fleet' to move it"
+            )
+        try:
+            store.upsert_delegate(entry)
+        except store.DelegateScopeError as e:
+            raise HTTPException(403, str(e))
         ok, msg = await _reload()
         return {"ok": ok, "message": msg, **_list_payload()}
 
@@ -187,15 +211,28 @@ def build_router():
             _validate(entry)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        if not any(isinstance(e, dict) and e.get("name") == name for e in store.read_delegates_raw()):
+        current = next((e for e in store.read_delegates_raw() if isinstance(e, dict) and e.get("name") == name), None)
+        if current is None:
             raise HTTPException(404, f"delegate {name!r} not found")
-        store.upsert_delegate(entry)
+        # An edit keeps the entry's layer unless the body says otherwise (the hub's
+        # "share with fleet" toggle); a member editing a shared entry is refused.
+        if "scope" not in entry:
+            entry["scope"] = current.get("scope", store.SCOPE_AGENT)
+        if current.get("scope") == store.SCOPE_HOST and not store.can_write_host_layer():
+            raise HTTPException(403, "fleet-shared delegates are managed on the hub — this agent can't edit them")
+        try:
+            store.upsert_delegate(entry)
+        except store.DelegateScopeError as e:
+            raise HTTPException(403, str(e))
         ok, msg = await _reload()
         return {"ok": ok, "message": msg, **_list_payload()}
 
     @router.delete("/api/delegates/{name}")
     async def _delete(name: str):
-        store.delete_delegate(name)
+        try:
+            store.delete_delegate(name)
+        except store.DelegateScopeError as e:
+            raise HTTPException(403, str(e))
         ok, msg = await _reload()
         return {"ok": ok, "message": msg, **_list_payload()}
 
