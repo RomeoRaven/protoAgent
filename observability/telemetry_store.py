@@ -1,13 +1,18 @@
 """Local telemetry store — per-turn cost/latency rollups (ADR 0006 Slice 2).
 
-One row per terminal A2A turn: accumulated token usage (incl. prompt-cache),
-USD cost, wall-clock duration, LLM-call + tool-call counts, model, and outcome.
+Each row carries accumulated token usage (incl. prompt-cache), USD cost,
+wall-clock duration, LLM-call + tool-call counts, model, and outcome.
 This is the *durable, queryable* half of observability inside protoAgent — the
 substrate for "what was expensive/slow over time" and the flywheel's analysis
 (Prometheus is live-scrape-only; Langfuse is opt-in/external).
 
-Written from the single terminal chokepoint (``A2ATaskStore.update_state`` when
-the state goes terminal), so completed/failed/canceled turns are all captured.
+One row per turn LEG, not per task: a HITL park/resume is two legs sharing one
+A2A task id, and each owns its own spend (#3001). Row identity is the surrogate
+``row_id``; ``task_id`` is an ordinary indexed column several rows may share.
+
+Written from the single terminal chokepoint (``server.a2a._a2a_terminal``, the
+executor's terminal hook), so completed/failed/canceled/parked turns are all
+captured.
 Best-effort: a write failure never breaks a turn. Instance-scoped via the path
 the host resolves (ADR 0004). No TTL — history is the point; ``prune`` exists for
 hosts that want to cap retention.
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -71,7 +77,8 @@ class TelemetryStore:
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS turns (
-                    task_id                     TEXT PRIMARY KEY,
+                    row_id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id                     TEXT,
                     session_id                  TEXT,
                     state                       TEXT,
                     success                     INTEGER,
@@ -109,25 +116,87 @@ class TelemetryStore:
                     db.execute(f"ALTER TABLE turns ADD COLUMN {_col} {_type}")
                 except sqlite3.OperationalError:
                     pass  # column already present
+            self._migrate_to_row_id(db)  # #3001 — must run after the ADD COLUMNs above
+            db.execute("CREATE INDEX IF NOT EXISTS ix_turns_task ON turns(task_id)")
             db.commit()
         finally:
             db.close()
 
+    @staticmethod
+    def _migrate_to_row_id(db: sqlite3.Connection) -> None:
+        """Rebuild a pre-#3001 store, where ``task_id`` was the PRIMARY KEY.
+
+        One task is not one turn. A HITL park/resume is two legs — two ``execute()``
+        calls, each with its own model calls, tool calls and wall clock — and A2A
+        gives both the SAME task id. Under the old ``ON CONFLICT(task_id) DO UPDATE``
+        the resumed leg overwrote the parked one, so a turn that paused for approval
+        reported only what happened AFTER the human answered: every pre-approval tool
+        call and its tokens silently disappeared (#3001, #2943).
+
+        The row identity is now a surrogate, and ``task_id`` is an ordinary indexed
+        column that several rows may share. That is also what lets a turn with no
+        task id at all be recorded (#3000).
+
+        SQLite cannot alter a primary key, so this is the standard rebuild: create
+        the new shape, copy, swap. Guarded on the absence of ``row_id``, so it fires
+        once per old store and no-ops forever after. Column list comes from the live
+        table, not a hardcoded one, so a store missing a late-added column still
+        copies cleanly.
+        """
+        cols = [r["name"] for r in db.execute("PRAGMA table_info(turns)").fetchall()]
+        if not cols or "row_id" in cols:
+            return  # fresh store (already the new shape) or already migrated
+        carried = ",".join(c for c in cols if c != "row_id")
+        log.info("[telemetry] migrating store to per-leg rows (#3001)")
+        db.execute("ALTER TABLE turns RENAME TO turns_pre3001")
+        db.execute(
+            """
+            CREATE TABLE turns (
+                row_id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id                     TEXT,
+                session_id                  TEXT,
+                state                       TEXT,
+                success                     INTEGER,
+                model                       TEXT,
+                models                      TEXT,
+                input_tokens                INTEGER DEFAULT 0,
+                output_tokens               INTEGER DEFAULT 0,
+                total_tokens                INTEGER DEFAULT 0,
+                cache_read_input_tokens     INTEGER DEFAULT 0,
+                cache_creation_input_tokens INTEGER DEFAULT 0,
+                cost_usd                    REAL    DEFAULT 0,
+                duration_ms                 INTEGER DEFAULT 0,
+                llm_calls                   INTEGER DEFAULT 0,
+                tool_calls                  INTEGER DEFAULT 0,
+                created_at                  TEXT,
+                ended_at                    TEXT,
+                soul_rev                    TEXT,
+                trace_id                    TEXT,
+                tool_durations              TEXT,
+                context_tokens              INTEGER DEFAULT 0
+            )
+            """
+        )
+        db.execute(f"INSERT INTO turns ({carried}) SELECT {carried} FROM turns_pre3001")
+        db.execute("DROP TABLE turns_pre3001")
+        # The old index rode the renamed table and was dropped with it.
+        db.execute("CREATE INDEX IF NOT EXISTS ix_turns_ended ON turns(ended_at)")
+
     def record(self, row: dict) -> None:
-        """Upsert one per-turn telemetry row (keyed by task_id). Best-effort."""
-        task_id = row.get("task_id")
-        if not task_id:
+        """Append one per-turn telemetry row. Best-effort.
+
+        An INSERT, not an upsert: one row per turn LEG. Both legs of a HITL
+        park/resume carry the same ``task_id``, so upserting on it silently
+        replaced the parked leg's spend with the resumed leg's (#3001).
+        """
+        if not row.get("task_id"):
             return
         values = [row.get(c) for c in _COLUMNS]
         placeholders = ",".join("?" for _ in _COLUMNS)
         cols = ",".join(_COLUMNS)
-        updates = ",".join(f"{c}=excluded.{c}" for c in _COLUMNS if c != "task_id")
         db = self._connect()
         try:
-            db.execute(
-                f"INSERT INTO turns ({cols}) VALUES ({placeholders}) ON CONFLICT(task_id) DO UPDATE SET {updates}",
-                values,
-            )
+            db.execute(f"INSERT INTO turns ({cols}) VALUES ({placeholders})", values)
             db.commit()
         finally:
             db.close()
@@ -137,17 +206,16 @@ class TelemetryStore:
         db = self._connect()
         try:
             rows = db.execute(
-                "SELECT * FROM turns ORDER BY ended_at DESC LIMIT ?",
+                "SELECT * FROM turns ORDER BY ended_at DESC, row_id DESC LIMIT ?",
                 (max(1, int(limit)),),
             ).fetchall()
             out = []
             for r in rows:
                 d = dict(r)
                 # Per-turn cache-hit ratio, derived — cached reads / total prompt tokens
-                # the turn sent (#2773). Kept out of the schema: both operands are
-                # already columns, so a derived key can't drift from them.
-                inp = d.get("input_tokens", 0) or 0
-                d["cache_hit_ratio"] = round((d.get("cache_read_input_tokens", 0) or 0) / inp, 4) if inp else 0.0
+                # the turn sent (#2773). Kept out of the schema: every operand is
+                # already a column, so a derived key can't drift from them.
+                d["cache_hit_ratio"] = _cache_hit_ratio(d)
                 out.append(d)
             return out
         finally:
@@ -164,7 +232,7 @@ class TelemetryStore:
         db = self._connect()
         try:
             cur = db.execute(
-                f"SELECT * FROM turns {where} ORDER BY ended_at DESC",
+                f"SELECT * FROM turns {where} ORDER BY ended_at DESC, row_id DESC",
                 params,
             )
             for row in cur:
@@ -193,19 +261,29 @@ class TelemetryStore:
                     COALESCE(SUM(llm_calls), 0)       AS llm_calls,
                     COALESCE(SUM(tool_calls), 0)      AS tool_calls,
                     COALESCE(AVG(duration_ms), 0)     AS avg_duration_ms,
-                    COALESCE(SUM(success), 0)         AS successes
+                    COALESCE(SUM(success), 0)         AS successes,
+                    COUNT(success)                    AS resolved
                 FROM turns {where}
                 """,
                 params,
             ).fetchone()
             out = dict(agg)
-            turns = out.get("turns", 0) or 0
             out["cost_usd"] = round(out.get("cost_usd", 0.0) or 0.0, 6)
             out["avg_duration_ms"] = int(out.get("avg_duration_ms", 0) or 0)
-            out["success_rate"] = round((out.get("successes", 0) or 0) / turns, 4) if turns else 0.0
-            # Cache-hit ratio: cached reads / total input tokens seen.
-            inp = out.get("input_tokens", 0) or 0
-            out["cache_hit_ratio"] = round((out.get("cache_read_input_tokens", 0) or 0) / inp, 4) if inp else 0.0
+            # Success rate is over turns that RESOLVED, not every recorded row (#3004).
+            # A parked leg writes `success = NULL` — it is neither a success nor a
+            # failure, it is a turn waiting on a human (#2943). NULL already kept it
+            # out of `SUM(success)`, but the denominator was `COUNT(*)`, which counts
+            # it — so every approval-gated turn read as a failure and any agent using
+            # HITL showed a permanently depressed success rate. `COUNT(success)` skips
+            # NULLs, so parked legs now drop out of BOTH halves.
+            resolved = out.get("resolved", 0) or 0
+            out["success_rate"] = round((out.get("successes", 0) or 0) / resolved, 4) if resolved else 0.0
+            # Kept alongside `turns` (every recorded row) so the gap is visible rather
+            # than merely excluded: turns - resolved = legs parked awaiting a human.
+            out["resolved"] = resolved
+            # Cache-hit ratio over the window — same definition as the per-row one.
+            out["cache_hit_ratio"] = _cache_hit_ratio(out)
             # Latency percentiles (Python-side; bounded by typical volumes).
             durations = [
                 r[0]
@@ -345,11 +423,38 @@ class TelemetryStore:
             db.close()
 
 
+def _cache_hit_ratio(row: dict) -> float:
+    """Cached reads / the turn's whole prompt (#3003).
+
+    The denominator is ``input_tokens + cache_read + cache_creation`` because the
+    three columns are DISJOINT as of #3003 — ``input_tokens`` is the uncached
+    share only. Dividing by ``input_tokens`` alone (what this used to do, back
+    when the column was cache-inclusive) would now report far above 1.0 on a
+    cache-heavy turn.
+
+    Rows written before #3003 still carry the cache-inclusive column, so their
+    denominator double-counts the cached reads and the ratio reads a little low.
+    Not backfilled, by decision: quietly rewriting recorded history is worse than
+    a documented seam, and the direction is conservative.
+    """
+    cache_read = row.get("cache_read_input_tokens", 0) or 0
+    prompt = (row.get("input_tokens", 0) or 0) + cache_read + (row.get("cache_creation_input_tokens", 0) or 0)
+    return round(cache_read / prompt, 4) if prompt else 0.0
+
+
 def _percentile(values: list[int], pct: float) -> int:
-    """Nearest-rank percentile over a pre-sorted list (empty → 0)."""
+    """Nearest-rank percentile over a pre-sorted list (empty → 0).
+
+    Nearest rank is ``ceil(pct/100 * n)``, 1-indexed. The previous form —
+    ``round(pct/100 * n + 0.5) - 1`` — sat one rank high, but only sometimes:
+    Python's ``round`` is banker's rounding, so the error flipped with the parity
+    of the half-value. At n=100 that made p50 correct and p99 return the MAXIMUM,
+    which is not a percentile at all — and p99 is the column an operator reads to
+    decide whether a tool is slow (#3005).
+    """
     if not values:
         return 0
-    k = max(0, min(len(values) - 1, int(round((pct / 100.0) * len(values) + 0.5)) - 1))
+    k = max(0, min(len(values) - 1, math.ceil(pct / 100.0 * len(values)) - 1))
     return int(values[k])
 
 

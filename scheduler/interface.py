@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 
@@ -40,7 +40,22 @@ class Job:
     # chat session so a yield-and-resume continues that conversation's thread
     # rather than landing in Activity (ADR 0053 same-session resume).
     context_id: str | None = None
+    # The chat session that CREATED this schedule (#2990). DISTINCT from
+    # ``context_id``: ``context_id`` controls WHERE a fire runs (a normal cron runs in
+    # Activity; a `wait`/resume runs back in its chat), whereas ``origin_session`` is
+    # WHERE the RESULT is delivered — the host injects a ScheduledReportCard into this
+    # session after the fire completes so the chat that asked for the schedule sees the
+    # outcome without digging through Activity. None → the schedule wasn't created from
+    # a chat (e.g. an Activity-origin turn) → no result delivery (backward compatible).
+    origin_session: str | None = None
     enabled: bool = True
+    # Auto-expiry (#2992): a recurring schedule shouldn't run forever by default.
+    # ``ttl`` is a duration — human shorthand ("7d", "24h", "2w") or ISO-8601
+    # ("P7D") — after which (measured from ``created_at``) the job auto-cancels.
+    # ``max_fires`` auto-cancels after N firings; ``fire_count`` tracks them.
+    ttl: str | None = None
+    max_fires: int | None = None
+    fire_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,6 +78,9 @@ class SchedulerBackend(Protocol):
         job_id: str | None = None,
         timezone: str | None = None,
         context_id: str | None = None,
+        origin_session: str | None = None,
+        ttl: str | None = None,
+        max_fires: int | None = None,
     ) -> Job:
         """Persist a new job. Returns the stored ``Job`` (with
         backend-assigned id and next_fire if the caller didn't set them).
@@ -72,7 +90,17 @@ class SchedulerBackend(Protocol):
 
         ``context_id`` is the A2A contextId to fire into (None → the durable
         Activity thread). Used for same-session resume (ADR 0053); backends that
-        can't target a context (remote schedulers) may ignore it."""
+        can't target a context (remote schedulers) may ignore it.
+
+        ``origin_session`` is the chat session that created the schedule (#2990) —
+        distinct from ``context_id`` (where the fire runs): the host delivers the
+        fire's RESULT back to this session as a ScheduledReportCard. None → no
+        delivery. Backends that can't deliver may ignore it.
+
+        ``ttl`` / ``max_fires`` auto-expire the job (#2992): after
+        ``created_at + ttl`` elapses, or after ``max_fires`` firings, the
+        backend cancels it. ``ttl`` must satisfy ``parse_ttl`` — raises
+        ``ValueError`` for an unparseable duration or ``max_fires < 1``."""
         ...
 
     def cancel_job(self, job_id: str) -> bool:
@@ -147,3 +175,53 @@ def parse_iso_to_utc(schedule: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+# ── job TTL (#2992) ─────────────────────────────────────────────────────────
+
+_TTL_SHORTHAND = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhdw])$", re.IGNORECASE)
+_TTL_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+_ISO_DURATION = re.compile(
+    r"^P(?:(?P<weeks>\d+(?:\.\d+)?)W)?"
+    r"(?:(?P<days>\d+(?:\.\d+)?)D)?"
+    r"(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?"
+    r"(?:(?P<minutes>\d+(?:\.\d+)?)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$",
+    re.IGNORECASE,
+)
+
+
+def parse_ttl(ttl: str) -> timedelta:
+    """Parse a job TTL string into a ``timedelta``.
+
+    Accepts a human shorthand — ``"7d"``, ``"24h"``, ``"2w"``, ``"30m"``,
+    ``"90s"`` — or an ISO-8601 duration — ``"P7D"``, ``"PT12H"``,
+    ``"P1DT6H"``. Raises ``ValueError`` for anything else (including a
+    zero/negative duration), so a nonsense TTL is rejected at ``add_job``
+    time rather than silently never expiring.
+    """
+    text = (ttl or "").strip()
+    if not text:
+        raise ValueError("scheduler: ttl must be a non-empty duration string")
+    m = _TTL_SHORTHAND.match(text)
+    if m:
+        amount, unit = m.groups()
+        delta = timedelta(seconds=float(amount) * _TTL_UNIT_SECONDS[unit.lower()])
+    else:
+        m = _ISO_DURATION.match(text)
+        if not m or not any(m.groupdict().values()):
+            raise ValueError(
+                f"scheduler: unparseable ttl {ttl!r} — use a shorthand like "
+                f"'7d' / '24h' / '2w' or an ISO-8601 duration like 'P7D'"
+            )
+        parts = {k: float(v) for k, v in m.groupdict().items() if v}
+        delta = timedelta(
+            weeks=parts.get("weeks", 0.0),
+            days=parts.get("days", 0.0),
+            hours=parts.get("hours", 0.0),
+            minutes=parts.get("minutes", 0.0),
+            seconds=parts.get("seconds", 0.0),
+        )
+    if delta <= timedelta(0):
+        raise ValueError(f"scheduler: ttl {ttl!r} must be a positive duration")
+    return delta
