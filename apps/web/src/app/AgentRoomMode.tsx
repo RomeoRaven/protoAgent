@@ -5,10 +5,26 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { api } from "../lib/api";
 import type { AgentRoom, AgentRoomMember, AgentRoomMention } from "../lib/types";
 
-const ROOM_TOKEN = /(?<!\w)@[\w-]+/g;
+const ROOM_TOKEN = /(?<![^\s(\[{])@[^\s,;:!?()[\]{}]*/g;
+const ALL_WAKEABLE: AgentRoomMember = {
+  principal: "__all__",
+  kind: "virtual",
+  display_name: "All wakeable agents",
+  role: "broadcast",
+  mention_token: "@all",
+  host: "room",
+  can_post: false,
+  can_mention: false,
+  mentionable: true,
+};
 
-function tokensIn(text: string): string[] {
-  return Array.from(text.matchAll(ROOM_TOKEN), (match) => match[0]);
+export function tokensIn(text: string, knownTokens: Iterable<string> = []): string[] {
+  const known = new Map(Array.from(knownTokens, (token) => [token.toLocaleLowerCase(), token]));
+  return Array.from(text.matchAll(ROOM_TOKEN), (match) => {
+    let token = match[0];
+    while (token.endsWith(".") && !known.has(token.toLocaleLowerCase())) token = token.slice(0, -1);
+    return known.get(token.toLocaleLowerCase()) ?? token;
+  });
 }
 
 export function AgentRoomMode({
@@ -77,11 +93,12 @@ export function AgentRoomMode({
   const roomMembers = members.data?.result.members ?? [];
   const mentionable = useMemo(() => roomMembers.filter((member) => member.mentionable), [roomMembers]);
   const memberTokens = useMemo(
-    () => new Map(roomMembers.map((member) => [member.mention_token.toLocaleLowerCase(), member])),
+    () => new Map([...roomMembers, ALL_WAKEABLE].map((member) => [member.mention_token.toLocaleLowerCase(), member])),
     [roomMembers],
   );
-  const draftTokens = useMemo(() => tokensIn(draft), [draft]);
+  const draftTokens = useMemo(() => tokensIn(draft, memberTokens.keys()), [draft, memberTokens]);
   const selectedMembers = useMemo(() => {
+    if (draftTokens.some((token) => token.toLocaleLowerCase() === ALL_WAKEABLE.mention_token)) return mentionable;
     const byToken = new Map(mentionable.map((member) => [member.mention_token.toLocaleLowerCase(), member]));
     const seen = new Set<string>();
     return draftTokens.flatMap((token) => {
@@ -96,7 +113,7 @@ export function AgentRoomMode({
     [draftTokens, memberTokens],
   );
   const mentionTrigger = useMemo(() => {
-    const match = /(?:^|\s)@([\w-]*)$/.exec(draft);
+    const match = /(?<![^\s(\[{])@([^\s,;:!?()[\]{}]*)$/.exec(draft);
     if (!match) return null;
     const at = (match.index ?? 0) + match[0].lastIndexOf("@");
     return { start: at, query: match[1].toLocaleLowerCase() };
@@ -106,7 +123,7 @@ export function AgentRoomMode({
     const selectedBeforeTrigger = new Set(
       tokensIn(draft.slice(0, mentionTrigger.start)).map((token) => token.toLocaleLowerCase()),
     );
-    return mentionable.filter(
+    return [...mentionable, ALL_WAKEABLE].filter(
       (member) =>
         !selectedBeforeTrigger.has(member.mention_token.toLocaleLowerCase()) &&
         (member.display_name.toLocaleLowerCase().includes(mentionTrigger.query) ||
@@ -213,16 +230,24 @@ export function AgentRoomMode({
                   >
                     <span className="flr__who">
                       <span className="flr__name">{member.display_name}</span>
+                      {member.mention_token.slice(1).toLocaleLowerCase() !== member.display_name.toLocaleLowerCase() && (
+                        <span className="flr-room__member-token">{member.mention_token}</span>
+                      )}
                       <span className="flr__meta">{member.role} · {member.host}</span>
-                      <span className="flr-room__member-state">Mention enabled</span>
+                      <span className="flr-room__member-state">Wakeable as {member.mention_token}</span>
                     </span>
                   </button>
                 ) : (
                   <div className="flr__member">
                     <div className="flr__who">
                       <span className="flr__name">{member.display_name}</span>
+                      {member.mention_token.slice(1).toLocaleLowerCase() !== member.display_name.toLocaleLowerCase() && (
+                        <span className="flr-room__member-token">{member.mention_token}</span>
+                      )}
                       <span className="flr__meta">{member.role} · {member.host}</span>
-                      <span className="flr-room__member-state">Room member</span>
+                      <span className="flr-room__member-state">
+                        {member.mentionable ? `Wakeable as ${member.mention_token}` : "Member only"}
+                      </span>
                     </div>
                   </div>
                 )}

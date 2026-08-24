@@ -537,7 +537,17 @@ test("Rooms member click inserts an exact mention and explains who will wake", a
   await expect(composer).toBeFocused();
   await expect(room.getByText("Will notify Hermes", { exact: true })).toBeVisible();
   await expect(room.locator(".flr__roster .flr__dot")).toHaveCount(0);
-  await expect(room.getByText("Mention enabled", { exact: true })).toHaveCount(2);
+  const pla = room.getByRole("listitem").filter({ hasText: "protoLabs Agent" });
+  await expect(pla.getByText("@PLA", { exact: true })).toBeVisible();
+  await expect(pla.getByText("Wakeable as @PLA", { exact: true })).toBeVisible();
+  await expect(room.getByText("Member only", { exact: true })).toHaveCount(1);
+
+  await composer.fill("@all suggestions?");
+  await expect(room.getByText("Will notify Hermes, Headroom, protoLabs Agent", { exact: true })).toBeVisible();
+
+  await composer.fill("Unknown @all.foo");
+  await expect(room.getByRole("alert")).toContainText("Unknown agent @all.foo");
+  await expect(room.getByText(/Will notify/)).toHaveCount(0);
 });
 
 test("Rooms composer offers accessible multi-mention suggestions and blocks unknown names", async ({ page }) => {
@@ -549,6 +559,7 @@ test("Rooms composer offers accessible multi-mention suggestions and blocks unkn
 
   await composer.fill("@");
   const suggestions = room.getByRole("listbox", { name: "Mention an agent" });
+  await expect(suggestions.getByRole("option", { name: "All wakeable agents" })).toBeVisible();
   await expect(suggestions.getByRole("option", { name: "Hermes" })).toBeVisible();
   await expect(suggestions.getByRole("option", { name: "Headroom" })).toBeVisible();
 
@@ -691,6 +702,9 @@ test("Rooms starts fresh non-destructively and archives or restores a room", asy
   await room.getByRole("dialog", { name: "Archive room" }).getByRole("button", { name: "Archive" }).click();
   await expect(room.getByText("Archived room — restore to post", { exact: true })).toBeVisible();
   await expect(room.getByRole("textbox", { name: "Room message" })).toHaveCount(0);
+  await expect(room.getByText("Wakeable as @Hermes", { exact: true })).toBeVisible();
+  await expect(room.getByText("Member only", { exact: true })).toHaveCount(2);
+  await expect(room.getByRole("button", { name: "Mention Hermes" })).toHaveCount(0);
 
   await room.getByRole("button", { name: /Switch room, current:/ }).click();
   await room.getByRole("dialog", { name: "Room switcher" }).getByRole("button", { name: "Archived" }).click();

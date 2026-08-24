@@ -287,6 +287,11 @@ function agentRoomFor(req) {
         { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true, mentionable: false },
         { principal: "hermes", kind: "agent", display_name: "Hermes", role: "member", mention_token: "@Hermes", host: "s1", can_post: true, can_mention: true, mentionable: true },
         { principal: "headroom", kind: "agent", display_name: "Headroom", role: "member", mention_token: "@Headroom", host: "s1", can_post: true, can_mention: true, mentionable: true },
+        { principal: "pla", kind: "agent", display_name: "protoLabs Agent", role: "member", mention_token: "@PLA", host: "pc1", can_post: true, can_mention: true, mentionable: true },
+      ] : scope === "multi-room" ? [
+        { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true, mentionable: false },
+        { principal: "pc1", kind: "host", display_name: "PC1", role: "member", mention_token: "@PC1", host: "pc1", can_post: true, can_mention: false, mentionable: false },
+        { principal: "hermes", kind: "agent", display_name: "Hermes", role: "member", mention_token: "@Hermes", host: "s1", can_post: true, can_mention: true, mentionable: true },
       ] : [
         { principal: "dennis", kind: "human", display_name: "Dennis", role: "owner", mention_token: "@Dennis", host: "operator", can_post: true, can_mention: true },
         { principal: "pc1", kind: "host", display_name: "PC1", role: "member", mention_token: "@PC1", host: "pc1", can_post: true, can_mention: false },
