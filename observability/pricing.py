@@ -5,37 +5,70 @@ per-call cost. Best-effort: an unknown model resolves by substring match (gatewa
 aliases like ``anthropic/claude-opus-4-8``), else falls back to the ``default``
 rate. Never raises.
 
-``costUsd`` here bills ``input_tokens`` + ``output_tokens`` at the base rates —
-the portion every consumer agrees on. Prompt-cache tokens are captured + emitted
-separately (so the cache-hit ratio + savings are *visible*), but folding a
-cache discount into ``costUsd`` is deferred until the gateway's cache-token
-semantics are validated end-to-end (different gateways disagree on whether
-``input_tokens`` already includes cached reads). See ADR 0006.
+``costUsd`` bills the three input components at their own rates — full price for
+uncached prompt tokens, ~10% for cache reads, ~125% for cache writes — plus
+output at the output rate (#3003). The cache discount used to be deferred here
+"until the gateway's cache-token semantics are validated end-to-end". They now
+are: gateways do disagree at the raw provider layer, but LangChain reconciles
+them before ``usage_metadata`` reaches us, and that is the only shape callers
+pass. See ADR 0006 Slice 4.
 """
 
 from __future__ import annotations
 
-# USD per token, (input, output).
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def _per_mtok(inp: float, out: float) -> dict[str, float]:
+    """A rate written the way vendors publish it — USD per MILLION tokens — stored
+    as USD per token (#3002).
+
+    The table below used to be hand-written in per-token scientific notation, where
+    a stale entry is invisible: ``0.000015`` and ``0.000005`` differ by one glyph
+    but by 3x in the cost column, and nothing on the line says which vendor number
+    it was meant to be. Writing ``_per_mtok(5, 25)`` makes an entry checkable
+    against a published price list at a glance, which is what stops the next drift.
+    """
+    return {"input": inp / 1_000_000, "output": out / 1_000_000}
+
+
+# USD per MILLION tokens, (input, output) — see `_per_mtok`. Current Anthropic
+# first-party rates; partner platforms (Bedrock / Vertex) price separately and are
+# not modelled here.
 MODEL_RATES: dict[str, dict[str, float]] = {
-    "claude-opus-4-8": {"input": 0.000015, "output": 0.000075},
-    "claude-opus-4-6": {"input": 0.000015, "output": 0.000075},
-    "claude-sonnet-4-6": {"input": 0.000003, "output": 0.000015},
-    "claude-haiku-4-5": {"input": 0.00000025, "output": 0.00000125},
-    "claude-haiku-4-5-20251001": {"input": 0.00000025, "output": 0.00000125},
-    "gpt-4o": {"input": 0.0000025, "output": 0.00001},
-    "gpt-4o-mini": {"input": 0.00000015, "output": 0.0000006},
+    # Claude 5 family.
+    "claude-fable-5": _per_mtok(10, 50),
+    "claude-mythos-5": _per_mtok(10, 50),
+    "claude-opus-5": _per_mtok(5, 25),
+    "claude-sonnet-5": _per_mtok(3, 15),
+    # Claude 4.x. Opus 4.6 dropped to the $5/$25 tier — the pre-4.6 $15/$75 rate
+    # that used to sit here billed every Opus turn at 3x (#3002).
+    "claude-opus-4-8": _per_mtok(5, 25),
+    "claude-opus-4-7": _per_mtok(5, 25),
+    "claude-opus-4-6": _per_mtok(5, 25),
+    "claude-sonnet-4-6": _per_mtok(3, 15),
+    "claude-haiku-4-5": _per_mtok(1, 5),
+    "gpt-4o": _per_mtok(2.5, 10),
+    "gpt-4o-mini": _per_mtok(0.15, 0.6),
     # protolabs/* are self-hosted vLLM (RTX 6000 Blackwell) — no per-token API
     # spend, so these are a low nominal local-compute estimate (trackable, not
     # billing) rather than the Claude-ish `default` which would overstate cost
     # ~30x. Substring match covers the gateway aliases (protolabs/reasoning →
     # protolabs/smart backend, etc.).
-    "protolabs/reasoning": {"input": 0.0000001, "output": 0.0000004},
-    "protolabs/smart": {"input": 0.0000001, "output": 0.0000004},
-    "protolabs/fast": {"input": 0.00000005, "output": 0.0000002},
-    "protolabs/nano": {"input": 0.00000003, "output": 0.0000001},
-    "protolabs": {"input": 0.0000001, "output": 0.0000004},
-    "default": {"input": 0.000003, "output": 0.000015},
+    "protolabs/reasoning": _per_mtok(0.1, 0.4),
+    "protolabs/smart": _per_mtok(0.1, 0.4),
+    "protolabs/fast": _per_mtok(0.05, 0.2),
+    "protolabs/nano": _per_mtok(0.03, 0.1),
+    "protolabs": _per_mtok(0.1, 0.4),
+    "default": _per_mtok(3, 15),
 }
+
+# Models already reported as unpriced. A miss is a per-TURN event, so warning every
+# time would flood the log for the whole life of the process; warning once per
+# distinct model name is enough to make the gap discoverable (#3002).
+_WARNED_UNKNOWN: set[str] = set()
 
 
 def rate_for(model: str | None) -> dict[str, float]:
@@ -44,29 +77,86 @@ def rate_for(model: str | None) -> dict[str, float]:
     Exact match first, then substring (so a gateway alias like
     ``anthropic/claude-opus-4-8`` or ``claude-opus-4-8-20260115`` still
     resolves), else the ``default`` rate.
+
+    A model that reaches ``default`` logs once (#3002). The fallback is the
+    dangerous direction: an unrecognised model is silently billed at the mid-tier
+    rate, and the models most likely to be missing are the newest and most
+    expensive — which is exactly how Opus 5 and Fable 5 came to be undercounted.
     """
     if not model:
         return MODEL_RATES["default"]
     m = str(model).lower()
     if m in MODEL_RATES:
         return MODEL_RATES[m]
-    # Longest key first so "claude-haiku-4-5-20251001" wins over a shorter key.
+    # Longest key first so a more specific key wins over a shorter prefix of it
+    # (e.g. "claude-opus-4-8" over a hypothetical "claude-opus").
     for key in sorted((k for k in MODEL_RATES if k != "default"), key=len, reverse=True):
         if key in m:
             return MODEL_RATES[key]
+    if m not in _WARNED_UNKNOWN:
+        _WARNED_UNKNOWN.add(m)
+        log.warning(
+            "[pricing] no rate for model %r — billing it at the default rate "
+            "($%.2f/$%.2f per Mtok). Cost telemetry for this model is an estimate; "
+            "add it to observability/pricing.MODEL_RATES.",
+            model,
+            MODEL_RATES["default"]["input"] * 1_000_000,
+            MODEL_RATES["default"]["output"] * 1_000_000,
+        )
     return MODEL_RATES["default"]
 
 
-def cost_usd(model: str | None, usage: dict) -> float:
-    """USD cost for one usage dict ``{input_tokens, output_tokens, ...}``.
+# Prompt-cache multipliers on the INPUT rate. A cached read costs ~10% of what the
+# token would cost uncached; writing a token into the cache costs ~25% MORE than
+# sending it plain, which is what makes caching a bet that pays off on reuse rather
+# than a free lunch. Estimates — the exact figures vary by provider and tier — used
+# to make the cache lever legible in dollars, not to bill anyone (#3003, ADR 0006).
+CACHE_READ_MULTIPLIER = 0.1
+CACHE_CREATION_MULTIPLIER = 1.25
 
-    Billed at base input/output rates (fleet-consistent). Returns a value
-    rounded to 6 decimals; 0.0 for empty usage.
+
+def cost_usd(model: str | None, usage: dict) -> float:
+    """USD cost for one LangChain-shaped usage dict.
+
+    Expects the shape LangChain normalises every provider into, where
+    ``input_tokens`` is *"the sum of all input token types"* and the
+    ``cache_read`` / ``cache_creation`` counts are SUBSETS of it — not additions
+    to it. The three components are split apart here and billed at their own
+    rates: full price for uncached prompt tokens, ~10% for cache reads, ~125% for
+    cache writes.
+
+    Before #3003 the whole of ``input_tokens`` was billed at the full input rate,
+    which overcharged every cached token roughly tenfold. That was not an
+    oversight but a deliberate deferral, "until the gateway's cache-token
+    semantics are validated end-to-end" — the concern being that gateways
+    disagree about whether ``input_tokens`` already includes cached reads. They
+    do disagree, at the raw provider layer; they are reconciled by the time
+    LangChain hands us ``usage_metadata``, which is the only shape any caller
+    here passes. On live stores the dominant model was running a 73% cache-hit
+    ratio, so this was the largest single error in the cost column.
+
+    Accepts a dict whose cache fields use either the telemetry-row names
+    (``cache_read_input_tokens``) or LangChain's nested
+    ``input_token_details``. Returns a value rounded to 6 decimals; 0.0 for empty
+    usage. Never raises.
     """
     rate = rate_for(model)
+    details = usage.get("input_token_details") or {}
+    cache_read = int(usage.get("cache_read_input_tokens", details.get("cache_read", 0)) or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens", details.get("cache_creation", 0)) or 0)
     inp = int(usage.get("input_tokens", 0) or 0)
     out = int(usage.get("output_tokens", 0) or 0)
-    return round(inp * rate["input"] + out * rate["output"], 6)
+    # Clamp rather than trust the arithmetic: a provider that reports cache counts
+    # NOT included in input_tokens (against the documented contract) would
+    # otherwise drive the full-price component negative and refund the turn.
+    uncached = max(0, inp - cache_read - cache_creation)
+    return round(
+        uncached * rate["input"]
+        + cache_read * rate["input"] * CACHE_READ_MULTIPLIER
+        + cache_creation * rate["input"] * CACHE_CREATION_MULTIPLIER
+        + out * rate["output"],
+        6,
+    )
 
 
 # Anthropic prompt-cache reads are billed at ~10% of the input rate, so a cached

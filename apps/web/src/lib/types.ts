@@ -873,6 +873,21 @@ export type ChatMessage = {
    *  shows the server's preview; this lets the card open the FULL report in the document
    *  viewer (fetched by id) instead of forcing a trip to the Activity/Background panel. */
   report?: { jobId: string; title: string };
+  /** Scheduled-task result delivered back to the chat that CREATED the schedule (#2990):
+   *  a fire runs in Activity, but its outcome surfaces here as a ScheduledReportCard (first
+   *  fire) or a compact ScheduledChip (`collapse` — a recurring re-fire). Injected
+   *  display-only by ScheduledWatch from the `scheduler.completed` bus event; never streams. */
+  scheduled?: {
+    jobId: string;
+    firedAt: string;
+    summary: string;
+    status?: "completed" | "failed" | "canceled";
+    /** A recurring re-fire into this same session → render the compact one-line chip. */
+    collapse?: boolean;
+    /** The Activity thread the full turn lives in — the "View full result" target. */
+    activityContext?: string;
+    taskId?: string;
+  };
   /** This turn's token usage + cost (terminal cost-v1 extension metadata). Shown as a small footer
    *  under the answer; absent on user turns and history saved before this shipped. */
   usage?: TurnUsage;
@@ -1035,7 +1050,13 @@ export type TelemetrySummary = {
   p50_duration_ms: number;
   p95_duration_ms: number;
   p99_duration_ms: number;
+  /** Share of RESOLVED turns that succeeded (#3004) — the denominator is
+   *  `resolved`, not `turns`, so a leg parked awaiting a human counts as neither
+   *  a success nor a failure. */
   success_rate: number;
+  /** Turns that reached a success/failure outcome. `turns - resolved` is the
+   *  number of legs parked awaiting a human. Absent on pre-#3004 backends. */
+  resolved?: number;
   cache_hit_ratio: number;
   /** Context-fill series (#2773, ADR 0101 D6) — peak/p95 of per-turn context-window
    *  fill, zero rows excluded. Absent on pre-#2789 backends. */
@@ -1078,6 +1099,10 @@ export type TrajectoryCall = {
 };
 
 export type TelemetryTurn = {
+  /** Stable per-ROW identity (#3001). A HITL park/resume is two rows sharing one
+   *  `task_id`, so `task_id` is not unique and must not be used as a React key.
+   *  Absent only on rows from a pre-#3001 fleet member. */
+  row_id?: number;
   task_id: string;
   session_id: string;
   state: string;
@@ -1382,6 +1407,11 @@ export type DelegateView = {
   // True when any per-row env secret is stored (#2114) — the form shows those rows
   // set-but-masked. The masked env values come back as "***" in the `env` map.
   has_env_secrets?: boolean;
+  /** "host" = fleet-shared (the box's host-config.yaml, hub-managed, every member sees it);
+   *  "agent" = this instance's own entry (ADR 0105). Absent on pre-0105 hosts → agent. */
+  scope?: "host" | "agent";
+  /** This agent-scoped entry hides a same-name fleet-shared one — deleting it reveals that. */
+  shadows_host?: boolean;
   health?: DelegateProbe;
   last_dispatch?: DelegateDispatch;
   [key: string]: unknown;

@@ -213,13 +213,27 @@ def capability_contract_warning(bound_tool_names) -> str | None:
     knowable at once, so the contract is checked against ground truth rather than against
     manifest metadata that can't see a config-gated registration.
 
-    Returns ``None`` for a non-member, a member with no declared contract, or a satisfied
-    one. Deliberately a warning, not a refusal: the operator may have turned a capability
-    off on purpose, and an agent that boots degraded beats one that won't boot.
+    The HOST has the same doctrine problem with no ``workspace.yaml``: the setup wizard
+    installs an archetype's bundle onto the host itself, so its ``requires_tools`` is
+    recorded in ``<config_dir>/archetype-contract.yaml`` instead (``graph.config_io
+    .write_host_archetype``, written by ``POST /api/config/setup``). A workspace record
+    wins when present; the host record is the fallback, so a wizard-installed Project
+    Manager gets the same banner a member does. (Between that finish and the bundle
+    install completing, the contract can transiently read as unmet — the banner
+    self-clears on the install's hot-reload.)
+
+    Returns ``None`` for an instance with no record of either kind, one with no declared
+    contract, or a satisfied one. Deliberately a warning, not a refusal: the operator may
+    have turned a capability off on purpose, and an agent that boots degraded beats one
+    that won't boot.
     """
     from infra.paths import instance_paths
 
     rec = _read_record(instance_paths().instance_root)
+    if rec is None:
+        from graph.config_io import read_host_archetype
+
+        rec = read_host_archetype()
     declared = [str(t) for t in (rec or {}).get("requires_tools") or []]
     if not declared:
         return None
@@ -937,12 +951,21 @@ def copy_host_delegates(cfg: Path, lock: Path, values: Mapping[str, object] | No
     member_list = doc.get("delegates")
     if not isinstance(member_list, list):
         member_list = []
+    # Fleet-shared (host-layer) entries are INHERITED by every member live (ADR 0105)
+    # — nothing to copy, and no snapshot to drift. They still count as "travelled".
+    from graph.config_io import read_host_delegates
+
+    shared = {str(e.get("name") or "") for e in read_host_delegates()}
     copied: list[str] = []
     secret_updates: dict[str, str] = {}
+    wrote_entry = False
     for name in wanted:
         entry = host_entries.get(name)
         if entry is None:
+            if name in shared:
+                copied.append(name)  # reachable through the box layer, not copied
             continue
+        wrote_entry = True
         member_list = [e for e in member_list if not (isinstance(e, dict) and str(e.get("name") or "") == name)]
         member_list.append(_copy.deepcopy(entry))
         # Structured match only — the delegates store keys env secrets ``<name>.env.<VAR>``
@@ -956,6 +979,8 @@ def copy_host_delegates(cfg: Path, lock: Path, values: Mapping[str, object] | No
         copied.append(name)
     if not copied:
         return []
+    if not wrote_entry:
+        return copied  # every pick was fleet-shared — nothing to write
     doc["delegates"] = member_list
     save_yaml_doc(doc, cfg)
     if secret_updates:

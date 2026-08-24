@@ -43,12 +43,97 @@ def test_record_and_recent(store):
     assert recent[0]["cost_usd"] == 0.03
 
 
-def test_record_upserts_by_task_id(store):
+def test_record_keeps_every_leg_of_a_task(store):
+    # #3001: one row per turn LEG, not per task. `task_id` used to be the PRIMARY
+    # KEY with an upsert, so the second record() silently replaced the first.
     store.record(_row("t1", cost_usd=0.01))
-    store.record(_row("t1", cost_usd=0.05))  # same task_id → update, not dup
+    store.record(_row("t1", cost_usd=0.05))
     recent = store.recent()
-    assert len(recent) == 1
-    assert recent[0]["cost_usd"] == 0.05
+    assert len(recent) == 2
+    assert sorted(r["cost_usd"] for r in recent) == [0.01, 0.05]
+
+
+def test_rows_carry_a_stable_surrogate_id(store):
+    # The console keys its table rows on this. `task_id` cannot serve — two legs of
+    # one HITL turn share it, and duplicate React keys break rendering (#3001).
+    store.record(_row("t1"))
+    store.record(_row("t1"))
+    ids = [r["row_id"] for r in store.recent()]
+    assert len(set(ids)) == 2 and all(isinstance(i, int) for i in ids)
+
+
+def test_hitl_park_and_resume_are_two_rows_that_sum(store):
+    """#3001 / #2943 — the audit's reproduction, as a regression test.
+
+    A parked leg and the resume that follows carry the SAME A2A task id. Both are
+    real turns with real spend, and the park leg is where an approval-gated turn
+    does all its tool work — so collapsing them lost the tool calls entirely.
+    """
+    store.record(
+        _row(
+            "task-1",
+            state="input_required",
+            success=None,
+            input_tokens=40,
+            output_tokens=5,
+            total_tokens=45,
+            cost_usd=0.001,
+            tool_calls=2,
+            ended_at="2026-06-01T00:00:01+00:00",
+        )
+    )
+    store.record(
+        _row(
+            "task-1",
+            state="completed",
+            success=1,
+            input_tokens=70,
+            output_tokens=30,
+            total_tokens=100,
+            cost_usd=0.004,
+            tool_calls=0,
+            ended_at="2026-06-01T00:00:03+00:00",
+        )
+    )
+    assert len(store.recent()) == 2
+    s = store.summary()
+    assert s["input_tokens"] == 110  # not 70 — the park leg's prompt tokens survive
+    assert s["cost_usd"] == 0.005  # not 0.004
+    assert s["tool_calls"] == 2  # not 0 — every pre-approval tool call was erased
+
+
+def test_pre_3001_store_migrates_without_losing_rows(tmp_path):
+    # The pre-#3001 shape had `task_id TEXT PRIMARY KEY`; SQLite cannot alter a
+    # primary key, so opening such a store rebuilds the table. Existing history
+    # must survive that rebuild, and the new per-leg semantics must apply after it.
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    cols = (
+        "task_id TEXT PRIMARY KEY, session_id TEXT, state TEXT, success INTEGER, model TEXT, "
+        "models TEXT, input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER, "
+        "cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, cost_usd REAL, "
+        "duration_ms INTEGER, llm_calls INTEGER, tool_calls INTEGER, created_at TEXT, ended_at TEXT"
+    )
+    db = sqlite3.connect(path)
+    db.execute(f"CREATE TABLE turns ({cols})")
+    db.execute(
+        "INSERT INTO turns (task_id, state, model, input_tokens, cost_usd, ended_at) "
+        "VALUES ('legacy-1', 'completed', 'm', 11, 0.02, '2026-05-01T00:00:00+00:00')"
+    )
+    db.commit()
+    db.close()
+
+    store = TelemetryStore(path)
+    rows = store.recent()
+    assert [r["task_id"] for r in rows] == ["legacy-1"]  # history preserved
+    assert rows[0]["input_tokens"] == 11 and rows[0]["cost_usd"] == 0.02
+    assert isinstance(rows[0]["row_id"], int)  # backfilled a surrogate id
+
+    # Re-opening is a no-op, and the new semantics hold on the migrated store.
+    TelemetryStore(path)
+    store.record(_row("legacy-1", cost_usd=0.07))
+    assert len(store.recent()) == 2
 
 
 def test_record_persists_soul_rev(store):
@@ -103,13 +188,23 @@ def test_context_tokens_roundtrips_and_migrates(tmp_path):
 
 
 def test_recent_derives_per_turn_cache_hit_ratio(store):
-    # #2773: cached reads / prompt tokens, derived per row — 400/1000 from the
-    # fixture; a zero-input row reads 0.0, never a ZeroDivisionError.
-    store.record(_row("t1"))
+    # #2773 / #3003: cached reads / the WHOLE prompt. The three token columns are
+    # disjoint as of #3003 (`input_tokens` is the uncached share), so the
+    # denominator is input + cache_read + cache_creation — here 600 + 400 = 1000.
+    # A zero-prompt row reads 0.0, never a ZeroDivisionError.
+    store.record(_row("t1", input_tokens=600, cache_read_input_tokens=400))
     store.record(_row("t2", input_tokens=0, cache_read_input_tokens=0, ended_at="2026-06-01T00:02:00+00:00"))
     recent = {r["task_id"]: r for r in store.recent()}
     assert recent["t1"]["cache_hit_ratio"] == 0.4
     assert recent["t2"]["cache_hit_ratio"] == 0.0
+
+
+def test_cache_hit_ratio_counts_cache_writes_in_the_prompt(store):
+    # A cache WRITE is prompt the turn actually sent (at 1.25x), so it belongs in
+    # the denominator — otherwise the first turn of a cached thread reports a
+    # hit ratio computed against a prompt far smaller than the one it paid for.
+    store.record(_row("t1", input_tokens=100, cache_read_input_tokens=300, cache_creation_input_tokens=600))
+    assert store.recent()[0]["cache_hit_ratio"] == 0.3  # 300 / (100 + 300 + 600)
 
 
 def test_summary_context_fill_stats_exclude_zero_rows(store):
@@ -166,8 +261,8 @@ def test_summary_aggregates(store):
     assert s["cost_usd"] == 0.06
     assert s["input_tokens"] == 4000
     assert s["success_rate"] == 0.5
-    # cache-hit ratio = cached reads / total input = 500 / 4000
-    assert s["cache_hit_ratio"] == round(500 / 4000, 4)
+    # cache-hit ratio = cached reads / the whole prompt = 500 / (4000 + 500) (#3003)
+    assert s["cache_hit_ratio"] == round(500 / 4500, 4)
     assert s["p50_duration_ms"] in (1000, 3000)
     assert s["p95_duration_ms"] == 3000
     assert s["p99_duration_ms"] == 3000
@@ -351,9 +446,13 @@ def test_outliers_empty_store(store):
 def test_cache_read_savings_usd():
     from observability import pricing
 
-    # opus input rate 0.000015, discount 0.9 → 10000 cached reads save ~0.135
+    # A cached read saves `CACHE_READ_DISCOUNT` of what that token would otherwise
+    # cost at the model's input rate. Derived from the table, not a hardcoded rate:
+    # this assertion previously pinned the literal 0.000015 and so had to be edited
+    # in lockstep with every price correction (#3002).
+    rate = pricing.rate_for("claude-opus-4-8")["input"]
     saved = pricing.cache_read_savings_usd("claude-opus-4-8", 10000)
-    assert saved == round(10000 * 0.000015 * 0.9, 6)
+    assert saved == round(10000 * rate * pricing.CACHE_READ_DISCOUNT, 6)
     assert pricing.cache_read_savings_usd("claude-opus-4-8", 0) == 0.0
 
 
@@ -366,11 +465,37 @@ def test_median_helper():
     assert _median([3, 1, 2]) == 2
 
 
+@pytest.mark.parametrize(
+    ("n", "pct", "expected"),
+    [
+        # Nearest rank over 1..n is ceil(pct/100 * n). The old form sat one rank
+        # high, but only for some (n, pct) pairs — banker's rounding flipped the
+        # error with the parity of the half-value, which is why a permissive
+        # `in (5, 6)` assertion here let it survive (#3005).
+        (10, 50, 5),  # was 6
+        (10, 95, 10),
+        (20, 95, 19),  # was 20
+        (100, 50, 50),  # was already correct — the parity trap
+        (100, 95, 95),  # was 96
+        (100, 99, 99),  # was 100 — p99 returned the MAXIMUM
+        (1, 50, 1),
+        (1, 99, 1),
+        (3, 50, 2),
+    ],
+)
+def test_percentile_is_nearest_rank(n, pct, expected):
+    assert _percentile(list(range(1, n + 1)), pct) == expected
+
+
+def test_percentile_never_exceeds_the_sample(store):
+    # p99 must be a percentile, not "the worst turn we saw".
+    values = list(range(1, 101))
+    assert _percentile(values, 99) < max(values)
+
+
 def test_percentile_helper():
     assert _percentile([], 50) == 0
     assert _percentile([10], 95) == 10
-    assert _percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50) in (5, 6)
-    assert _percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95) == 10
 
 
 @pytest.fixture
@@ -668,3 +793,81 @@ def test_retention_config_default_is_bounded():
     from graph.config import LangGraphConfig
 
     assert LangGraphConfig().telemetry_retention_days == 90  # guardrail on by default
+
+
+def test_park_and_resume_write_two_rows_through_the_real_writer(store, telemetry_server):
+    """#3001 — the same park/resume, driven through ``_record_a2a_telemetry``.
+
+    The #2943 regression test asserts the two ``TurnOutcome`` objects the terminal
+    hook receives and stops there, so it stayed green while the store collapsed
+    them. This asserts the durable end: the writer is fed both legs exactly as the
+    executor feeds it, and both must survive.
+    """
+    server = telemetry_server
+    common = dict(context_id="sess-hitl", text="", models=["claude-opus-4-8"])
+    server._record_a2a_telemetry(
+        _outcome(
+            task_id="task-hitl",
+            state="input_required",
+            usage={"input_tokens": 40, "output_tokens": 5},
+            cost_usd=0.001,
+            duration_ms=900,
+            llm_calls=1,
+            tool_calls=2,
+            **common,
+        )
+    )
+    server._record_a2a_telemetry(
+        _outcome(
+            task_id="task-hitl",
+            state="completed",
+            usage={"input_tokens": 70, "output_tokens": 30},
+            cost_usd=0.004,
+            duration_ms=1200,
+            llm_calls=1,
+            tool_calls=0,
+            **common,
+        )
+    )
+
+    rows = store.recent()
+    assert len(rows) == 2
+    assert {r["state"] for r in rows} == {"input_required", "completed"}
+    assert all(r["task_id"] == "task-hitl" for r in rows)  # still joinable to the task
+
+    s = store.summary()
+    assert (s["input_tokens"], s["output_tokens"]) == (110, 35)
+    assert s["cost_usd"] == 0.005
+    assert s["tool_calls"] == 2
+
+
+def test_success_rate_excludes_turns_awaiting_a_human(store):
+    """#3004 — a parked leg is neither a success nor a failure.
+
+    #2943 wrote `success = NULL` for a parked leg so it would stay out of
+    `SUM(success)`, but the denominator was `COUNT(*)`, which counts it. Any agent
+    using approvals therefore showed a permanently depressed success rate — the
+    metric watched for "is this agent healthy" instead tracked how often it asked.
+    """
+    store.record(_row("t1", state="completed", success=1))
+    store.record(_row("t2", state="input_required", success=None))
+    s = store.summary()
+    assert s["turns"] == 2  # every recorded row
+    assert s["resolved"] == 1  # ...but only one of them resolved
+    assert s["success_rate"] == 1.0  # not 0.5 — nothing failed
+
+
+def test_success_rate_still_counts_real_failures(store):
+    store.record(_row("t1", state="completed", success=1))
+    store.record(_row("t2", state="failed", success=0))
+    store.record(_row("t3", state="input_required", success=None))
+    s = store.summary()
+    assert (s["turns"], s["resolved"]) == (3, 2)
+    assert s["success_rate"] == 0.5
+
+
+def test_success_rate_is_zero_when_nothing_has_resolved(store):
+    # All parked: no basis for a rate. Must not divide by zero.
+    store.record(_row("t1", state="input_required", success=None))
+    s = store.summary()
+    assert s["resolved"] == 0 and s["success_rate"] == 0.0
