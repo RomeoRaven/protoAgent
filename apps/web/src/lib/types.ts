@@ -1467,6 +1467,13 @@ export type AgentRoomMention = {
   created_at: string;
   updated_at: string;
 };
+export type AgentRoomMemberProfile = {
+  summary: string;
+  capabilities: string[];
+  best_for: string[];
+  boundaries: string[];
+  fallback: string;
+};
 export type AgentRoomMember = {
   principal: string;
   kind: string;
@@ -1478,6 +1485,7 @@ export type AgentRoomMember = {
   can_mention: boolean;
   /** True only when this member has a configured local Room dispatch target. */
   mentionable?: boolean;
+  profile?: AgentRoomMemberProfile;
 };
 export type AgentRoomSyncResult = {
   messages: AgentRoomMessage[];

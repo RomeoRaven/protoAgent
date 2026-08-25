@@ -18,6 +18,51 @@ const ALL_WAKEABLE: AgentRoomMember = {
   mentionable: true,
 };
 
+export function groupRoomMembers(members: AgentRoomMember[]) {
+  return {
+    wakeableAgents: members.filter((member) => member.kind === "agent" && member.mentionable),
+    otherMembers: members.filter((member) => member.kind !== "agent" || !member.mentionable),
+  };
+}
+
+export function getMemberAction(member: AgentRoomMember, roomStatus: string) {
+  if (roomStatus === "archived") {
+    return { canWake: false, label: null, state: "Room archived — wake-up unavailable" };
+  }
+  if (member.kind !== "agent" || !member.mentionable) {
+    return { canWake: false, label: null, state: "Not configured for wake-up" };
+  }
+  return {
+    canWake: true,
+    label: `Wake ${member.mention_token}`,
+    state: `Configured to wake as ${member.mention_token}`,
+  };
+}
+
+const profileList = (values: string[] | undefined, fallback: string) => {
+  const listed = values?.map((value) => value.trim()).filter(Boolean) ?? [];
+  return listed.length ? listed : [fallback];
+};
+
+export function buildMemberProfile(member: AgentRoomMember) {
+  const profile = member.profile;
+  return {
+    purpose: profile?.summary.trim() || `${member.display_name} serves this room in the ${member.role} role.`,
+    capabilities: profileList(profile?.capabilities, "No capabilities listed."),
+    bestFor: profileList(profile?.best_for, "No best-fit work listed."),
+    boundaries: profileList(profile?.boundaries, "No boundaries listed."),
+    fallback: profile?.fallback.trim() || "No fallback guidance listed.",
+    host: member.host,
+    policy: [
+      member.can_post ? "Can post to the room" : "Cannot post to the room",
+      member.can_mention ? "Can mention room members" : "Cannot mention room members",
+      member.kind === "agent" && member.mentionable
+        ? `Wakeable as ${member.mention_token}`
+        : "Not wakeable from this room",
+    ],
+  };
+}
+
 export function tokensIn(text: string, knownTokens: Iterable<string> = []): string[] {
   const known = new Map(Array.from(knownTokens, (token) => [token.toLocaleLowerCase(), token]));
   return Array.from(text.matchAll(ROOM_TOKEN), (match) => {
@@ -25,6 +70,78 @@ export function tokensIn(text: string, knownTokens: Iterable<string> = []): stri
     while (token.endsWith(".") && !known.has(token.toLocaleLowerCase())) token = token.slice(0, -1);
     return known.get(token.toLocaleLowerCase()) ?? token;
   });
+}
+
+export function insertExactMention(draft: string, mentionToken: string): string {
+  const exact = tokensIn(draft, [mentionToken]).some(
+    (token) => token.toLocaleLowerCase() === mentionToken.toLocaleLowerCase(),
+  );
+  if (exact) return draft;
+  const prefix = draft.trimEnd();
+  return `${prefix}${prefix ? " " : ""}${mentionToken} `;
+}
+
+function MemberProfileRow({
+  member,
+  roomStatus,
+  onWake,
+}: {
+  member: AgentRoomMember;
+  roomStatus: "active" | "archived";
+  onWake: (member: AgentRoomMember) => void;
+}) {
+  const profile = buildMemberProfile(member);
+  const action = getMemberAction(member, roomStatus);
+  const tokenDiffers = member.mention_token.slice(1).toLocaleLowerCase() !== member.display_name.toLocaleLowerCase();
+
+  return (
+    <details className="flr-room__member-profile">
+      <summary className="flr__member flr-room__member-summary">
+        <span className="flr__who">
+          <span className="flr__name">{member.display_name}</span>
+          {tokenDiffers && <span className="flr-room__member-token">{member.mention_token}</span>}
+          <span className="flr__meta">{member.role} · {member.host}</span>
+          <span className="flr-room__member-state">{action.state}</span>
+        </span>
+        <span className="flr-room__profile-cue" aria-hidden="true">Profile</span>
+      </summary>
+      <div className="flr-room__profile-body">
+        <section className="flr-room__profile-purpose" aria-label="Purpose">
+          <span>Purpose</span>
+          <p>{profile.purpose}</p>
+        </section>
+        <div className="flr-room__profile-columns">
+          <section>
+            <h3>Capabilities</h3>
+            <ul>{profile.capabilities.map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+          <section>
+            <h3>Best for</h3>
+            <ul>{profile.bestFor.map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+          <section>
+            <h3>Boundaries</h3>
+            <ul>{profile.boundaries.map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+        </div>
+        <section className="flr-room__profile-fallback">
+          <h3>Fallback</h3>
+          <p>{profile.fallback}</p>
+        </section>
+        <dl className="flr-room__profile-policy">
+          <div><dt>Host</dt><dd>{profile.host}</dd></div>
+          <div><dt>Policy</dt><dd>{profile.policy.join(" · ")}</dd></div>
+        </dl>
+        {action.canWake && action.label ? (
+          <button className="flr-room__wake" type="button" onClick={() => onWake(member)}>
+            {action.label}
+          </button>
+        ) : (
+          <p className="flr-room__wake-state" role="status">{action.state}</p>
+        )}
+      </div>
+    </details>
+  );
 }
 
 export function AgentRoomMode({
@@ -91,6 +208,7 @@ export function AgentRoomMode({
     [members.data],
   );
   const roomMembers = members.data?.result.members ?? [];
+  const memberGroups = useMemo(() => groupRoomMembers(roomMembers), [roomMembers]);
   const mentionable = useMemo(() => roomMembers.filter((member) => member.mentionable), [roomMembers]);
   const memberTokens = useMemo(
     () => new Map([...roomMembers, ALL_WAKEABLE].map((member) => [member.mention_token.toLocaleLowerCase(), member])),
@@ -178,14 +296,7 @@ export function AgentRoomMode({
   };
 
   const insertMemberMention = (member: AgentRoomMember) => {
-    setDraft((current) => {
-      const exact = tokensIn(current).some(
-        (token) => token.toLocaleLowerCase() === member.mention_token.toLocaleLowerCase(),
-      );
-      if (exact) return current;
-      const prefix = current.trimEnd();
-      return `${prefix}${prefix ? " " : ""}${member.mention_token} `;
-    });
+    setDraft((current) => insertExactMention(current, member.mention_token));
     setSuggestionsClosed(false);
     focusComposer();
   };
@@ -218,41 +329,37 @@ export function AgentRoomMode({
             <h2>Members</h2>
             <span className="flr__count">{members.data?.result.members.length ?? 0}</span>
           </div>
-          <div className="flr__list" role="list" aria-label="Room members">
-            {roomMembers.map((member) => (
-              <div key={member.principal} role="listitem">
-                {member.mentionable && roomStatus === "active" ? (
-                  <button
-                    className="flr__member flr-room__member-action"
-                    type="button"
-                    aria-label={`Mention ${member.display_name}`}
-                    onClick={() => insertMemberMention(member)}
-                  >
-                    <span className="flr__who">
-                      <span className="flr__name">{member.display_name}</span>
-                      {member.mention_token.slice(1).toLocaleLowerCase() !== member.display_name.toLocaleLowerCase() && (
-                        <span className="flr-room__member-token">{member.mention_token}</span>
-                      )}
-                      <span className="flr__meta">{member.role} · {member.host}</span>
-                      <span className="flr-room__member-state">Wakeable as {member.mention_token}</span>
-                    </span>
-                  </button>
-                ) : (
-                  <div className="flr__member">
-                    <div className="flr__who">
-                      <span className="flr__name">{member.display_name}</span>
-                      {member.mention_token.slice(1).toLocaleLowerCase() !== member.display_name.toLocaleLowerCase() && (
-                        <span className="flr-room__member-token">{member.mention_token}</span>
-                      )}
-                      <span className="flr__meta">{member.role} · {member.host}</span>
-                      <span className="flr-room__member-state">
-                        {member.mentionable ? `Wakeable as ${member.mention_token}` : "Member only"}
-                      </span>
+          <div className="flr__list" aria-label="Room members">
+            <section className="flr-room__member-group" aria-labelledby="wakeable-agent-members">
+              <h3 id="wakeable-agent-members">
+                <span>Wakeable agents</span>
+                <span>{memberGroups.wakeableAgents.length}</span>
+              </h3>
+              {memberGroups.wakeableAgents.length ? (
+                <div role="list">
+                  {memberGroups.wakeableAgents.map((member) => (
+                    <div key={member.principal} role="listitem">
+                      <MemberProfileRow member={member} roomStatus={roomStatus} onWake={insertMemberMention} />
                     </div>
-                  </div>
-                )}
-              </div>
-            ))}
+                  ))}
+                </div>
+              ) : <p className="flr-room__member-empty">No agents can be woken from this room.</p>}
+            </section>
+            <section className="flr-room__member-group" aria-labelledby="other-room-members">
+              <h3 id="other-room-members">
+                <span>Other members</span>
+                <span>{memberGroups.otherMembers.length}</span>
+              </h3>
+              {memberGroups.otherMembers.length ? (
+                <div role="list">
+                  {memberGroups.otherMembers.map((member) => (
+                    <div key={member.principal} role="listitem">
+                      <MemberProfileRow member={member} roomStatus={roomStatus} onWake={insertMemberMention} />
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="flr-room__member-empty">No other members.</p>}
+            </section>
           </div>
         </div>
 
