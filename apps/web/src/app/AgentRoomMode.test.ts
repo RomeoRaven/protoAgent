@@ -78,7 +78,7 @@ describe("Agent Room member actions", () => {
     expect(getMemberAction(member(), "active")).toEqual({
       canWake: true,
       label: "Wake @Researcher",
-      state: "Configured to wake as @Researcher",
+      state: "Wake as @Researcher",
     });
     expect(getMemberAction(member({ mentionable: false }), "active")).toEqual({
       canWake: false,

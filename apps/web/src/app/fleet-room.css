@@ -113,6 +113,8 @@
 }
 .flr-room__member-action {
   width: 100%;
+  padding: 0;
+  border: 0;
   color: inherit;
   background: none;
   font: inherit;
@@ -159,25 +161,27 @@
 }
 .flr-room__member-summary {
   grid-template-columns: minmax(0, 1fr) auto;
-  list-style: none;
-  cursor: pointer;
-}
-.flr-room__member-summary::-webkit-details-marker {
-  display: none;
 }
 .flr-room__member-summary:hover {
   background: var(--pl-color-bg-hover);
 }
+.flr-room__member-identity {
+  min-width: 0;
+}
 .flr-room__profile-cue {
+  padding: 4px 2px;
+  border: 0;
   color: var(--pl-color-fg-subtle);
+  background: none;
   font: 500 9.5px/1 var(--pl-font-mono, ui-monospace, "SF Mono", Menlo, monospace);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  cursor: pointer;
 }
 .flr-room__profile-cue::after {
   content: " +";
 }
-.flr-room__member-profile[open] .flr-room__profile-cue::after {
+.flr-room__profile-cue[aria-expanded="true"]::after {
   content: " −";
 }
 .flr-room__profile-body {
@@ -581,7 +585,7 @@
 /* focus visibility (keyboard) */
 .flr__who:focus-visible,
 .flr-room__member-action:focus-visible,
-.flr-room__member-summary:focus-visible,
+.flr-room__profile-cue:focus-visible,
 .flr-room__wake:focus-visible,
 .flr-room__mention-option:focus-visible,
 .flr__icon:focus-visible,
