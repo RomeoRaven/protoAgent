@@ -327,18 +327,18 @@ async def test_matching_a2a_handler_bypasses_model_and_completes_task():
         model_calls.append(text)
         yield ("done", "model should not run")
 
-    async def room_handler(context):
-        assert context.get_user_input() == "sync room"
-        return [_text_part("room handled")]
+    async def plugin_handler(context):
+        assert context.get_user_input() == "run plugin control"
+        return [_text_part("plugin handled")]
 
-    app = _build_app(stream, a2a_handlers={"agent-room-v1": room_handler})
+    app = _build_app(stream, a2a_handlers={"inventory-v1": plugin_handler})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", timeout=10) as c:
-        task = (await _send_msg(c, "sync room", metadata={"skillHint": "agent-room-v1"})).json()["result"]["task"]
+        task = (await _send_msg(c, "run plugin control", metadata={"skillHint": "inventory-v1"})).json()["result"]["task"]
         final = await _poll_terminal(c, task["id"])
 
     assert model_calls == []
     assert final["status"]["state"] == "TASK_STATE_COMPLETED"
-    assert final["artifacts"][0]["parts"][0]["text"] == "room handled"
+    assert final["artifacts"][0]["parts"][0]["text"] == "plugin handled"
 
 
 @pytest.mark.asyncio
@@ -350,16 +350,16 @@ async def test_matching_a2a_handler_failure_becomes_failed_task_without_model_fa
         yield ("done", "model should not run")
 
     async def broken_handler(context):
-        raise RuntimeError("room handler failed")
+        raise RuntimeError("plugin handler failed")
 
-    app = _build_app(stream, a2a_handlers={"agent-room-v1": broken_handler})
+    app = _build_app(stream, a2a_handlers={"inventory-v1": broken_handler})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", timeout=10) as c:
-        task = (await _send_msg(c, "sync room", metadata={"skillHint": "agent-room-v1"})).json()["result"]["task"]
+        task = (await _send_msg(c, "run plugin control", metadata={"skillHint": "inventory-v1"})).json()["result"]["task"]
         final = await _poll_terminal(c, task["id"], tries=10)
 
     assert model_calls == []
     assert final["status"]["state"] == "TASK_STATE_FAILED"
-    assert "room handler failed" in final["status"]["message"]["parts"][0]["text"]
+    assert "plugin handler failed" in final["status"]["message"]["parts"][0]["text"]
 
 
 @pytest.mark.asyncio

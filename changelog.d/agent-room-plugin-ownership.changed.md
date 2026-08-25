@@ -1,0 +1,1 @@
+- **Optional product UIs stay plugin-owned.** Agent Room now contributes its Rooms rail surface and complete console through the standard sandboxed plugin-view seam; protoAgent core retains only the generic plugin host, so installing or updating Agent Room no longer requires a core build.
