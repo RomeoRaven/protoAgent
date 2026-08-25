@@ -663,7 +663,7 @@ test("⌘K → canonical Room shows mention delivery and blocked cycle state", a
   await expect(headroomReply.getByText("Hermes · blocked · mention cycle blocked", { exact: true })).toBeVisible();
 });
 
-test("Rooms member click inserts an exact mention and explains who will wake", async ({ page }) => {
+test("Rooms profile expands and its wake action inserts an exact mention without posting", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "mention-status-room" });
   await page.goto("/app/", { waitUntil: "load" });
   await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
@@ -671,7 +671,16 @@ test("Rooms member click inserts an exact mention and explains who will wake", a
   const composer = room.getByRole("textbox", { name: "Room message" });
 
   await expect(room.getByText("Post to room only — no agents notified", { exact: true })).toBeVisible();
-  await room.getByRole("button", { name: "Mention Hermes" }).click();
+  await expect(room.getByRole("heading", { name: "Wakeable agents" })).toBeVisible();
+  await expect(room.getByRole("heading", { name: "Other members" })).toBeVisible();
+  const hermesProfile = room.locator(".flr-room__member-profile").filter({ hasText: "Hermes" });
+  await hermesProfile.locator("summary").click();
+  await expect(hermesProfile.getByText("Routes work and coordinates the Room.", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Owner routing", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Profile data grants no additional authority", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Ask the operator for a decision.", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Configured to wake as @Hermes", { exact: true })).toBeVisible();
+  await hermesProfile.getByRole("button", { name: "Wake @Hermes" }).click();
 
   await expect(composer).toHaveValue("@Hermes ");
   await expect(composer).toBeFocused();
@@ -679,8 +688,9 @@ test("Rooms member click inserts an exact mention and explains who will wake", a
   await expect(room.locator(".flr__roster .flr__dot")).toHaveCount(0);
   const pla = room.getByRole("listitem").filter({ hasText: "protoLabs Agent" });
   await expect(pla.getByText("@PLA", { exact: true })).toBeVisible();
-  await expect(pla.getByText("Wakeable as @PLA", { exact: true })).toBeVisible();
-  await expect(room.getByText("Member only", { exact: true })).toHaveCount(1);
+  await expect(pla.getByText("Configured to wake as @PLA", { exact: true })).toBeVisible();
+  const dennis = room.getByRole("listitem").filter({ hasText: "Dennis" });
+  await expect(dennis.locator(".flr-room__member-state")).toHaveText("Not configured for wake-up");
 
   await composer.fill("@all suggestions?");
   await expect(room.getByText("Will notify Hermes, Headroom, protoLabs Agent", { exact: true })).toBeVisible();
@@ -842,9 +852,9 @@ test("Rooms starts fresh non-destructively and archives or restores a room", asy
   await room.getByRole("dialog", { name: "Archive room" }).getByRole("button", { name: "Archive" }).click();
   await expect(room.getByText("Archived room — restore to post", { exact: true })).toBeVisible();
   await expect(room.getByRole("textbox", { name: "Room message" })).toHaveCount(0);
-  await expect(room.getByText("Wakeable as @Hermes", { exact: true })).toBeVisible();
-  await expect(room.getByText("Member only", { exact: true })).toHaveCount(2);
-  await expect(room.getByRole("button", { name: "Mention Hermes" })).toHaveCount(0);
+  const archivedHermes = room.getByRole("listitem").filter({ hasText: "Hermes" });
+  await expect(archivedHermes.locator(".flr-room__member-state")).toHaveText("Room archived — wake-up unavailable");
+  await expect(room.getByRole("button", { name: "Wake @Hermes" })).toHaveCount(0);
 
   await room.getByRole("button", { name: /Switch room, current:/ }).click();
   await room.getByRole("dialog", { name: "Room switcher" }).getByRole("button", { name: "Archived" }).click();
