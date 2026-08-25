@@ -35,7 +35,7 @@ export function getMemberAction(member: AgentRoomMember, roomStatus: string) {
   return {
     canWake: true,
     label: `Wake ${member.mention_token}`,
-    state: `Configured to wake as ${member.mention_token}`,
+    state: `Wake as ${member.mention_token}`,
   };
 }
 
@@ -90,22 +90,48 @@ function MemberProfileRow({
   roomStatus: "active" | "archived";
   onWake: (member: AgentRoomMember) => void;
 }) {
+  const [profileOpen, setProfileOpen] = useState(false);
   const profile = buildMemberProfile(member);
   const action = getMemberAction(member, roomStatus);
   const tokenDiffers = member.mention_token.slice(1).toLocaleLowerCase() !== member.display_name.toLocaleLowerCase();
+  const profileId = `room-member-profile-${member.principal.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+
+  const identity = (
+    <span className="flr__who">
+      <span className="flr__name">{member.display_name}</span>
+      {tokenDiffers && <span className="flr-room__member-token">{member.mention_token}</span>}
+      <span className="flr__meta">{member.role} · {member.host}</span>
+      <span className="flr-room__member-state">{action.state}</span>
+    </span>
+  );
 
   return (
-    <details className="flr-room__member-profile">
-      <summary className="flr__member flr-room__member-summary">
-        <span className="flr__who">
-          <span className="flr__name">{member.display_name}</span>
-          {tokenDiffers && <span className="flr-room__member-token">{member.mention_token}</span>}
-          <span className="flr__meta">{member.role} · {member.host}</span>
-          <span className="flr-room__member-state">{action.state}</span>
-        </span>
-        <span className="flr-room__profile-cue" aria-hidden="true">Profile</span>
-      </summary>
-      <div className="flr-room__profile-body">
+    <div className="flr-room__member-profile">
+      <div className="flr__member flr-room__member-summary">
+        {action.canWake ? (
+          <button
+            className="flr-room__member-action"
+            type="button"
+            aria-label={`Wake ${member.display_name} as ${member.mention_token}`}
+            onClick={() => onWake(member)}
+          >
+            {identity}
+          </button>
+        ) : (
+          <span className="flr-room__member-identity">{identity}</span>
+        )}
+        <button
+          className="flr-room__profile-cue"
+          type="button"
+          aria-expanded={profileOpen}
+          aria-controls={profileId}
+          aria-label={`${profileOpen ? "Hide" : "Show"} ${member.display_name} profile`}
+          onClick={() => setProfileOpen((current) => !current)}
+        >
+          Profile
+        </button>
+      </div>
+      {profileOpen && <div id={profileId} className="flr-room__profile-body" role="region" aria-label={`${member.display_name} profile`}>
         <section className="flr-room__profile-purpose" aria-label="Purpose">
           <span>Purpose</span>
           <p>{profile.purpose}</p>
@@ -132,15 +158,8 @@ function MemberProfileRow({
           <div><dt>Host</dt><dd>{profile.host}</dd></div>
           <div><dt>Policy</dt><dd>{profile.policy.join(" · ")}</dd></div>
         </dl>
-        {action.canWake && action.label ? (
-          <button className="flr-room__wake" type="button" onClick={() => onWake(member)}>
-            {action.label}
-          </button>
-        ) : (
-          <p className="flr-room__wake-state" role="status">{action.state}</p>
-        )}
-      </div>
-    </details>
+      </div>}
+    </div>
   );
 }
 

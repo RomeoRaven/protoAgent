@@ -663,7 +663,7 @@ test("⌘K → canonical Room shows mention delivery and blocked cycle state", a
   await expect(headroomReply.getByText("Hermes · blocked · mention cycle blocked", { exact: true })).toBeVisible();
 });
 
-test("Rooms profile expands and its wake action inserts an exact mention without posting", async ({ page }) => {
+test("Rooms agent name inserts an exact mention and Profile opens details separately", async ({ page }) => {
   await page.setExtraHTTPHeaders({ "x-e2e-agent-room": "mention-status-room" });
   await page.goto("/app/", { waitUntil: "load" });
   await page.locator(".pl-rail").getByRole("button", { name: "Rooms", exact: true }).click();
@@ -674,21 +674,24 @@ test("Rooms profile expands and its wake action inserts an exact mention without
   await expect(room.getByRole("heading", { name: "Wakeable agents" })).toBeVisible();
   await expect(room.getByRole("heading", { name: "Other members" })).toBeVisible();
   const hermesProfile = room.locator(".flr-room__member-profile").filter({ hasText: "Hermes" });
-  await hermesProfile.locator("summary").click();
-  await expect(hermesProfile.getByText("Routes work and coordinates the Room.", { exact: true })).toBeVisible();
-  await expect(hermesProfile.getByText("Owner routing", { exact: true })).toBeVisible();
-  await expect(hermesProfile.getByText("Profile data grants no additional authority", { exact: true })).toBeVisible();
-  await expect(hermesProfile.getByText("Ask the operator for a decision.", { exact: true })).toBeVisible();
-  await expect(hermesProfile.getByText("Configured to wake as @Hermes", { exact: true })).toBeVisible();
-  await hermesProfile.getByRole("button", { name: "Wake @Hermes" }).click();
+  await expect(hermesProfile.getByText("Wake as @Hermes", { exact: true })).toBeVisible();
+  await hermesProfile.getByRole("button", { name: "Wake Hermes as @Hermes" }).click();
 
   await expect(composer).toHaveValue("@Hermes ");
   await expect(composer).toBeFocused();
   await expect(room.getByText("Will notify Hermes", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Routes work and coordinates the Room.", { exact: true })).toHaveCount(0);
+
+  await hermesProfile.getByRole("button", { name: "Show Hermes profile" }).click();
+  await expect(hermesProfile.getByText("Routes work and coordinates the Room.", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Owner routing", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Profile data grants no additional authority", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByText("Ask the operator for a decision.", { exact: true })).toBeVisible();
+  await expect(hermesProfile.getByRole("button", { name: "Hide Hermes profile" })).toBeVisible();
   await expect(room.locator(".flr__roster .flr__dot")).toHaveCount(0);
   const pla = room.getByRole("listitem").filter({ hasText: "protoLabs Agent" });
   await expect(pla.getByText("@PLA", { exact: true })).toBeVisible();
-  await expect(pla.getByText("Configured to wake as @PLA", { exact: true })).toBeVisible();
+  await expect(pla.getByText("Wake as @PLA", { exact: true })).toBeVisible();
   const dennis = room.getByRole("listitem").filter({ hasText: "Dennis" });
   await expect(dennis.locator(".flr-room__member-state")).toHaveText("Not configured for wake-up");
 
