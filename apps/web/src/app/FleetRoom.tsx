@@ -17,7 +17,7 @@ import { ExternalLink, Play, Radio, Send, Square } from "lucide-react";
 import { useToast } from "@protolabsai/ui/overlays";
 import type { PaletteContext, PaletteView } from "@protolabsai/ui/command-palette";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, currentSlug } from "../lib/api";
+import { api, currentSlug } from "../lib/api";
 import { fleetQuery, queryKeys } from "../lib/queries";
 import { errMsg } from "../lib/format";
 import type { FleetAgent } from "../lib/types";
@@ -30,8 +30,6 @@ import {
   useMemberRunning,
 } from "./FleetActivity";
 import "./fleet-room.css";
-import { AgentRoomMode } from "./AgentRoomMode";
-import { AgentRoomControls } from "./AgentRoomControls";
 
 /** The routing slug for a member — the host entry is the reserved "host" (ADR 0042). */
 const slugOf = (a: FleetAgent): string => (a.host ? "host" : a.id);
@@ -48,7 +46,7 @@ function presenceOf(a: FleetAgent): { key: PresenceKey; label: string } {
 
 const clip = (s: string, n = 72): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-function LegacyFleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
+function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
   const { data: fleet } = useQuery(fleetQuery());
   const qc = useQueryClient();
   const toast = useToast();
@@ -369,107 +367,7 @@ function LegacyFleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgen
   );
 }
 
-function FleetRoom({ ctx, onOpenAgent }: { ctx: PaletteContext; onOpenAgent: (slug: string) => void }) {
-  const rooms = useQuery({
-    queryKey: ["agent-room", "rooms", "active"],
-    queryFn: () => api.agentRoomList(),
-    retry: false,
-    staleTime: 15_000,
-  });
-  const canonical = rooms.data?.rooms[0];
-  if (rooms.isLoading) {
-    return (
-      <div className="flr flr-room__unavailable" role="status">
-        <h2>Loading shared room…</h2>
-        <p>Checking for the canonical backend before enabling any message action.</p>
-      </div>
-    );
-  }
-  if (canonical) return <AgentRoomMode room={canonical} />;
-  const emptyBackend = rooms.isSuccess && rooms.data.rooms.length === 0;
-  if (emptyBackend || (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404))) {
-    return (
-      <div className="flr flr-room__unavailable" role="alert">
-        <h2>Room backend unavailable</h2>
-        <p>The shared room could not be loaded. Existing fleet messaging is paused so this text is not broadcast by mistake.</p>
-      </div>
-    );
-  }
-  return <LegacyFleetRoom ctx={ctx} onOpenAgent={onOpenAgent} />;
-}
-
-/** Native rail surface for the canonical shared Room. Unlike the legacy Fleet Room
- * palette fallback, this surface never broadcasts when the Room backend is absent. */
-export function RoomsSurface() {
-  const [selectedRoomId, setSelectedRoomId] = useState(() => globalThis.localStorage?.getItem("protoagent.agent-room.selected") ?? "");
-  const [aroundSequence, setAroundSequence] = useState<number | undefined>();
-  const rooms = useQuery({
-    queryKey: ["agent-room", "rooms", "all"],
-    queryFn: () => api.agentRoomList("all"),
-    retry: false,
-    staleTime: 2_000,
-  });
-  const available = rooms.data?.rooms ?? [];
-  const selected = available.find((room) => room.id === selectedRoomId)
-    ?? available.find((room) => (room.status ?? "active") === "active")
-    ?? available[0];
-  useEffect(() => {
-    if (selected && selected.id !== selectedRoomId) {
-      setSelectedRoomId(selected.id);
-      globalThis.localStorage?.setItem("protoagent.agent-room.selected", selected.id);
-    }
-  }, [selected?.id, selectedRoomId]);
-  const selectRoom = (roomId: string, sequence?: number) => {
-    setSelectedRoomId(roomId);
-    setAroundSequence(sequence);
-    globalThis.localStorage?.setItem("protoagent.agent-room.selected", roomId);
-  };
-  if (rooms.isLoading) {
-    return (
-      <div className="flr flr-room__unavailable" role="status">
-        <h2>Loading Rooms…</h2>
-        <p>Checking for the canonical Agent Room backend.</p>
-      </div>
-    );
-  }
-  if (selected) return (
-    <AgentRoomMode
-      room={selected}
-      fullHeight
-      aroundSequence={aroundSequence}
-      onReturnLatest={() => setAroundSequence(undefined)}
-      controls={selected.status != null && !selected.client_mode ? <AgentRoomControls rooms={available} room={selected} onSelect={selectRoom} /> : undefined}
-    />
-  );
-  return (
-    <div className="flr flr-room__unavailable" role="alert">
-      <h2>Rooms unavailable</h2>
-      <p>Install and enable an Agent Room backend to use this shared conversation surface.</p>
-    </div>
-  );
-}
-
 function FleetRoomFooter() {
-  const rooms = useQuery({
-    queryKey: ["agent-room", "rooms", "active"],
-    queryFn: () => api.agentRoomList(),
-    retry: false,
-    staleTime: 15_000,
-  });
-  if (rooms.isLoading) return <span className="flr__hint">Checking shared room…</span>;
-  if (rooms.data?.rooms[0]) {
-    return (
-      <span className="flr__hint">
-        <span>
-          <kbd className="flr__kbd">↵</kbd> post to room · plain text wakes no agent
-        </span>
-      </span>
-    );
-  }
-  const emptyBackend = rooms.isSuccess && rooms.data.rooms.length === 0;
-  if (emptyBackend || (rooms.error && (!(rooms.error instanceof ApiError) || rooms.error.status !== 404))) {
-    return <span className="flr__hint">Shared room unavailable · messaging paused</span>;
-  }
   return (
     <span className="flr__hint">
       <span>

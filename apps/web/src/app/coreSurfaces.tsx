@@ -2,7 +2,7 @@
 // desktop quick-launcher (ADR 0057) build their command lists from the SAME source —
 // add a core surface here and it shows up in both the rail and ⌘K / the launcher.
 import type { ReactNode } from "react";
-import { BookMarked, Brain, LayoutDashboard, MessageSquare, MessagesSquare } from "lucide-react";
+import { BookMarked, Brain, LayoutDashboard, MessageSquare } from "lucide-react";
 
 export type CoreSurface = { id: string; label: string; icon: ReactNode };
 
@@ -10,7 +10,7 @@ export type CoreSurface = { id: string; label: string; icon: ReactNode };
 // pinned + always mounted), but is a valid palette/launcher "go to" target.
 export const CORE_SURFACES: CoreSurface[] = [
   { id: "chat", label: "Chat", icon: <MessageSquare size={18} /> },
-  { id: "rooms", label: "Rooms", icon: <MessagesSquare size={18} /> },
+
   // The Work hub (2026-06) folds the former Tasks / Goals / Schedule rail surfaces into one
   // right-rail surface (Overview + Goals/Tasks/Schedule tabs). Activity is a utility-bar
   // widget; "agent" folded into Settings ▸ Workspace; "plugins" into Settings ▸ Plugins.
