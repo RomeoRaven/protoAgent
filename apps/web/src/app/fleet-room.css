@@ -36,12 +36,16 @@
   height: 100%;
 }
 .flr--agent-room .flr__cols {
-  grid-template-columns: minmax(260px, 32%) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 25%) minmax(0, 1fr);
 }
 .flr--agent-room .flr__col {
   min-width: 0;
 }
 @container (max-width: 640px) {
+  .flr--agent-room .flr__roster .flr__count,
+  .flr--agent-room .flr__roster .flr__meta {
+    display: none;
+  }
   .flr--agent-room .flr__cols {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(150px, 42%) minmax(0, 1fr);
@@ -208,7 +212,7 @@
 }
 .flr-room__profile-columns {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 10px 0;
 }

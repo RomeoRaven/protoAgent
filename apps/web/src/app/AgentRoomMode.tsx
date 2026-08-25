@@ -329,14 +329,14 @@ export function AgentRoomMode({
             <h2>Members</h2>
             <span className="flr__count">{members.data?.result.members.length ?? 0}</span>
           </div>
-          <div className="flr__list" aria-label="Room members">
+          <div className="flr__list" role="list" aria-label="Room members">
             <section className="flr-room__member-group" aria-labelledby="wakeable-agent-members">
               <h3 id="wakeable-agent-members">
                 <span>Wakeable agents</span>
                 <span>{memberGroups.wakeableAgents.length}</span>
               </h3>
               {memberGroups.wakeableAgents.length ? (
-                <div role="list">
+                <div role="presentation">
                   {memberGroups.wakeableAgents.map((member) => (
                     <div key={member.principal} role="listitem">
                       <MemberProfileRow member={member} roomStatus={roomStatus} onWake={insertMemberMention} />
@@ -351,7 +351,7 @@ export function AgentRoomMode({
                 <span>{memberGroups.otherMembers.length}</span>
               </h3>
               {memberGroups.otherMembers.length ? (
-                <div role="list">
+                <div role="presentation">
                   {memberGroups.otherMembers.map((member) => (
                     <div key={member.principal} role="listitem">
                       <MemberProfileRow member={member} roomStatus={roomStatus} onWake={insertMemberMention} />
